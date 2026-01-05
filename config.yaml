@@ -7,7 +7,7 @@ data:
   images_path: "datasets/coco"
   # Caption path: Using Karpathy JSON structure usually
   captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
-  batch_size: 128
+  batch_size: 512
   num_workers: 8
   max_length: 77  # Max token length for CLIP (CLIP's default context length)
 
@@ -21,7 +21,7 @@ model:
   dropout: 0.1           # Dropout for additional projection heads
   
   # Unfreezing Configuration (ViT-L/14-336 has 24 blocks: 0-23)
-  unfreeze_vision_layers: 2   # Unfreeze last N vision transformer blocks (0 = frozen)
+  unfreeze_vision_layers: 4   # Unfreeze last N vision transformer blocks (0 = frozen)
   unfreeze_strategy: "full"   # Options: "full", "attention", "mlp", "layernorm", "bias"
 
 # ==========================================
@@ -86,7 +86,7 @@ debug:
 # ==========================================
 distillation:
   enabled: true
-  top_k: 25                # Number of nearest neighbors for soft distribution (increased from 20)
-  alpha: 0.1               # Distillation loss weight (to be used in loss later)
-  temperature: 2.0         # Softmax temperature for soft labels (to be used in loss later)
+  top_k: 15                # Number of nearest neighbors for soft distribution (increased from 20)
+  alpha: 0.35               # Distillation loss weight (to be used in loss later)
+  temperature: 2.5         # Softmax temperature for soft labels (to be used in loss later)
   mining_targets_path: "datasets/coco/mining_targets.pt"
