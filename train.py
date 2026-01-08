@@ -5,7 +5,7 @@ import logging
 import wandb
 import sys
 import os
-from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
+from transformers import CLIPTokenizer, get_cosine_schedule_with_warmup
 
 from src.data import get_dataloader
 from src.model import DualEncoder
@@ -52,37 +52,54 @@ def setup_logging(save_dir):
 
 def get_optimizer(model, config):
     """
-    Factory function to create optimizer with 3 parameter groups.
+    Factory function to create optimizer with parameter groups for CLIP.
+    
+    CLIP Parameter Groups:
+    1. Backbone (vision_model, text_model) - Very low LR or frozen (0)
+    2. CLIP Projections (visual_projection, text_projection) - Low LR
+    3. Custom Projection Heads (image_proj, text_proj) - Higher LR
     """
     opt_name = config['training']['optimizer'].lower()
     wd = float(config['training']['weight_decay'])
     
-
-    lr_img = float(config['training']['image_encoder_lr'])
-    lr_txt = float(config['training']['text_encoder_lr'])
-    lr_head = float(config['training']['head_lr'])
+    # Learning Rates from Config
+    lr_clip_proj = float(config['training'].get('clip_projection_lr', 1e-5))
+    lr_head = float(config['training'].get('head_lr', 1e-3))
+    # Optional: If backbone is unfrozen later
+    lr_backbone = float(config['training'].get('backbone_lr', 1e-6))
     
-    param_optimizer = list(model.named_parameters())
+    # Get only trainable (requires_grad=True) parameters
+    trainable_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
     
-
+    # Define Groups
+    clip_proj_params = []   # CLIP's original projections
+    custom_head_params = [] # Your custom Linear layers (if any)
+    backbone_params = []    # If backbone is unfrozen, falls here
+    
+    for n, p in trainable_params:
+        # 1. CLIP Projection Layers (visual_projection, text_projection)
+        if 'visual_projection' in n or 'text_projection' in n:
+            clip_proj_params.append(p)
+        # 2. Custom Heads (image_proj, text_proj - defined in model.py)
+        elif 'image_proj' in n or 'text_proj' in n:
+            custom_head_params.append(p)
+        # 3. Backbone (everything else)
+        else:
+            backbone_params.append(p)
+            
+    # Build Optimizer Groups
     optimizer_grouped_parameters = [
-        # 1. Image Backbone (ResNet) -> Low LR
-        {
-            'params': [p for n, p in param_optimizer if 'image_backbone' in n and p.requires_grad],
-            'lr': lr_img
-        },
-        # 2. Text Backbone (BERT) -> Low LR
-        {
-            'params': [p for n, p in param_optimizer if 'text_backbone' in n and p.requires_grad],
-            'lr': lr_txt
-        },
-        # 3. Heads (Projections) -> High LR
-        {
-            'params': [p for n, p in param_optimizer if 'backbone' not in n and p.requires_grad],
-            'lr': lr_head
-        }
+        {'params': clip_proj_params, 'lr': lr_clip_proj},    # Group 1: CLIP Projections
+        {'params': custom_head_params, 'lr': lr_head},       # Group 2: Custom Heads
+        {'params': backbone_params, 'lr': lr_backbone}       # Group 3: Backbone (if unfrozen)
     ]
     
+    # Log info (useful for debugging)
+    print(f"Optimizer Groups Created:")
+    print(f"  - CLIP Projections: {len(clip_proj_params)} tensors (LR: {lr_clip_proj})")
+    print(f"  - Custom Heads:     {len(custom_head_params)} tensors (LR: {lr_head})")
+    print(f"  - Backbone/Other:   {len(backbone_params)} tensors (LR: {lr_backbone})")
+
     if opt_name == 'adamw':
         return torch.optim.AdamW(optimizer_grouped_parameters, weight_decay=wd)
     elif opt_name == 'adam':
@@ -188,7 +205,13 @@ def main():
 
     # 5. Data Loaders
     logger.info("Initializing Data Loaders...")
-    tokenizer = AutoTokenizer.from_pretrained(config['model']['text_model_name'])
+    
+    # CLIP Tokenizer (different from DistilBERT!)
+    clip_model_name = config['model']['image_model_name']
+    if not clip_model_name:
+        raise ValueError("config['model']['image_model_name'] must be specified in config file.")
+    logger.info(f"Loading CLIP Tokenizer from: {clip_model_name}")
+    tokenizer = CLIPTokenizer.from_pretrained(clip_model_name)
     
     train_loader = get_dataloader(config, tokenizer, split='train')
     

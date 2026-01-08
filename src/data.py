@@ -13,6 +13,7 @@ import os
 import logging
 from PIL import Image
 from torchvision import transforms
+from torchvision.transforms import InterpolationMode
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -37,22 +38,29 @@ class CocoImageDataset(Dataset):
         
         # Define Transforms
         if transform is None:
-            # The values are from the ImageNet dataset
-            normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            # CLIP normalization values (different from ImageNet!)
+            # Source: https://github.com/openai/CLIP/blob/main/clip/clip.py
+            normalize = transforms.Normalize(
+                mean=[0.48145466, 0.4578275, 0.40821073],
+                std=[0.26862954, 0.26130258, 0.27577711]
+            )
             
             if split == 'train':
                 self.transform = transforms.Compose([
                     # The goal is to obtain scale invariance
-                    transforms.RandomResizedCrop(224),
+                    transforms.RandomResizedCrop(336),
                     transforms.RandomHorizontalFlip(),
                     transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
                     transforms.ToTensor(),
                     normalize,
                 ])
             else:
+                # CLIP-style preprocessing for val/test @ 336px
+                # - Resize short edge to 336 with BICUBIC (CLIP's native interpolation)
+                # - CenterCrop to 336x336 (crop longer edge)
                 self.transform = transforms.Compose([
-                    transforms.Resize(256),
-                    transforms.CenterCrop(224),
+                    transforms.Resize(336, interpolation=InterpolationMode.BICUBIC),
+                    transforms.CenterCrop(336),
                     transforms.ToTensor(),
                     normalize,
                 ])
@@ -83,8 +91,18 @@ class CocoImageDataset(Dataset):
                 else:
                     img_id = int(img['cocoid'])
                 
-                # Add all 5 captions for this image
-                for sent in img['sentences']:
+                # Limit to exactly 5 captions per image to match evaluation assumptions
+                # MS-COCO can have 6-7 captions, but we need exactly 5 for consistent evaluation
+                sentences = img['sentences'][:5]
+                
+                if len(sentences) < 5:
+                    logger.warning(
+                        f"Image {img_id} has only {len(sentences)} captions (expected 5). "
+                        "This image will have fewer samples than expected."
+                    )
+                
+                # Add exactly 5 captions (or fewer if image has < 5 captions)
+                for sent in sentences:
                     self.samples.append({
                         'image_id': img_id,
                         'caption': sent['raw'],
