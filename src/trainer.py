@@ -3,10 +3,26 @@ import torch.nn.functional as F
 import logging
 import wandb
 import os
+import time
 from .utils import AverageMeter, compute_recall_at_k
 from .loss import DistillationLoss
 
 logger = logging.getLogger(__name__)
+
+
+def compute_grad_norm(model):
+    """
+    Compute the total L2 gradient norm across all parameters.
+    Useful for monitoring training stability and detecting gradient explosions.
+    """
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+    total_norm = total_norm ** 0.5
+    return total_norm
+
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device, use_wandb=True):
@@ -43,6 +59,7 @@ class Trainer:
         
         distillation_config = config.get('distillation', {})
         if distillation_config.get('enabled'):
+            self.use_distillation = True
             self.distill_alpha_start = distillation_config.get('alpha')
             distill_temp = distillation_config.get('temperature')
             
@@ -115,8 +132,10 @@ class Trainer:
         losses = AverageMeter()
         losses_clip = AverageMeter()
         losses_distill = AverageMeter()
+        batch_time = AverageMeter()
         
         num_batches = len(self.train_loader)
+        batch_size = self.config['data']['batch_size']
         
         # Check if we should use CLIP's native loss (with learnable temperature)
         use_clip_loss = self.config['loss'].get('use_clip_loss', False)
@@ -126,6 +145,10 @@ class Trainer:
         
         if self.use_distillation:
             logger.info(f"Epoch {epoch+1}: Distillation alpha = {current_alpha:.4f}")
+        
+        # Initialize grad_norm for logging
+        grad_norm = 0.0
+        end_time = time.time()
         
         for step, batch in enumerate(self.train_loader):
             images = batch['image'].to(self.device)
@@ -147,7 +170,7 @@ class Trainer:
             # ============================================================
             if self.use_amp:
                 # Use autocast for forward pass
-                with torch.amp.autocast():
+                with torch.amp.autocast(device_type='cuda'):
                     # Option A: Use CLIP's Native Loss (Learnable Temperature)
                     if use_clip_loss:
                         loss_clip, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
@@ -196,8 +219,14 @@ class Trainer:
                     else:
                         loss = loss_clip
                 
+                # Backward with gradient scaling
                 self.optimizer.zero_grad()
                 self.scaler.scale(loss).backward()
+                
+                # Unscale gradients to compute true grad norm
+                self.scaler.unscale_(self.optimizer)
+                grad_norm = compute_grad_norm(self.model)
+                
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -248,37 +277,74 @@ class Trainer:
                 else:
                     loss = loss_clip
                 
+                # Backward
                 self.optimizer.zero_grad()
                 loss.backward()
+                
+                # Compute grad norm before optimizer step
+                grad_norm = compute_grad_norm(self.model)
+                
                 self.optimizer.step()
             
             self.scheduler.step()
             
+            # Update metrics
             losses.update(loss.item(), images.size(0))
             losses_clip.update(loss_clip.item(), images.size(0))
             if self.use_distillation:
                 losses_distill.update(loss_distill.item(), images.size(0))
+            
+            # Measure batch time
+            batch_time.update(time.time() - end_time)
+            end_time = time.time()
 
             if step % self.log_freq == 0:
-                current_lr = self.optimizer.param_groups[0]['lr']
+                # Calculate fractional epoch for smooth WandB charts
+                fractional_epoch = epoch + (step / num_batches)
+                
+                # Calculate throughput (samples per second)
+                samples_per_sec = batch_size / batch_time.val if batch_time.val > 0 else 0
+                
+                # Get all learning rates from different param groups
+                lr_dict = {}
+                for i, param_group in enumerate(self.optimizer.param_groups):
+                    group_name = param_group.get('name', f'group_{i}')
+                    lr_dict[f"train/lr_{group_name}"] = param_group['lr']
+                
+                # Primary LR for console logging
+                primary_lr = self.optimizer.param_groups[0]['lr']
                 
                 if self.use_distillation:
                     logger.info(
                         f"Epoch {epoch+1} [{step}/{num_batches}] "
                         f"Loss: {losses.avg:.4f} (CLIP: {losses_clip.avg:.4f}, Distill: {losses_distill.avg:.4f}) | "
-                        f"α: {current_alpha:.4f} | LR: {current_lr:.6f}"
+                        f"α: {current_alpha:.4f} | LR: {primary_lr:.6f} | "
+                        f"GradNorm: {grad_norm:.2f} | Speed: {samples_per_sec:.1f} samples/s"
                     )
                 else:
-                    logger.info(f"Epoch {epoch+1} [{step}/{num_batches}] Loss: {losses.avg:.4f} | LR: {current_lr:.6f}")
+                    logger.info(
+                        f"Epoch {epoch+1} [{step}/{num_batches}] "
+                        f"Loss: {losses.avg:.4f} | LR: {primary_lr:.6f} | "
+                        f"GradNorm: {grad_norm:.2f} | Speed: {samples_per_sec:.1f} samples/s"
+                    )
                 
                 if self.use_wandb:
                     try:
+                        # Build comprehensive log dict
                         log_dict = {
                             "train/loss": losses.val,
                             "train/loss_clip": losses_clip.val,
-                            "train/epoch": epoch,
-                            "train/lr": current_lr
+                            "train/epoch": fractional_epoch,
+                            "train/step": step,
+                            "train/grad_norm": grad_norm,
+                            "train/samples_per_sec": samples_per_sec,
+                            "train/batch_time": batch_time.val,
                         }
+                        
+                        # Add all learning rates
+                        log_dict.update(lr_dict)
+                        
+                        # Add distillation metrics if enabled
                         if self.use_distillation:
                             log_dict["train/loss_distill"] = losses_distill.val
                             log_dict["train/current_alpha"] = current_alpha
