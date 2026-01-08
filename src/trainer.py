@@ -25,7 +25,7 @@ class Trainer:
         self.best_r1 = 0.0
         
         # Initialize Mixed Precision Training (AMP)
-        self.use_amp = torch.cuda.is_available()  # Only use AMP on CUDA devices
+        self.use_amp = torch.cuda.is_available()
         if self.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
             logger.info("Mixed Precision Training (AMP) enabled.")
@@ -34,27 +34,50 @@ class Trainer:
             logger.info("Mixed Precision Training (AMP) disabled (CPU mode).")
         
         # ---------------------------------------------------------
-        # Knowledge Distillation Setup
+        # Knowledge Distillation Setup with Linear Decay
         # ---------------------------------------------------------
         self.use_distillation = False
         self.distill_loss_fn = None
-        self.distill_alpha = 0.0
+        self.distill_alpha_start = 0.0
+        self.total_epochs = config['training']['epochs']
         
         distillation_config = config.get('distillation', {})
-        if distillation_config.get('enabled', False):
-            self.use_distillation = True
-            self.distill_alpha = distillation_config.get('alpha', 0.5)
-            distill_temp = distillation_config.get('temperature', 1.0)
+        if distillation_config.get('enabled'):
+            self.distill_alpha_start = distillation_config.get('alpha')
+            distill_temp = distillation_config.get('temperature')
             
-            self.distill_loss_fn = DistillationLoss(
-                alpha=self.distill_alpha,
-                temperature=distill_temp
+            self.distill_loss_fn = DistillationLoss(temperature=distill_temp)
+            
+            logger.info(
+                f"Knowledge Distillation enabled: "
+                f"alpha_start={self.distill_alpha_start} (linear decay to 0), "
+                f"temperature={distill_temp}"
             )
-            
-            logger.info(f"Knowledge Distillation enabled: alpha={self.distill_alpha}, temperature={distill_temp}")
         
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+    def _compute_current_alpha(self, epoch: int) -> float:
+        """
+        Compute current distillation alpha using linear decay.
+        
+        Formula: alpha = alpha_start * (1 - epoch / (total_epochs - 1))
+        
+        - At epoch 0: alpha = alpha_start
+        - At last epoch (total_epochs - 1): alpha = 0
+        
+        Args:
+            epoch: Current epoch index (0-based)
+        
+        Returns:
+            Current alpha value
+        """
+        if self.total_epochs <= 1:
+            return self.distill_alpha_start
+        
+        decay_factor = 1.0 - (epoch / (self.total_epochs - 1))
+        current_alpha = self.distill_alpha_start * max(0.0, decay_factor)
+        return current_alpha
 
     def load_checkpoint(self, checkpoint_path):
         """
@@ -74,9 +97,7 @@ class Trainer:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             logger.info("GradScaler state loaded from checkpoint.")
         
-        # 2. Load State Info (STRICT)
-        # Eğer bu anahtarlar yoksa kod burada KeyError verip duracak.
-        # Bu sayede "bozuk checkpoint" ile yanlışlıkla en baştan başlamazsın.
+        # 2. Load State Info
         if 'best_r1' not in checkpoint or 'epoch' not in checkpoint:
             logger.error(f"Checkpoint file {checkpoint_path} is missing critical keys ('epoch' or 'best_r1').")
             logger.error("Cannot resume training safely. Aborting.")
@@ -100,6 +121,12 @@ class Trainer:
         # Check if we should use CLIP's native loss (with learnable temperature)
         use_clip_loss = self.config['loss'].get('use_clip_loss', False)
         
+        # Compute current alpha with linear decay
+        current_alpha = self._compute_current_alpha(epoch) if self.use_distillation else 0.0
+        
+        if self.use_distillation:
+            logger.info(f"Epoch {epoch+1}: Distillation alpha = {current_alpha:.4f}")
+        
         for step, batch in enumerate(self.train_loader):
             images = batch['image'].to(self.device)
             input_ids = batch['input_ids'].to(self.device)
@@ -120,21 +147,23 @@ class Trainer:
             # ============================================================
             if self.use_amp:
                 # Use autocast for forward pass
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast():
                     # Option A: Use CLIP's Native Loss (Learnable Temperature)
                     if use_clip_loss:
-                        loss_clip, logits_per_image, logits_per_text = self.model.forward_with_clip_loss(
-                            images, input_ids, attention_mask
-                        )
-                    
-                    # Option B: Use Custom Loss (Fixed Temperature + Intra-Modal)
+                        loss_clip, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
+                        # Get text embeddings for distillation
+                        if self.use_distillation and soft_target_indices is not None:
+                            txt_embeds = self.model.clip.get_text_features(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask
+                            )
+                            txt_embeds = F.normalize(txt_embeds, p=2, dim=1)
                     else:
                         images_aug = batch['image_aug'].to(self.device)
                         
                         # Forward (Original Views)
                         img_embeds, txt_embeds = self.model(images, input_ids, attention_mask)
                         
-                        # Conditional Forward (Augmented Views for Intra-Modal Loss)
                         img_aug_embeds = None
                         txt_aug_embeds = None
 
@@ -147,32 +176,12 @@ class Trainer:
                         if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
                             _, txt_aug_embeds = self.model(images, input_ids, attention_mask)
                         
-                        # Loss Calculation
                         loss_clip = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
-                        
-                        # For distillation, compute text-to-text logits
-                        if use_clip_loss:
-                            logits_per_text = logits_per_text  # Already computed
-                        else:
-                            logits_per_text = txt_embeds @ txt_embeds.t()
                     
-                    # ---------------------------------------------------------
                     # Knowledge Distillation Loss
-                    # ---------------------------------------------------------
                     loss_distill = torch.tensor(0.0, device=self.device)
                     
-                    if self.use_distillation and soft_target_indices is not None:
-                        # Compute text-to-text similarity logits for distillation
-                        if use_clip_loss:
-                            # For CLIP loss mode, we need text embeddings for distillation
-                            # Get them separately
-                            txt_embeds = self.model.clip.get_text_features(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask
-                            )
-                            txt_embeds = F.normalize(txt_embeds, p=2, dim=1)
-                        
-                        # Text-to-text similarity matrix
+                    if self.use_distillation and soft_target_indices is not None and current_alpha > 0:
                         student_text_logits = txt_embeds @ txt_embeds.t()
                         
                         loss_distill = self.distill_loss_fn(
@@ -182,25 +191,25 @@ class Trainer:
                             teacher_scores=soft_target_scores
                         )
                         
-                        # Combine losses: (1 - alpha) * clip + alpha * distill
-                        loss = (1 - self.distill_alpha) * loss_clip + self.distill_alpha * loss_distill
+                        # Combine losses with dynamic alpha
+                        loss = (1 - current_alpha) * loss_clip + current_alpha * loss_distill
                     else:
                         loss = loss_clip
                 
-                # Backward with gradient scaling
                 self.optimizer.zero_grad()
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                # Standard precision training (CPU or AMP disabled)
-                # Option A: Use CLIP's Native Loss (Learnable Temperature)
+                # Standard precision training
                 if use_clip_loss:
-                    loss_clip, logits_per_image, logits_per_text = self.model.forward_with_clip_loss(
-                        images, input_ids, attention_mask
-                    )
-                
-                # Option B: Use Custom Loss (Fixed Temperature + Intra-Modal)
+                    loss_clip, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
+                    if self.use_distillation and soft_target_indices is not None:
+                        txt_embeds = self.model.clip.get_text_features(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask
+                        )
+                        txt_embeds = F.normalize(txt_embeds, p=2, dim=1)
                 else:
                     images_aug = batch['image_aug'].to(self.device)
                     
@@ -220,24 +229,12 @@ class Trainer:
                     if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
                         _, txt_aug_embeds = self.model(images, input_ids, attention_mask)
                     
-                    # Loss Calculation
                     loss_clip = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
                 
-                # ---------------------------------------------------------
-                # Knowledge Distillation Loss (Non-AMP path)
-                # ---------------------------------------------------------
+                # Knowledge Distillation Loss (Non-AMP)
                 loss_distill = torch.tensor(0.0, device=self.device)
                 
-                if self.use_distillation and soft_target_indices is not None:
-                    # Compute text-to-text similarity logits for distillation
-                    if use_clip_loss:
-                        txt_embeds = self.model.clip.get_text_features(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask
-                        )
-                        txt_embeds = F.normalize(txt_embeds, p=2, dim=1)
-                    
-                    # Text-to-text similarity matrix
+                if self.use_distillation and soft_target_indices is not None and current_alpha > 0:
                     student_text_logits = txt_embeds @ txt_embeds.t()
                     
                     loss_distill = self.distill_loss_fn(
@@ -247,12 +244,10 @@ class Trainer:
                         teacher_scores=soft_target_scores
                     )
                     
-                    # Combine losses
-                    loss = (1 - self.distill_alpha) * loss_clip + self.distill_alpha * loss_distill
+                    loss = (1 - current_alpha) * loss_clip + current_alpha * loss_distill
                 else:
                     loss = loss_clip
                 
-                # Backward
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
@@ -263,7 +258,6 @@ class Trainer:
             losses_clip.update(loss_clip.item(), images.size(0))
             if self.use_distillation:
                 losses_distill.update(loss_distill.item(), images.size(0))
-            
 
             if step % self.log_freq == 0:
                 current_lr = self.optimizer.param_groups[0]['lr']
@@ -272,7 +266,7 @@ class Trainer:
                     logger.info(
                         f"Epoch {epoch+1} [{step}/{num_batches}] "
                         f"Loss: {losses.avg:.4f} (CLIP: {losses_clip.avg:.4f}, Distill: {losses_distill.avg:.4f}) | "
-                        f"LR: {current_lr:.6f}"
+                        f"α: {current_alpha:.4f} | LR: {current_lr:.6f}"
                     )
                 else:
                     logger.info(f"Epoch {epoch+1} [{step}/{num_batches}] Loss: {losses.avg:.4f} | LR: {current_lr:.6f}")
@@ -280,13 +274,14 @@ class Trainer:
                 if self.use_wandb:
                     try:
                         log_dict = {
-                            "train/loss": losses.val, 
+                            "train/loss": losses.val,
                             "train/loss_clip": losses_clip.val,
                             "train/epoch": epoch,
                             "train/lr": current_lr
                         }
                         if self.use_distillation:
                             log_dict["train/loss_distill"] = losses_distill.val
+                            log_dict["train/current_alpha"] = current_alpha
                         
                         wandb.log(log_dict)
                     except Exception as e:

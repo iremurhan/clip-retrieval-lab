@@ -37,7 +37,7 @@ class CocoImageDataset(Dataset):
             images_root_path (str): Root directory containing image folders (train2014/val2014).
             captions_path (str): Path to the Karpathy JSON file.
             tokenizer: HuggingFace tokenizer instance.
-            max_length (int): Maximum token sequence length.
+            max_length (int): Maximum token sequence length (CLIP default: 77).
             split (str): 'train', 'val', or 'test'.
             transform (callable, optional): Base transform to be applied to the image.
             intra_modal_aug (bool): If True, generates a second augmented view of the image for intra-modal loss.
@@ -240,9 +240,9 @@ def get_dataloader(config, tokenizer, split='train'):
         images_root_path=images_root,
         captions_path=config['data']['captions_path'],
         tokenizer=tokenizer,
-        max_length=config['data'].get('max_length', 50),
+        max_length=config['data'].get('max_length', 77),
         split=split,
-        transform=None,  # Sınıf içinde default transformları kullanacak (Train/Val ayrımı orada var)
+        transform=None,
         intra_modal_aug=intra_modal_aug,
         mining_targets_path=mining_targets_path,
         distill_top_k=distill_top_k
