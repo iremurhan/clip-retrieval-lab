@@ -63,14 +63,12 @@ class DistillationLoss(nn.Module):
         - Self is always the strongest match (diagonal = 1.0)
     """
     
-    def __init__(self, alpha: float = 0.5, temperature: float = 1.0):
+    def __init__(self, temperature: float = 1.0):
         """
         Args:
-            alpha: Weight for distillation loss (final_loss = (1-alpha)*clip_loss + alpha*distill_loss)
             temperature: Softmax temperature for softening distributions
         """
         super().__init__()
-        self.alpha = alpha
         self.temperature = temperature
         self.kl_loss = nn.KLDivLoss(reduction='batchmean')
     
@@ -95,15 +93,11 @@ class DistillationLoss(nn.Module):
         """
         batch_size = student_logits.shape[0]
         device = student_logits.device
-        K = teacher_indices.shape[1]
         
         # ---------------------------------------------------------
         # Step 1: Build mapping from Global Index -> Local Batch Position
         # ---------------------------------------------------------
         # Create a lookup: global_idx -> batch_pos (or -1 if not in batch)
-        # For efficiency, we use a tensor-based approach
-        
-        # Get max global index we might encounter
         max_global_idx = max(batch_indices.max().item(), teacher_indices.max().item()) + 1
         
         # Create mapping tensor: -1 means "not in batch"
@@ -124,7 +118,6 @@ class DistillationLoss(nn.Module):
             neighbor_scores = teacher_scores[i]            # [K]
             
             # Map global indices to local batch positions
-            # Clamp to valid range for indexing (out-of-range will map to -1 anyway)
             clamped_indices = neighbor_global_indices.clamp(0, max_global_idx - 1)
             local_positions = global_to_local[clamped_indices]  # [K]
             
@@ -139,13 +132,11 @@ class DistillationLoss(nn.Module):
                 target_probs[i, valid_local_pos] = valid_scores
             
             # Self-loop: Self is ALWAYS the best match (score = 1.0)
-            # This ensures the model learns that identical text -> identical text
             target_probs[i, i] = 1.0
         
         # ---------------------------------------------------------
         # Step 3: Normalize target probabilities (row-wise sum to 1)
         # ---------------------------------------------------------
-        # Use L1 normalization (sum normalization)
         row_sums = target_probs.sum(dim=1, keepdim=True)
         row_sums = row_sums.clamp(min=1e-8)  # Avoid division by zero
         target_probs = target_probs / row_sums
@@ -153,13 +144,9 @@ class DistillationLoss(nn.Module):
         # ---------------------------------------------------------
         # Step 4: Compute KL Divergence Loss
         # ---------------------------------------------------------
-        # Student: log_softmax(logits / T)
-        # Teacher: target_probs (already normalized)
-        
         student_log_probs = F.log_softmax(student_logits / self.temperature, dim=1)
         
         # KL(P || Q) where P=target_probs, Q=student
-        # PyTorch KLDivLoss expects (log_probs, probs) -> KL(probs || exp(log_probs))
         loss = self.kl_loss(student_log_probs, target_probs)
         
         # Scale by T^2 to preserve gradient magnitude (standard KD practice)
