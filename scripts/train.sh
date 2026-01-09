@@ -1,22 +1,15 @@
 #!/bin/bash
-#
-# Usage: sbatch --job-name="EXP_NAME" scripts/train.slurm "EXP_NAME"
-#
-#SBATCH --output=/users/beyza.urhan/experiments/runs/%j/slurm.log
-#SBATCH --error=/users/beyza.urhan/experiments/runs/%j/err.log
-#SBATCH --time=7-00:00:00
-#SBATCH --gpus=1
-#SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=40G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.4
+#SBATCH -p normal
+#SBATCH --time=230:59:59
+#SBATCH --account=root
+#SBATCH --job-name=irem
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --output=/home/baytas/Documents/Irem/tez_v2_clean/scripts/Outputs/out-%j.out
+#SBATCH --error=/home/baytas/Documents/Irem/tez_v2_clean/scripts/Errors/err-%j.err
 
-# ------------------------------------------------------------------
-# PATH MAPPING
-# ------------------------------------------------------------------
-#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
 
-# Pass W&B Env vars
-#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE
+module load Python/3.12.0 cuda/10.1
 
 set -euo pipefail
 
@@ -25,8 +18,9 @@ set -euo pipefail
 # ------------------------------------------------------------------
 EXP_NAME="${1:-}"
 
+
 # 1. Job Directory (ALWAYS use Job ID only - Robust & Simple)
-JOB_DIR="/output/${SLURM_JOB_ID}"
+JOB_DIR=${SLURM_JOB_ID}
 
 # Subdirectories
 LOGS_DIR="$JOB_DIR/logs"
@@ -46,6 +40,8 @@ echo "=========================================="
 # W&B SETUP
 # ------------------------------------------------------------------
 export WANDB_DIR="$LOGS_DIR"
+
+WANDB_API_KEY=d5a57da73f0911bf27eb
 
 # Load W&B Env file if mounted
 if [ -f /env/wandb.env ]; then
@@ -74,8 +70,8 @@ echo "Job ID: ${SLURM_JOB_ID}" > "$META_DIR/experiment_metadata.txt"
 echo "Experiment: ${EXP_NAME:-}" >> "$META_DIR/experiment_metadata.txt"
 echo "Date: $(date)" >> "$META_DIR/experiment_metadata.txt"
 
-if [ -f /workspace/config.yaml ]; then
-    cp /workspace/config.yaml "$META_DIR/config_saved.yaml"
+if [ -f /home/baytas/Documents/Irem/tez_v2_clean/config.yaml ]; then
+    cp /home/baytas/Documents/Irem/tez_v2_clean/config.yaml "$META_DIR/config_saved.yaml"
 fi
 
 # ------------------------------------------------------------------
@@ -83,16 +79,18 @@ fi
 # ------------------------------------------------------------------
 echo "Starting training..."
 
-cd /workspace
+cd "/home/baytas/Documents/Irem/tez_v2_clean"
 
 # Run training
 # Note: output.log is inside the ID folder, preventing any mix-up
-python3 -u train.py \
-    --config config.yaml \
-    --override \
-        debug.debug_mode=false \
-        logging.checkpoint_dir="$CKPT_DIR" \
-    2>&1 | tee "$LOGS_DIR/training_output.log"
+python3.12 -u train.py \
+    --config config.yaml 
+
+#    --override \
+#        debug.debug_mode=false \
+#        logging.checkpoint_dir="$CKPT_DIR" \
+#    2>&1 | tee "$LOGS_DIR/training_output.log"
+#
 
 TRAIN_EXIT_CODE=${PIPESTATUS[0]}
 
