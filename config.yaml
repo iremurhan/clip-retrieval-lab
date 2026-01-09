@@ -4,10 +4,10 @@
 # Data Configuration
 # ==========================================
 data:
-  images_path: "datasets/coco"
+  images_path: "/archive2/irem/datasets/coco"
   # Caption path: Using Karpathy JSON structure usually
-  captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
-  batch_size: 256
+  captions_path: "/archive2/irem/datasets/coco/caption_datasets/dataset_coco.json"
+  batch_size: 64
   num_workers: 8
   max_length: 77  # Max token length for CLIP (CLIP's default context length)
 
