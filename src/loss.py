@@ -117,9 +117,18 @@ class DistillationLoss(nn.Module):
             neighbor_global_indices = teacher_indices[i]  # [K]
             neighbor_scores = teacher_scores[i]            # [K]
             
-            # Map global indices to local batch positions
-            clamped_indices = neighbor_global_indices.clamp(0, max_global_idx - 1)
-            local_positions = global_to_local[clamped_indices]  # [K]
+            # ---------------------------------------------------------
+            # BOUNDS CHECK: Mark out-of-bounds indices as invalid BEFORE lookup
+            # This prevents clamping from incorrectly mapping invalid indices
+            # (e.g., -1 or very large values) to valid batch positions.
+            # ---------------------------------------------------------
+            in_bounds_mask = (neighbor_global_indices >= 0) & (neighbor_global_indices < max_global_idx)
+            
+            # Safe lookup: only index valid positions, others get -1
+            local_positions = torch.full_like(neighbor_global_indices, -1, dtype=torch.long)
+            if in_bounds_mask.any():
+                valid_global_indices = neighbor_global_indices[in_bounds_mask]
+                local_positions[in_bounds_mask] = global_to_local[valid_global_indices]
             
             # Find which neighbors are actually in this batch (local_pos >= 0)
             valid_mask = local_positions >= 0
