@@ -23,16 +23,16 @@ if [ "$MODE" == "all" ]; then
     echo ""
     
     echo "Submitting mode=mean..."
-    sbatch --export=MODE=mean scripts/pairwise_mining.slurm
+    sbatch scripts/pairwise_mining.slurm mean
     
     echo "Submitting mode=max..."
-    sbatch --export=MODE=max scripts/pairwise_mining.slurm
+    sbatch scripts/pairwise_mining.slurm max
     
     echo "Submitting mode=min..."
-    sbatch --export=MODE=min scripts/pairwise_mining.slurm
+    sbatch scripts/pairwise_mining.slurm min
 else
     echo "Submitting mode=$MODE..."
-    sbatch --export=MODE="$MODE" scripts/pairwise_mining.slurm
+    sbatch scripts/pairwise_mining.slurm "$MODE"
 fi
 
 echo ""
