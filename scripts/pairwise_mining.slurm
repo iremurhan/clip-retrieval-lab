@@ -1,7 +1,8 @@
 #!/bin/bash
 #
 # Pairwise Image Similarity Mining
-# Usage: sbatch scripts/pairwise_mining.slurm [--export=MODE=mean]
+# Usage: sbatch scripts/pairwise_mining.slurm [MODE]
+#        MODE: mean (default), max, min
 #
 #SBATCH --job-name=pairwise_mining
 #SBATCH --output=/users/beyza.urhan/experiments/runs/%j/slurm.log
@@ -30,7 +31,8 @@ fi
 # ------------------------------------------------------------------
 # ENVIRONMENT & DIRECTORIES
 # ------------------------------------------------------------------
-MODE="${MODE:-mean}"
+# MODE from: 1) positional arg, 2) env var, 3) default
+MODE="${1:-${MODE:-mean}}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 
 # Job Directory: /output/<JOB_ID> (Matches train.slurm logic)
