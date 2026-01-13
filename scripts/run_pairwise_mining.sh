@@ -3,51 +3,36 @@
 # Run Pairwise Image Similarity Mining on SLURM
 #
 # Usage:
-#   ./scripts/run_pairwise_mining.sh           # Default: mode=mean
-#   ./scripts/run_pairwise_mining.sh mean      # Explicit mode
-#   ./scripts/run_pairwise_mining.sh max       # Optimistic matching
-#   ./scripts/run_pairwise_mining.sh min       # Pessimistic matching
-#   ./scripts/run_pairwise_mining.sh all       # Run all three modes
+#   sbatch scripts/run_pairwise_mining.sh           # Default: mode=mean
+#   sbatch scripts/run_pairwise_mining.sh mean      # Explicit mode
+#   sbatch scripts/run_pairwise_mining.sh max       # Optimistic matching
+#   sbatch scripts/run_pairwise_mining.sh min       # Pessimistic matching
+#   sbatch scripts/run_pairwise_mining.sh all       # Run all three modes
 #
-
-set -e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SLURM_SCRIPT="$SCRIPT_DIR/pairwise_mining.slurm"
 
 MODE="${1:-mean}"
 
 echo "============================================"
 echo "Pairwise Image Similarity Mining"
 echo "============================================"
-echo "SLURM Script: $SLURM_SCRIPT"
+echo "Mode: $MODE"
+echo ""
 
 if [ "$MODE" == "all" ]; then
-    echo "Mode: ALL (submitting 3 jobs)"
+    echo "Submitting 3 jobs (mean, max, min)..."
     echo ""
     
     echo "Submitting mode=mean..."
-    JOB_MEAN=$(sbatch --export=MODE=mean "$SLURM_SCRIPT" | awk '{print $4}')
-    echo "  Job ID: $JOB_MEAN"
+    sbatch --export=MODE=mean scripts/pairwise_mining.slurm
     
     echo "Submitting mode=max..."
-    JOB_MAX=$(sbatch --export=MODE=max "$SLURM_SCRIPT" | awk '{print $4}')
-    echo "  Job ID: $JOB_MAX"
+    sbatch --export=MODE=max scripts/pairwise_mining.slurm
     
     echo "Submitting mode=min..."
-    JOB_MIN=$(sbatch --export=MODE=min "$SLURM_SCRIPT" | awk '{print $4}')
-    echo "  Job ID: $JOB_MIN"
-    
-    echo ""
-    echo "All jobs submitted:"
-    echo "  mean: $JOB_MEAN"
-    echo "  max:  $JOB_MAX"
-    echo "  min:  $JOB_MIN"
+    sbatch --export=MODE=min scripts/pairwise_mining.slurm
 else
-    echo "Mode: $MODE"
-    echo ""
-    
-    sbatch --export=MODE="$MODE" "$SLURM_SCRIPT"
+    echo "Submitting mode=$MODE..."
+    sbatch --export=MODE="$MODE" scripts/pairwise_mining.slurm
 fi
 
 echo ""
