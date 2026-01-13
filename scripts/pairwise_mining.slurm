@@ -13,13 +13,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
-
-# ------------------------------------------------------------------
-# PATH MAPPING (Identical to train.slurm)
-# ------------------------------------------------------------------
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
-
-# W&B Environment Variables
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE
 
 set -euo pipefail
