@@ -13,6 +13,8 @@
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=48G
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
+#SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
+#SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 
 # ------------------------------------------------------------------
 # PATH MAPPING (Same mounts as train.slurm)
