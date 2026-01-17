@@ -159,9 +159,14 @@ def main():
     parser.add_argument('--config', type=str, default='config.yaml')
     parser.add_argument('--output_path', type=str, required=True)
     parser.add_argument('--top_k', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=512, help="Extraction batch size")
+    parser.add_argument('--batch_size', type=int, default=512, help="Extraction batch size (deprecated, use --extraction_batch_size)")
+    parser.add_argument('--extraction_batch_size', type=int, default=None, help="Batch size for feature extraction")
     parser.add_argument('--query_chunk_size', type=int, default=50, help="Mining chunk size")
     args = parser.parse_args()
+    
+    # Handle backward compatibility: if extraction_batch_size not provided, use batch_size
+    if args.extraction_batch_size is None:
+        args.extraction_batch_size = args.batch_size
     
     # Initialize WandB
     wandb.init(project="pairwise-mining", job_type="joint_mining_fly")
@@ -206,7 +211,7 @@ def main():
 
     # 3. EXTRACT FEATURES (On-the-fly)
     logger.info("Phase 2: Extracting caption embeddings...")
-    all_embeds = compute_all_caption_embeddings(dataset, tokenizer, model, args.batch_size, device, 77)
+    all_embeds = compute_all_caption_embeddings(dataset, tokenizer, model, args.extraction_batch_size, device, 77)
     logger.info(f"Extracted embeddings shape: {all_embeds.shape}")
     
     # 4. FREE VRAM (Critical!)
