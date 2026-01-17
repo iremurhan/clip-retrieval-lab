@@ -483,7 +483,7 @@ def main():
     })
     
     wandb.finish()
-    logger.info("\n✅ Done!")
+    logger.info("\nDone!")
 
 
 if __name__ == "__main__":
