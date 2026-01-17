@@ -101,7 +101,7 @@ def compute_all_caption_embeddings(dataset, tokenizer, model, batch_size, device
         dataset, batch_size=batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn
     )
 
-    logger.info(f"🚀 Extracting features for {len(dataset)} captions...")
+    logger.info(f"Extracting features for {len(dataset)} captions...")
     
     with torch.no_grad(), torch.amp.autocast(device_type='cuda' if 'cuda' in device.type else 'cpu'):
         for batch_caps in tqdm(loader, desc="Extracting"):
@@ -295,7 +295,7 @@ def main():
         raise RuntimeError("CUDA is required for this script. Please use a GPU-enabled environment.")
     
     device = torch.device('cuda')
-    logger.info(f"🚀 Running on: {device}")
+    logger.info(f"Running on: {device}")
     logger.info(f"   GPU: {torch.cuda.get_device_name(0)}")
 
     # Load config
@@ -381,7 +381,7 @@ def main():
         max_len=max_length
     )
     
-    logger.info(f"✅ Extracted embeddings shape: {all_embeddings.shape}")
+    logger.info(f"Extracted embeddings shape: {all_embeddings.shape}")
     
     # =========================================================
     # Phase 3: Free CLIP Model (Free VRAM for Mining)
@@ -447,7 +447,7 @@ def main():
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     
-    logger.info(f"💾 Saving to {args.output_path}...")
+    logger.info(f"Saving to {args.output_path}...")
     torch.save(save_dict, args.output_path)
     
     # Get file size
