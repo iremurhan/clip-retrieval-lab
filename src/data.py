@@ -30,7 +30,8 @@ class CocoImageDataset(Dataset):
         transform=None, 
         intra_modal_aug=False,
         mining_targets_path=None,
-        distill_top_k=None
+        distill_top_k=None,
+        distill_mode='simple'
     ):
         """
         Args:
@@ -43,6 +44,10 @@ class CocoImageDataset(Dataset):
             intra_modal_aug (bool): If True, generates a second augmented view of the image for intra-modal loss.
             mining_targets_path (str, optional): Path to pre-mined soft targets (.pt file).
             distill_top_k (int, optional): Number of neighbors to use (slice from mined targets).
+            distill_mode (str): Mode for loading mining targets. Options:
+                - 'simple': Standard format with 'indices' and 'scores' keys
+                - 'max': Joint format, use 'max_indices' and 'max_scores' keys
+                - 'min': Joint format, use 'min_indices' and 'min_scores' keys
         """
         self.images_root_path = images_root_path
         self.tokenizer = tokenizer
@@ -50,20 +55,53 @@ class CocoImageDataset(Dataset):
         self.split = split
         self.intra_modal_aug = intra_modal_aug
         self.distill_top_k = distill_top_k
+        self.distill_mode = distill_mode
         
         # ---------------------------------------------------------
         # Knowledge Distillation: Load Mining Targets
         # ---------------------------------------------------------
         self.mining_targets = None
         if mining_targets_path and os.path.exists(mining_targets_path):
-            logger.info(f"Loading mining targets from {mining_targets_path}")
-            self.mining_targets = torch.load(mining_targets_path, map_location='cpu')
+            logger.info(f"Loading mining targets from {mining_targets_path} (mode: {distill_mode})")
+            loaded_data = torch.load(mining_targets_path, map_location='cpu')
             
-            # Validate structure
-            if 'indices' not in self.mining_targets or 'scores' not in self.mining_targets:
-                logger.error("Mining targets file missing 'indices' or 'scores' keys!")
-                self.mining_targets = None
+            # Select keys based on distill_mode
+            if distill_mode == 'max':
+                # Joint format: use max_indices and max_scores
+                if 'max_indices' not in loaded_data or 'max_scores' not in loaded_data:
+                    logger.error(f"Mining targets file missing 'max_indices' or 'max_scores' keys for mode '{distill_mode}'!")
+                    self.mining_targets = None
+                else:
+                    self.mining_targets = {
+                        'indices': loaded_data['max_indices'],
+                        'scores': loaded_data['max_scores']
+                    }
+                    logger.info(f"Loaded MAX strategy targets from joint file")
+            elif distill_mode == 'min':
+                # Joint format: use min_indices and min_scores
+                if 'min_indices' not in loaded_data or 'min_scores' not in loaded_data:
+                    logger.error(f"Mining targets file missing 'min_indices' or 'min_scores' keys for mode '{distill_mode}'!")
+                    self.mining_targets = None
+                else:
+                    self.mining_targets = {
+                        'indices': loaded_data['min_indices'],
+                        'scores': loaded_data['min_scores']
+                    }
+                    logger.info(f"Loaded MIN strategy targets from joint file")
             else:
+                # Default: standard format with 'indices' and 'scores'
+                if 'indices' not in loaded_data or 'scores' not in loaded_data:
+                    logger.error(f"Mining targets file missing 'indices' or 'scores' keys for mode '{distill_mode}'!")
+                    self.mining_targets = None
+                else:
+                    self.mining_targets = {
+                        'indices': loaded_data['indices'],
+                        'scores': loaded_data['scores']
+                    }
+                    logger.info(f"Loaded standard format targets")
+            
+            # Validate and log structure
+            if self.mining_targets is not None:
                 n_samples = self.mining_targets['indices'].shape[0]
                 mined_k = self.mining_targets['indices'].shape[1]
                 logger.info(f"Loaded mining targets: {n_samples:,} samples, {mined_k} neighbors each")
@@ -234,7 +272,12 @@ def get_dataloader(config, tokenizer, split='train'):
         if distillation_config.get('enabled', False):
             mining_targets_path = distillation_config.get('mining_targets_path')
             distill_top_k = distillation_config.get('top_k')
-            logger.info(f"Distillation enabled: top_k={distill_top_k}, path={mining_targets_path}")
+            distill_mode = distillation_config.get('mode', 'simple')
+            logger.info(f"Distillation enabled: top_k={distill_top_k}, mode={distill_mode}, path={mining_targets_path}")
+        else:
+            distill_mode = 'simple'
+    else:
+        distill_mode = 'simple'
     
     dataset = CocoImageDataset(
         images_root_path=images_root,
@@ -245,7 +288,8 @@ def get_dataloader(config, tokenizer, split='train'):
         transform=None,
         intra_modal_aug=intra_modal_aug,
         mining_targets_path=mining_targets_path,
-        distill_top_k=distill_top_k
+        distill_top_k=distill_top_k,
+        distill_mode=distill_mode
     )
 
     # Debug Truncation
