@@ -47,7 +47,7 @@ def load_clip_model(model_name, device):
         # CRITICAL FIX: use_safetensors=True bypasses the PyTorch < 2.6 security check
         model = CLIPModel.from_pretrained(model_name, use_safetensors=True).to(device).eval()
     except Exception as e:
-        logger.warning(f"⚠️ SafeTensors load failed: {e}")
+        logger.warning(f"SafeTensors load failed: {e}")
         logger.warning("Attempting legacy load (This may fail if PyTorch < 2.6)...")
         model = CLIPModel.from_pretrained(model_name, use_safetensors=False).to(device).eval()
 
@@ -69,7 +69,7 @@ def compute_all_caption_embeddings(dataset, tokenizer, model, batch_size, device
         dataset, batch_size=batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn
     )
 
-    logger.info(f"🚀 Extracting features for {len(dataset)} captions...")
+    logger.info(f"Extracting features for {len(dataset)} captions...")
     
     with torch.no_grad(), torch.amp.autocast(device_type='cuda' if 'cuda' in device.type else 'cpu'):
         for batch_caps in tqdm(loader, desc="Extracting"):
@@ -106,7 +106,7 @@ def mine_joint_max_min(all_embeds, image_to_indices, image_ids, top_k, device, q
     max_indices_list, max_scores_list = [], []
     min_indices_list, min_scores_list = [], []
     
-    logger.info(f"⛏️ Mining Joint Max/Min... (Query Chunk: {query_chunk_size})")
+    logger.info(f"Mining Joint Max/Min... (Query Chunk: {query_chunk_size})")
     
     # Keys: All images [N, 5, Dim]
     keys_flat = structured_embeds.view(-1, dim)
@@ -141,4 +141,145 @@ def mine_joint_max_min(all_embeds, image_to_indices, image_ids, top_k, device, q
         b_min_scores, b_min_indices = (-min_sim_img).topk(top_k, dim=1)
         b_min_scores = -b_min_scores
         
-        min_indices_list.append(
+        min_indices_list.append(b_min_indices.cpu())
+        min_scores_list.append(b_min_scores.cpu())
+        
+        # WandB Log
+        chunk_idx = i // query_chunk_size
+        if (chunk_idx + 1) % 10 == 0:
+            wandb.log({"mining_progress": (chunk_idx + 1) / n_chunks * 100})
+    
+    return (
+        torch.cat(max_indices_list), torch.cat(max_scores_list),
+        torch.cat(min_indices_list), torch.cat(min_scores_list)
+    )
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default='config.yaml')
+    parser.add_argument('--output_path', type=str, required=True)
+    parser.add_argument('--top_k', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=512, help="Extraction batch size")
+    parser.add_argument('--query_chunk_size', type=int, default=50, help="Mining chunk size")
+    args = parser.parse_args()
+    
+    # Initialize WandB
+    wandb.init(project="pairwise-mining", job_type="joint_mining_fly")
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger.info(f"Running on {device}...")
+    
+    # 1. Load Config & Dataset (Modified to use SafeTensors)
+    logger.info(f"Loading config from {args.config}")
+    with open(args.config) as f: 
+        config = yaml.safe_load(f)
+    
+    logger.info("Loading CLIP model and dataset...")
+    model, tokenizer = load_clip_model(config['model']['image_model_name'], device)
+    
+    dataset = CocoImageDataset(
+        images_root_path=config['data']['images_path'],
+        captions_path=config['data']['captions_path'],
+        tokenizer=tokenizer,
+        split='train',
+        transform=None,
+        intra_modal_aug=False
+    )
+    logger.info(f"Dataset loaded: {len(dataset.samples)} samples")
+    
+    # 2. Build Index Map
+    logger.info("Building image-to-caption index map...")
+    image_to_indices = defaultdict(list)
+    image_ids_ordered = []
+    seen = set()
+    for idx, sample in enumerate(dataset.samples):
+        iid = sample['image_id']
+        image_to_indices[iid].append(idx)
+        if iid not in seen:
+            image_ids_ordered.append(iid)
+            seen.add(iid)
+    
+    n_images = len(image_ids_ordered)
+    n_captions = len(dataset.samples)
+    logger.info(f"  Unique images: {n_images:,}")
+    logger.info(f"  Total captions: {n_captions:,}")
+
+    # 3. EXTRACT FEATURES (On-the-fly)
+    logger.info("Phase 2: Extracting caption embeddings...")
+    all_embeds = compute_all_caption_embeddings(dataset, tokenizer, model, args.batch_size, device, 77)
+    logger.info(f"Extracted embeddings shape: {all_embeds.shape}")
+    
+    # 4. FREE VRAM (Critical!)
+    logger.info("Deleting CLIP model to free VRAM for mining...")
+    del model
+    torch.cuda.empty_cache()
+    
+    # 5. MINE JOINT MAX/MIN
+    logger.info("Phase 4: Joint MAX/MIN mining...")
+    max_idxs, max_scores, min_idxs, min_scores = mine_joint_max_min(
+        all_embeds, image_to_indices, image_ids_ordered, args.top_k, device, args.query_chunk_size
+    )
+    logger.info(f"Mining complete. MAX shape: {max_idxs.shape}, MIN shape: {min_idxs.shape}")
+    
+    # 6. SAVE
+    logger.info("Phase 5: Mapping results to caption level and saving...")
+    n_caps = len(dataset.samples)
+    
+    # Output containers
+    out_max_indices = torch.zeros(n_caps, args.top_k, dtype=torch.long)
+    out_max_scores = torch.zeros(n_caps, args.top_k, dtype=torch.float32)
+    out_min_indices = torch.zeros(n_caps, args.top_k, dtype=torch.long)
+    out_min_scores = torch.zeros(n_caps, args.top_k, dtype=torch.float32)
+
+    # Helper: Image Index -> Representative Caption Index
+    img_idx_to_first_cap = {i: image_to_indices[iid][0] for i, iid in enumerate(image_ids_ordered)}
+    
+    for i, iid in enumerate(tqdm(image_ids_ordered, desc="Final Mapping")):
+        # Neighbor Img indices -> Neighbor Cap indices
+        max_neigh_caps = torch.tensor([img_idx_to_first_cap[n.item()] for n in max_idxs[i]])
+        min_neigh_caps = torch.tensor([img_idx_to_first_cap[n.item()] for n in min_idxs[i]])
+        
+        # Broadcast to all captions of this image
+        for cap_idx in image_to_indices[iid]:
+            out_max_indices[cap_idx] = max_neigh_caps
+            out_max_scores[cap_idx] = max_scores[i]
+            out_min_indices[cap_idx] = min_neigh_caps
+            out_min_scores[cap_idx] = min_scores[i]
+
+    save_dict = {
+        "max_indices": out_max_indices, "max_scores": out_max_scores,
+        "min_indices": out_min_indices, "min_scores": out_min_scores
+    }
+    
+    os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
+    logger.info(f"Saving to {args.output_path}")
+    torch.save(save_dict, args.output_path)
+    
+    # Log final statistics
+    file_size_mb = os.path.getsize(args.output_path) / 1024 / 1024
+    logger.info("=" * 60)
+    logger.info("MINING COMPLETE!")
+    logger.info("=" * 60)
+    logger.info(f"Total images: {n_images:,}")
+    logger.info(f"Total captions: {n_caps:,}")
+    logger.info(f"Top-K per image: {args.top_k}")
+    logger.info(f"MAX - Score range: [{max_scores.min():.4f}, {max_scores.max():.4f}], Mean: {max_scores.mean():.4f}")
+    logger.info(f"MIN - Score range: [{min_scores.min():.4f}, {min_scores.max():.4f}], Mean: {min_scores.mean():.4f}")
+    logger.info(f"File size: {file_size_mb:.2f} MB")
+    logger.info("=" * 60)
+    
+    wandb.log({
+        "output_file_size_mb": file_size_mb,
+        "max_score_min": max_scores.min().item(),
+        "max_score_max": max_scores.max().item(),
+        "max_score_mean": max_scores.mean().item(),
+        "min_score_min": min_scores.min().item(),
+        "min_score_max": min_scores.max().item(),
+        "min_score_mean": min_scores.mean().item()
+    })
+    
+    wandb.finish()
+    logger.info("Done!")
+
+if __name__ == "__main__":
+    main()
