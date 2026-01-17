@@ -2,59 +2,48 @@
 """
 calculate_pairwise_similarity.py
 --------------------------------
+End-to-End Joint Pairwise Similarity Mining.
 
-Fast Pairwise Similarity Mining using Matrix Multiplication.
-
-This script uses fast matrix multiplication to compute pairwise similarities
-in 5-10 minutes instead of 5 days. It processes features in chunks for
-GPU memory efficiency.
-
-Modes:
-- 'simple': Basic pairwise similarity (image-to-image)
-- 'joint_maxmin': Joint MAX and MIN mining using caption-level similarities
-  (requires dataset info for image-to-caption mapping)
-
-Key Features:
-- Loads all features to GPU for maximum speed (deterministic)
-- Processes in configurable-sized chunks using massive matrix multiplication
-- WandB logging for progress tracking
-- No fallback mode (ensures deterministic results)
+Flow:
+1. Load CLIP Model & Dataset.
+2. Extract all Caption Embeddings on-the-fly (RAM only).
+3. DELETE CLIP Model to free VRAM.
+4. Perform Block Matrix Multiplication (Joint Max/Min).
+5. Save only the final indices/scores.
 
 Usage:
-    # Simple mode (image features only)
     python tools/calculate_pairwise_similarity.py \
-        --features_path datasets/coco/features.pt \
-        --output_path datasets/coco/pairwise_mining.pt \
-        --top_k 50 \
-        --batch_size 5000 \
-        --mode simple
-
-    # Joint MAX/MIN mode (requires dataset)
-    python tools/calculate_pairwise_similarity.py \
-        --features_path datasets/coco/caption_features.pt \
+        --config config.yaml \
         --output_path datasets/coco/pairwise_mining_joint.pt \
         --top_k 50 \
-        --query_chunk_size 50 \
-        --mode joint_maxmin \
-        --config config.yaml
+        --query_chunk_size 100
 """
 
-import os
+import argparse
+import yaml
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
-import argparse
-import wandb
-import logging
+import os
 import sys
-import yaml
+import logging
+import wandb
 from collections import defaultdict
+from transformers import CLIPModel, CLIPTokenizer
+from tqdm import tqdm
 
-# Add parent directory to path for dataset imports
+# Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.data import CocoImageDataset
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+def load_clip_model(model_name, device):
+    logger.info(f"Loading CLIP: {model_name}")
+    model = CLIPModel.from_pretrained(model_name).to(device).eval()
+    tokenizer = CLIPTokenizer.from_pretrained(model_name)
+    return model, tokenizer
 
 
 def build_image_to_caption_map(dataset):
@@ -97,6 +86,33 @@ def build_image_to_caption_map(dataset):
     return image_to_indices, image_ids_ordered
 
 
+def compute_all_caption_embeddings(dataset, tokenizer, model, batch_size, device, max_len):
+    """
+    Computes embeddings for ALL captions on-the-fly.
+    Returns: [N_total_caps, Dim] Tensor (on CPU to save VRAM for mining).
+    """
+    all_embeds = []
+    
+    # Custom collate because dataset returns dicts
+    def collate_fn(batch):
+        return [b['caption'] for b in batch]
+
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn
+    )
+
+    logger.info(f"🚀 Extracting features for {len(dataset)} captions...")
+    
+    with torch.no_grad(), torch.amp.autocast(device_type='cuda' if 'cuda' in device.type else 'cpu'):
+        for batch_caps in tqdm(loader, desc="Extracting"):
+            inputs = tokenizer(batch_caps, padding=True, truncation=True, max_length=max_len, return_tensors="pt").to(device)
+            embeds = model.get_text_features(**inputs)
+            embeds = F.normalize(embeds, p=2, dim=1)
+            all_embeds.append(embeds.cpu())  # Keep on CPU until needed
+    
+    return torch.cat(all_embeds, dim=0)
+
+
 def mine_joint_max_min(all_embeds, image_to_indices, image_ids, top_k, device, query_chunk_size=50):
     """
     Mines both MAX and MIN pairwise similarities in a single pass.
@@ -125,7 +141,6 @@ def mine_joint_max_min(all_embeds, image_to_indices, image_ids, top_k, device, q
         min_scores: [N_images, top_k] - Scores (MIN mode)
     """
     n_images = len(image_ids)
-    n_caps_total = all_embeds.shape[0]
     dim = all_embeds.shape[1]
     
     # Reshape embeddings to [N_images, 5, Dim] for vectorized operations
@@ -133,13 +148,13 @@ def mine_joint_max_min(all_embeds, image_to_indices, image_ids, top_k, device, q
     # If an image has >5 caps, we take first 5. If <5, we repeat.
     # This enables 4D tensor operations which are blazing fast.
     
-    logger.info("Reshaping embeddings to [N, 5, Dim] for vectorized operations...")
+    logger.info("Reshaping embeddings to [N, 5, Dim] for vectorized mining...")
     structured_embeds = torch.zeros(n_images, 5, dim, device=device)
     
     # Move raw to GPU for fast gather
     all_embeds_gpu = all_embeds.to(device)
     
-    for i, img_id in enumerate(tqdm(image_ids, desc="Reshaping embeddings")):
+    for i, img_id in enumerate(tqdm(image_ids, desc="Reshaping")):
         indices = image_to_indices[img_id]
         # Take first 5, or pad if needed (COCO is usually 5)
         indices = indices[:5]
@@ -241,73 +256,13 @@ def mine_joint_max_min(all_embeds, image_to_indices, image_ids, top_k, device, q
     return max_indices, max_scores, min_indices, min_scores
 
 
-def mine_simple(gpu_features, num_images, top_k, batch_size, device):
-    """
-    Simple pairwise similarity mining (image-to-image).
-    
-    Args:
-        gpu_features: [N, Dim] - All image features on GPU
-        num_images: Number of images
-        top_k: Number of neighbors to find
-        batch_size: Chunk size for processing
-        device: torch device
-    
-    Returns:
-        final_indices: [N, K+1] - Top-K neighbor indices
-        final_scores: [N, K+1] - Scores
-    """
-    all_top_indices = []
-    all_top_scores = []
-    
-    n_chunks = (num_images + batch_size - 1) // batch_size
-    
-    for i in tqdm(range(0, num_images, batch_size), desc="Mining Hard Negatives"):
-        end = min(i + batch_size, num_images)
-        
-        # Query Chunk
-        query_chunk = gpu_features[i:end]
-        
-        # Sim Matrix: (Batch_Size, N)
-        sim_matrix = torch.matmul(query_chunk, gpu_features.T)
-        
-        # Mask self-similarity (diagonal within chunk)
-        chunk_size = end - i
-        for b in range(chunk_size):
-            sim_matrix[b, i + b] = float('-inf')
-        
-        # Find Top K+1 values (Largest scores)
-        scores, indices = torch.topk(sim_matrix, k=top_k + 1, dim=1)
-        
-        all_top_indices.append(indices.cpu())
-        all_top_scores.append(scores.cpu())
-        
-        del sim_matrix, query_chunk
-        torch.cuda.empty_cache()
-        
-        # Log progress to WandB every 10 chunks or at the end
-        chunk_idx = i // batch_size
-        if (chunk_idx + 1) % 10 == 0 or chunk_idx == n_chunks - 1:
-            progress = (chunk_idx + 1) / n_chunks * 100
-            wandb.log({
-                "mining_progress": progress,
-                "mining_chunk": chunk_idx + 1,
-                "mining_images_processed": end
-            })
-    
-    # Aggregate
-    final_indices = torch.cat(all_top_indices, dim=0)  # (N, K+1)
-    final_scores = torch.cat(all_top_scores, dim=0)    # (N, K+1)
-    
-    return final_indices, final_scores
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Fast Pairwise Similarity Mining using Matrix Multiplication"
+        description="End-to-End Joint Pairwise Similarity Mining"
     )
     parser.add_argument(
-        '--features_path', type=str, required=True,
-        help='Path to saved .pt features (N, D) or (N_captions, D) for joint_maxmin mode'
+        '--config', type=str, required=True,
+        help='Path to config file'
     )
     parser.add_argument(
         '--output_path', type=str, required=True,
@@ -315,23 +270,15 @@ def main():
     )
     parser.add_argument(
         '--top_k', type=int, default=50,
-        help='Number of hard negatives/similars to save per image'
+        help='Number of neighbors to find per image'
     )
     parser.add_argument(
-        '--batch_size', type=int, default=5000,
-        help='Chunk size for GPU memory safety (simple mode)'
-    )
-    parser.add_argument(
-        '--query_chunk_size', type=int, default=50,
+        '--query_chunk_size', type=int, default=100,
         help='Query chunk size for joint_maxmin mode'
     )
     parser.add_argument(
-        '--mode', type=str, default='simple', choices=['simple', 'joint_maxmin'],
-        help='Mining mode: simple (image-to-image) or joint_maxmin (caption-level)'
-    )
-    parser.add_argument(
-        '--config', type=str, default=None,
-        help='Config file path (required for joint_maxmin mode)'
+        '--extraction_batch_size', type=int, default=512,
+        help='Batch size for feature extraction'
     )
     parser.add_argument(
         '--wandb_project', type=str, default='pairwise-mining',
@@ -343,210 +290,200 @@ def main():
     )
     args = parser.parse_args()
 
-    # Initialize WandB
-    wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_name,
-        job_type="pairwise_mining",
-        config={
-            "features_path": args.features_path,
-            "output_path": args.output_path,
-            "top_k": args.top_k,
-            "batch_size": args.batch_size,
-            "mode": args.mode
-        }
-    )
-
-    print(f"🔄 Loading features from {args.features_path}...")
-    # Load features (start on CPU)
-    features = torch.load(args.features_path, map_location='cpu')
-    
-    # If dict, get 'features' key, otherwise use tensor directly
-    if isinstance(features, dict):
-        if 'features' in features:
-            features = features['features']
-        else:
-            print("⚠️ Warning: Dictionary loaded but 'features' key not found. Using the first value.")
-            features = list(features.values())[0]
-
-    num_samples = features.size(0)
-    feature_dim = features.size(1)
-    print(f"✅ Loaded {num_samples} samples. Feature dim: {feature_dim}")
-
     # GPU Check
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for this script. Please use a GPU-enabled environment.")
     
     device = torch.device('cuda')
-    print(f"🚀 Running on: {device}")
-    print(f"   GPU: {torch.cuda.get_device_name(0)}")
+    logger.info(f"🚀 Running on: {device}")
+    logger.info(f"   GPU: {torch.cuda.get_device_name(0)}")
+
+    # Load config
+    logger.info(f"Loading config from {args.config}")
+    with open(args.config, 'r') as f:
+        config = yaml.safe_load(f)
     
-    # Log to WandB
+    # Get parameters from config
+    clip_model_name = config['model']['image_model_name']
+    max_length = config['data'].get('max_length', 77)
+    
+    # Initialize WandB
+    wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_name,
+        job_type="pairwise_mining_joint",
+        config={
+            "config_path": args.config,
+            "output_path": args.output_path,
+            "top_k": args.top_k,
+            "query_chunk_size": args.query_chunk_size,
+            "extraction_batch_size": args.extraction_batch_size,
+            "clip_model": clip_model_name
+        }
+    )
+    
     wandb.log({
-        "num_samples": num_samples,
-        "feature_dim": feature_dim,
-        "gpu_name": torch.cuda.get_device_name(0),
-        "mode": args.mode
+        "gpu_name": torch.cuda.get_device_name(0)
     })
+
+    # =========================================================
+    # Phase 1: Load CLIP Model & Dataset
+    # =========================================================
+    logger.info("=" * 60)
+    logger.info("Phase 1: Loading CLIP Model & Dataset")
+    logger.info("=" * 60)
     
-    # Normalize features (required for Cosine Similarity)
-    print("📐 Normalizing features for cosine similarity...")
-    features = F.normalize(features.float(), p=2, dim=1)
+    clip_model, tokenizer = load_clip_model(clip_model_name, device)
+    
+    dataset = CocoImageDataset(
+        images_root_path=config['data']['images_path'],
+        captions_path=config['data']['captions_path'],
+        tokenizer=tokenizer,
+        max_length=max_length,
+        split='train',
+        transform=None,
+        intra_modal_aug=False
+    )
+    
+    # Respect debug mode
+    debug_config = config.get('debug', {})
+    if debug_config.get('debug_mode', False):
+        debug_limit = debug_config.get('debug_samples', 100)
+        if len(dataset.samples) > debug_limit:
+            logger.warning(f"DEBUG MODE: Truncating to {debug_limit} samples")
+            dataset.samples = dataset.samples[:debug_limit]
+    
+    n_captions = len(dataset.samples)
+    logger.info(f"Total captions: {n_captions:,}")
+    
+    # Build image-to-caption mapping
+    image_to_indices, image_ids_ordered = build_image_to_caption_map(dataset)
+    n_images = len(image_ids_ordered)
+    
+    wandb.log({
+        "total_captions": n_captions,
+        "total_images": n_images
+    })
 
-    # Move all features to GPU (deterministic - no fallback)
-    print("📦 Moving all features to GPU...")
-    try:
-        gpu_features = features.to(device)
-        print("✅ All features moved to GPU for maximum speed.")
-        
-        # Log memory usage
-        memory_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
-        memory_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
-        print(f"   GPU Memory: {memory_allocated:.2f} GB allocated, {memory_reserved:.2f} GB reserved")
-        wandb.log({
-            "gpu_memory_allocated_gb": memory_allocated,
-            "gpu_memory_reserved_gb": memory_reserved
-        })
-    except RuntimeError as e:
-        logger.error(f"Failed to move features to GPU: {e}")
-        logger.error("This script requires all features to fit in GPU memory for deterministic results.")
-        raise
+    # =========================================================
+    # Phase 2: Extract All Caption Embeddings
+    # =========================================================
+    logger.info("=" * 60)
+    logger.info("Phase 2: Extracting Caption Embeddings")
+    logger.info("=" * 60)
+    
+    all_embeddings = compute_all_caption_embeddings(
+        dataset=dataset,
+        tokenizer=tokenizer,
+        model=clip_model,
+        batch_size=args.extraction_batch_size,
+        device=device,
+        max_len=max_length
+    )
+    
+    logger.info(f"✅ Extracted embeddings shape: {all_embeddings.shape}")
+    
+    # =========================================================
+    # Phase 3: Free CLIP Model (Free VRAM for Mining)
+    # =========================================================
+    logger.info("=" * 60)
+    logger.info("Phase 3: Freeing CLIP Model")
+    logger.info("=" * 60)
+    
+    del clip_model
+    del tokenizer
+    torch.cuda.empty_cache()
+    
+    memory_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+    memory_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+    logger.info(f"GPU Memory after cleanup: {memory_allocated:.2f} GB allocated, {memory_reserved:.2f} GB reserved")
+    wandb.log({
+        "gpu_memory_after_cleanup_gb": memory_allocated
+    })
 
-    # Run mining based on mode
-    if args.mode == 'simple':
-        print("\n🔍 Running SIMPLE mode (image-to-image)...")
-        final_indices, final_scores = mine_simple(
-            gpu_features, num_samples, args.top_k, args.batch_size, device
-        )
-        
-        save_dict = {
-            "indices": final_indices,
-            "scores": final_scores,
-            "metadata": {
-                "top_k": args.top_k,
-                "num_images": num_samples,
-                "feature_dim": feature_dim,
-                "batch_size": args.batch_size,
-                "mode": "simple"
-            }
-        }
-        
-    elif args.mode == 'joint_maxmin':
-        print("\n🔍 Running JOINT MAX/MIN mode (caption-level)...")
-        
-        if args.config is None:
-            raise ValueError("--config is required for joint_maxmin mode")
-        
-        # Load config
-        with open(args.config, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        # Load dataset to build image-to-caption mapping
-        from src.data import CocoImageDataset
-        from transformers import CLIPTokenizer
-        
-        tokenizer = CLIPTokenizer.from_pretrained(config['model']['image_model_name'])
-        max_length = config['data'].get('max_length', 77)
-        
-        dataset = CocoImageDataset(
-            images_root_path=config['data']['images_path'],
-            captions_path=config['data']['captions_path'],
-            tokenizer=tokenizer,
-            max_length=max_length,
-            split='train',
-            transform=None,
-            intra_modal_aug=False
-        )
-        
-        # Build mapping
-        image_to_indices, image_ids_ordered = build_image_to_caption_map(dataset)
-        n_images = len(image_ids_ordered)
-        
-        # Verify feature count matches caption count
-        if num_samples != len(dataset.samples):
-            raise ValueError(
-                f"Feature count ({num_samples}) doesn't match dataset caption count ({len(dataset.samples)})"
-            )
-        
-        wandb.log({
+    # =========================================================
+    # Phase 4: Joint MAX/MIN Mining
+    # =========================================================
+    logger.info("=" * 60)
+    logger.info("Phase 4: Joint MAX/MIN Mining")
+    logger.info("=" * 60)
+    
+    max_indices, max_scores, min_indices, min_scores = mine_joint_max_min(
+        all_embeddings=all_embeddings,
+        image_to_indices=image_to_indices,
+        image_ids=image_ids_ordered,
+        top_k=args.top_k,
+        device=device,
+        query_chunk_size=args.query_chunk_size
+    )
+    
+    # Free embeddings
+    del all_embeddings
+    torch.cuda.empty_cache()
+
+    # =========================================================
+    # Phase 5: Save Results
+    # =========================================================
+    logger.info("=" * 60)
+    logger.info("Phase 5: Saving Results")
+    logger.info("=" * 60)
+    
+    save_dict = {
+        "max_indices": max_indices,
+        "max_scores": max_scores,
+        "min_indices": min_indices,
+        "min_scores": min_scores,
+        "metadata": {
+            "top_k": args.top_k,
             "num_images": n_images,
-            "num_captions": num_samples
-        })
-        
-        # Run joint mining
-        max_indices, max_scores, min_indices, min_scores = mine_joint_max_min(
-            gpu_features, image_to_indices, image_ids_ordered,
-            args.top_k, device, args.query_chunk_size
-        )
-        
-        save_dict = {
-            "max_indices": max_indices,
-            "max_scores": max_scores,
-            "min_indices": min_indices,
-            "min_scores": min_scores,
-            "metadata": {
-                "top_k": args.top_k,
-                "num_images": n_images,
-                "num_captions": num_samples,
-                "feature_dim": feature_dim,
-                "query_chunk_size": args.query_chunk_size,
-                "mode": "joint_maxmin"
-            }
+            "num_captions": n_captions,
+            "query_chunk_size": args.query_chunk_size,
+            "mode": "joint_maxmin"
         }
+    }
     
     # Create output directory if needed
     output_dir = os.path.dirname(args.output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-
-    print(f"💾 Saving to {args.output_path}...")
+    
+    logger.info(f"💾 Saving to {args.output_path}...")
     torch.save(save_dict, args.output_path)
     
     # Get file size
     file_size_mb = os.path.getsize(args.output_path) / 1024 / 1024
     
     # Print statistics
-    print("\n✅ Mining complete!")
-    if args.mode == 'simple':
-        print(f"   Total images: {num_samples:,}")
-        print(f"   Top-K per image: {args.top_k}")
-        print(f"   Output shape: indices={final_indices.shape}, scores={final_scores.shape}")
-        print(f"   Score range: [{final_scores.min():.4f}, {final_scores.max():.4f}]")
-        print(f"   Mean score: {final_scores.mean():.4f}")
-        
-        # Log final metrics to WandB
-        wandb.log({
-            "output_file_size_mb": file_size_mb,
-            "score_min": final_scores.min().item(),
-            "score_max": final_scores.max().item(),
-            "score_mean": final_scores.mean().item(),
-            "score_std": final_scores.std().item()
-        })
-    else:  # joint_maxmin
-        print(f"   Total images: {n_images:,}")
-        print(f"   Total captions: {num_samples:,}")
-        print(f"   Top-K per image: {args.top_k}")
-        print(f"   MAX - Output shape: indices={max_indices.shape}, scores={max_scores.shape}")
-        print(f"   MAX - Score range: [{max_scores.min():.4f}, {max_scores.max():.4f}]")
-        print(f"   MAX - Mean score: {max_scores.mean():.4f}")
-        print(f"   MIN - Output shape: indices={min_indices.shape}, scores={min_scores.shape}")
-        print(f"   MIN - Score range: [{min_scores.min():.4f}, {min_scores.max():.4f}]")
-        print(f"   MIN - Mean score: {min_scores.mean():.4f}")
-        
-        # Log final metrics to WandB
-        wandb.log({
-            "output_file_size_mb": file_size_mb,
-            "max_score_min": max_scores.min().item(),
-            "max_score_max": max_scores.max().item(),
-            "max_score_mean": max_scores.mean().item(),
-            "min_score_min": min_scores.min().item(),
-            "min_score_max": min_scores.max().item(),
-            "min_score_mean": min_scores.mean().item()
-        })
+    logger.info("\n" + "=" * 60)
+    logger.info("MINING COMPLETE!")
+    logger.info("=" * 60)
+    logger.info(f"Total images: {n_images:,}")
+    logger.info(f"Total captions: {n_captions:,}")
+    logger.info(f"Top-K per image: {args.top_k}")
+    logger.info(f"\nMAX Mode:")
+    logger.info(f"  Output shape: indices={max_indices.shape}, scores={max_scores.shape}")
+    logger.info(f"  Score range: [{max_scores.min():.4f}, {max_scores.max():.4f}]")
+    logger.info(f"  Mean score: {max_scores.mean():.4f}")
+    logger.info(f"\nMIN Mode:")
+    logger.info(f"  Output shape: indices={min_indices.shape}, scores={min_scores.shape}")
+    logger.info(f"  Score range: [{min_scores.min():.4f}, {min_scores.max():.4f}]")
+    logger.info(f"  Mean score: {min_scores.mean():.4f}")
+    logger.info(f"\nFile size: {file_size_mb:.2f} MB")
+    logger.info("=" * 60)
     
-    print(f"   File size: {file_size_mb:.2f} MB")
+    # Log final metrics to WandB
+    wandb.log({
+        "output_file_size_mb": file_size_mb,
+        "max_score_min": max_scores.min().item(),
+        "max_score_max": max_scores.max().item(),
+        "max_score_mean": max_scores.mean().item(),
+        "min_score_min": min_scores.min().item(),
+        "min_score_max": min_scores.max().item(),
+        "min_score_mean": min_scores.mean().item()
+    })
     
     wandb.finish()
+    logger.info("\n✅ Done!")
 
 
 if __name__ == "__main__":
