@@ -73,6 +73,19 @@ class Trainer:
         
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        
+        # Initialize WandB run reference and define summary metrics
+        self.wandb_run = None
+        if self.use_wandb and wandb.run is not None:
+            self.wandb_run = wandb.run
+            # Define WandB summary metrics with max tracking for validation results
+            # This ensures the dashboard always shows the best scores, even if current epoch is worse
+            wandb.define_metric("val/t2i_r1", summary="max")
+            wandb.define_metric("val/t2i_r5", summary="max")
+            wandb.define_metric("val/t2i_r10", summary="max")
+            wandb.define_metric("val/i2t_r1", summary="max")
+            wandb.define_metric("val/i2t_r5", summary="max")
+            wandb.define_metric("val/i2t_r10", summary="max")
 
     def _compute_current_alpha(self, epoch: int) -> float:
         """
@@ -126,6 +139,57 @@ class Trainer:
         logger.info(f"Resuming successfully from epoch {start_epoch} with Best R@1: {self.best_r1:.2f}")
         
         return start_epoch
+
+    def save_checkpoint(self, epoch, is_best=False):
+        """
+        Save checkpoint with robust error handling for disk quota issues.
+        
+        Always saves last_model.pth (for resuming training).
+        If is_best is True, also saves best_model.pth (for best performance).
+        
+        Args:
+            epoch: Current epoch number
+            is_best: Whether this is the best model so far
+        """
+        # Define checkpoint paths
+        last_path = os.path.join(self.checkpoint_dir, "last_model.pth")
+        best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
+        
+        # Build checkpoint dictionary
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            'best_r1': self.best_r1,
+            'config': self.config
+        }
+        
+        # Save scaler state if using AMP
+        if self.use_amp:
+            checkpoint['scaler_state_dict'] = self.scaler.state_dict()
+        
+        # Always save last_model.pth (overwrite previous one)
+        try:
+            torch.save(checkpoint, last_path)
+            logger.info(f"Checkpoint saved: last_model.pth (epoch {epoch})")
+        except OSError as e:
+            # Handle all disk errors (quota exceeded, no space, etc.)
+            logger.error(f"DISK ERROR: Could not save checkpoint at Epoch {epoch}. Training continues...")
+            print(f"Error detail: {e}")
+            # Don't raise - let training continue
+            return
+        
+        # If this is the best model, also save as best_model.pth
+        if is_best:
+            try:
+                torch.save(checkpoint, best_path)
+                logger.info(f"Saved best model to {best_path} (R@1: {self.best_r1:.2f})")
+            except OSError as e:
+                # Handle all disk errors (quota exceeded, no space, etc.)
+                logger.error(f"DISK ERROR: Could not save checkpoint at Epoch {epoch}. Training continues...")
+                print(f"Error detail: {e}")
+                # Don't raise - let training continue
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -409,15 +473,26 @@ class Trainer:
         )
         
         if self.use_wandb:
+            # Log for both int (normal epoch) and str (e.g., "TEST_FINAL")
+            log_data = {
+                "val/t2i_r1": r_t2i[1], "val/t2i_r5": r_t2i[5], "val/t2i_r10": r_t2i[10],
+                "val/i2t_r1": r_i2t[1], "val/i2t_r5": r_i2t[5], "val/i2t_r10": r_i2t[10],
+            }
+            
+            # If epoch is a number, add epoch info; otherwise don't use custom string as step
             if isinstance(epoch, int):
-                try:
-                    wandb.log({
-                        "val/t2i_r1": r_t2i[1], "val/t2i_r5": r_t2i[5], "val/t2i_r10": r_t2i[10],
-                        "val/i2t_r1": r_i2t[1], "val/i2t_r5": r_i2t[5], "val/i2t_r10": r_i2t[10],
-                        "epoch": epoch
-                    })
-                except Exception as e:
-                    logger.warning(f"Failed to log to W&B: {e}")
+                log_data["epoch"] = epoch
+            else:
+                # If epoch is a string like "TEST_FINAL", we can add a prefix to distinguish it
+                # or log it directly. WandB typically works on a step basis.
+                # It's best to add test results as separate "summary" metrics:
+                for k, v in log_data.items():
+                    wandb.run.summary[f"test_{k.split('/')[1]}"] = v
+            
+            try:
+                wandb.log(log_data)
+            except Exception as e:
+                logger.warning(f"Failed to log to W&B: {e}")
             
         return r_t2i[1]
 
@@ -451,46 +526,24 @@ class Trainer:
             os.makedirs(self.checkpoint_dir, exist_ok=True)
 
             # 2. EVALUATION & BEST MODEL CHECK
+            is_new_best = False
             if is_eval_time:
                 score = self.evaluate(epoch)
                 
                 # Check if this is a new best model
-                if score > self.best_r1:
+                is_new_best = score > self.best_r1
+                if is_new_best:
                     self.best_r1 = score
                     logger.info(f"New Best R@1: {score:.2f} found at Epoch {epoch+1}!")
                     
                     # Save best model immediately (independent of save_frequency)
-                    checkpoint = {
-                        'epoch': epoch + 1,
-                        'model_state_dict': self.model.state_dict(),
-                        'optimizer_state_dict': self.optimizer.state_dict(),
-                        'scheduler_state_dict': self.scheduler.state_dict(),
-                        'best_r1': self.best_r1,
-                        'config': self.config
-                    }
-                    # Save scaler state if using AMP
-                    if self.use_amp:
-                        checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-                    
-                    # Overwrite best_model.pth (no epoch/score in filename to save disk)
-                    best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
-                    torch.save(checkpoint, best_path)
-                    logger.info(f"Saved best model to {best_path}")
+                    # Also saves last_model.pth as part of the save_checkpoint method
+                    self.save_checkpoint(epoch + 1, is_best=True)
+                elif is_save_time:
+                    # If not best but it's save time, just save last_model.pth
+                    self.save_checkpoint(epoch + 1, is_best=False)
 
             # 3. PERIODIC CHECKPOINT SAVE (Last Model)
-            if is_save_time:
-                checkpoint = {
-                    'epoch': epoch + 1,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'best_r1': self.best_r1,
-                    'config': self.config
-                }
-                # Save scaler state if using AMP
-                if self.use_amp:
-                    checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-                
-                last_path = os.path.join(self.checkpoint_dir, "last_model.pth")
-                torch.save(checkpoint, last_path)
-                logger.info(f"Checkpoint saved: last_model.pth")
+            # Only save if we haven't already saved in the evaluation block above
+            if is_save_time and not is_eval_time:
+                self.save_checkpoint(epoch + 1, is_best=False)
