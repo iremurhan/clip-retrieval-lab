@@ -1,0 +1,122 @@
+#!/bin/bash
+#
+# Unified Mining Script for Knowledge Distillation
+#
+# Usage:
+#   sbatch --export=MINING_MODALITY=<modality> scripts/mining.slurm
+#   Or via wrapper: ./scripts/run_mining.sh <modality>
+#
+# Modalities:
+#   visual    - Image-Image via CLIP vision embeddings
+#   consensus - Image-Image via caption consensus
+#   caption   - Text-Text direct similarity
+#
+# Output files (in datasets/coco/):
+#   visual    -> mining_image_visual.pt
+#   consensus -> mining_image_consensus.pt
+#   caption   -> mining_text.pt
+#
+#SBATCH --job-name=mining
+#SBATCH --output=/users/beyza.urhan/experiments/runs/%j/slurm.log
+#SBATCH --error=/users/beyza.urhan/experiments/runs/%j/err.log
+#SBATCH --time=02-00:00:00
+#SBATCH --gpus=1
+#SBATCH --cpus-per-gpu=8
+#SBATCH --mem-per-gpu=48G
+#SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
+#SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
+#SBATCH --container-image=biremurhan/image-text-contrast:v0.4
+#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,MINING_MODALITY,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE
+
+set -euo pipefail
+
+# ------------------------------------------------------------------
+# CRITICAL CHECK: MOUNT VERIFICATION
+# ------------------------------------------------------------------
+if [ ! -d "/output" ]; then
+    echo "FATAL ERROR: '/output' directory does not exist inside the container."
+    echo "This indicates a mount failure. Exiting to prevent writing to host root."
+    exit 1
+fi
+
+# ------------------------------------------------------------------
+# ARGUMENTS & DEFAULTS
+# ------------------------------------------------------------------
+MODALITY="${MINING_MODALITY:-caption}"
+TOP_K="${TOP_K:-50}"
+BATCH_SIZE="${BATCH_SIZE:-512}"
+QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-100}"
+
+# Validate modality
+if [[ ! "$MODALITY" =~ ^(visual|consensus|caption)$ ]]; then
+    echo "ERROR: Invalid MINING_MODALITY '$MODALITY'"
+    echo "Valid options: visual, consensus, caption"
+    exit 1
+fi
+
+# ------------------------------------------------------------------
+# ENVIRONMENT & DIRECTORIES
+# ------------------------------------------------------------------
+JOB_DIR="/output/${SLURM_JOB_ID}"
+mkdir -p "$JOB_DIR"
+
+# W&B Setup
+export WANDB_DIR="$JOB_DIR"
+if [ -f /env/wandb.env ]; then
+    set -a; source /env/wandb.env; set +a
+fi
+
+if [ -z "${WANDB_API_KEY:-}" ]; then
+    export WANDB_MODE=offline
+    echo "W&B API Key not found. Running offline."
+else
+    export WANDB_MODE=online
+    export WANDB_NAME="${SLURM_JOB_ID}_mining_${MODALITY}"
+fi
+
+# ------------------------------------------------------------------
+# EXECUTION
+# ------------------------------------------------------------------
+cd /workspace
+
+echo "=========================================="
+echo "Job ID:          ${SLURM_JOB_ID}"
+echo "Modality:        ${MODALITY}"
+echo "Top-K:           ${TOP_K}"
+echo "Batch Size:      ${BATCH_SIZE}"
+echo "Query Chunk:     ${QUERY_CHUNK_SIZE}"
+echo "Job Dir:         ${JOB_DIR}"
+echo "=========================================="
+
+case $MODALITY in
+    visual)
+        echo "Mode: Image-Image via Vision Embeddings"
+        echo "Output: datasets/coco/pairwise_similarities/mining_image_visual.pt"
+        ;;
+    consensus)
+        echo "Mode: Image-Image via Caption Consensus"
+        echo "Output: datasets/coco/pairwise_similarities/mining_image_consensus.pt"
+        ;;
+    caption)
+        echo "Mode: Text-Text Direct Similarity"
+        echo "Output: datasets/coco/pairwise_similarities/mining_text.pt"
+        ;;
+esac
+
+echo ""
+echo "Starting mining process..."
+
+# Run unified mining script
+python3 -u tools/mine_pairwise_sim.py \
+    --modality "$MODALITY" \
+    --config config.yaml \
+    --top_k "$TOP_K" \
+    --batch_size "$BATCH_SIZE" \
+    --query_chunk_size "$QUERY_CHUNK_SIZE" \
+    2>&1 | tee "$JOB_DIR/mining_${MODALITY}.log"
+
+echo ""
+echo "=========================================="
+echo "Mining complete!"
+echo "=========================================="

@@ -150,3 +150,127 @@ def compute_recall_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_v
         scores_i2t[k] = (scores_i2t[k] / n_imgs) * 100.0
         
     return scores_t2i, scores_i2t
+
+
+@torch.no_grad()
+def compute_map_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10]):
+    """
+    Compute Mean Average Precision (MAP@K) for Image-Text Retrieval.
+    
+    MAP@K measures ranking quality by considering the position of all relevant items
+    within the top-K results, not just whether they appear (like Recall@K).
+    
+    For T2I: Each caption has exactly 1 correct image, so AP@K = 1/rank if rank <= K, else 0.
+    For I2T: Each image has multiple correct captions (typically 5), so we compute
+             the average precision across all relevant captions in top-K.
+    
+    Args:
+        img_embeds (Tensor): Shape [N_images, Dim] -> Normalized image features (unique images)
+        txt_embeds (Tensor): Shape [N_captions, Dim] -> Normalized text features
+        image_ids (Tensor): Shape [N_captions] -> Image ID for each caption
+        unique_image_ids (Tensor): Shape [N_images] -> Unique image IDs
+        k_values (list): MAP thresholds (e.g., MAP@5, MAP@10)
+        
+    Returns:
+        map_t2i (dict): Text-to-Image MAP scores
+        map_i2t (dict): Image-to-Text MAP scores
+    """
+    # Validate required parameters
+    if image_ids is None or unique_image_ids is None:
+        raise ValueError(
+            "image_ids and unique_image_ids are required for MAP computation."
+        )
+    
+    # Similarity Matrix: [N_images, N_captions]
+    sims = torch.matmul(img_embeds, txt_embeds.t())
+    
+    n_imgs = img_embeds.shape[0]
+    n_txts = txt_embeds.shape[0]
+    
+    # Build mapping: image_id -> unique image index
+    image_id_to_idx = {img_id.item(): idx for idx, img_id in enumerate(unique_image_ids)}
+    
+    # Build caption -> image index mapping
+    caption_to_image_idx = []
+    for caption_idx in range(n_txts):
+        caption_image_id = image_ids[caption_idx].item()
+        unique_img_idx = image_id_to_idx.get(caption_image_id)
+        if unique_img_idx is None:
+            raise ValueError(f"Caption {caption_idx} has unknown image_id {caption_image_id}")
+        caption_to_image_idx.append(unique_img_idx)
+    caption_to_image_idx = torch.tensor(caption_to_image_idx, dtype=torch.long)
+    
+    # Build reverse mapping: image -> caption indices
+    image_to_caption_indices = {}
+    for img_idx in range(n_imgs):
+        img_id = unique_image_ids[img_idx].item()
+        matching_captions = (image_ids == img_id).nonzero(as_tuple=True)[0]
+        image_to_caption_indices[img_idx] = set(matching_captions.tolist())
+    
+    # ----------------------------------------------------------------------
+    # A. Text-to-Image MAP (T2I)
+    # Each caption has exactly 1 correct image.
+    # AP@K = 1/rank if correct image is in top-K, else 0.
+    # MAP@K = mean of all AP@K values.
+    # ----------------------------------------------------------------------
+    sims_t2i = sims.t()  # [N_captions, N_images]
+    
+    map_t2i = {k: 0.0 for k in k_values}
+    
+    for i in range(n_txts):
+        gt_img_idx = caption_to_image_idx[i].item()
+        sorted_indices = sims_t2i[i].argsort(descending=True)
+        
+        # Find rank of correct image (0-indexed)
+        rank = (sorted_indices == gt_img_idx).nonzero(as_tuple=True)[0][0].item()
+        
+        for k in k_values:
+            if rank < k:
+                # AP = 1 / (rank + 1) since rank is 0-indexed
+                map_t2i[k] += 1.0 / (rank + 1)
+    
+    # Normalize to get mean
+    for k in k_values:
+        map_t2i[k] = (map_t2i[k] / n_txts) * 100.0
+    
+    # ----------------------------------------------------------------------
+    # B. Image-to-Text MAP (I2T)
+    # Each image has multiple correct captions (typically 5).
+    # AP@K = (1/|relevant|) * sum_{r in relevant & top-K} (precision at r)
+    # where precision at rank r = (# relevant items in top-r) / r
+    # ----------------------------------------------------------------------
+    map_i2t = {k: 0.0 for k in k_values}
+    
+    for i in range(n_imgs):
+        gt_cap_indices = image_to_caption_indices[i]
+        n_relevant = len(gt_cap_indices)
+        
+        if n_relevant == 0:
+            continue
+        
+        sorted_indices = sims[i].argsort(descending=True)
+        
+        for k in k_values:
+            # Get top-K retrieved indices
+            top_k_indices = sorted_indices[:k].tolist()
+            
+            # Count relevant items found and compute precision at each position
+            relevant_found = 0
+            precision_sum = 0.0
+            
+            for pos, idx in enumerate(top_k_indices):
+                if idx in gt_cap_indices:
+                    relevant_found += 1
+                    # Precision at this position (pos is 0-indexed, so use pos+1)
+                    precision_sum += relevant_found / (pos + 1)
+            
+            # Average Precision for this query
+            if relevant_found > 0:
+                ap = precision_sum / min(n_relevant, k)
+                map_i2t[k] += ap
+    
+    # Normalize to get mean
+    for k in k_values:
+        map_i2t[k] = (map_i2t[k] / n_imgs) * 100.0
+    
+    return map_t2i, map_i2t
