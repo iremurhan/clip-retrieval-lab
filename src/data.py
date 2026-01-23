@@ -61,56 +61,79 @@ class CocoImageDataset(Dataset):
         # Knowledge Distillation: Load Mining Targets
         # ---------------------------------------------------------
         self.mining_targets = None
+        self.mining_mode = None  # 'id_mapping' or 'index_mapping'
+        self.image_id_to_mining_row = None  # For id_mapping mode
+        
         if mining_targets_path and os.path.exists(mining_targets_path):
-            logger.info(f"Loading mining targets from {mining_targets_path} (mode: {distill_mode})")
+            logger.info(f"Loading mining targets from {mining_targets_path}")
             loaded_data = torch.load(mining_targets_path, map_location='cpu')
             
-            # Select keys based on distill_mode
-            if distill_mode == 'max':
-                # Joint format: use max_indices and max_scores
-                if 'max_indices' not in loaded_data or 'max_scores' not in loaded_data:
-                    logger.error(f"Mining targets file missing 'max_indices' or 'max_scores' keys for mode '{distill_mode}'!")
-                    self.mining_targets = None
-                else:
-                    self.mining_targets = {
-                        'indices': loaded_data['max_indices'],
-                        'scores': loaded_data['max_scores']
-                    }
-                    logger.info(f"Loaded MAX strategy targets from joint file")
-            elif distill_mode == 'min':
-                # Joint format: use min_indices and min_scores
-                if 'min_indices' not in loaded_data or 'min_scores' not in loaded_data:
-                    logger.error(f"Mining targets file missing 'min_indices' or 'min_scores' keys for mode '{distill_mode}'!")
-                    self.mining_targets = None
-                else:
-                    self.mining_targets = {
-                        'indices': loaded_data['min_indices'],
-                        'scores': loaded_data['min_scores']
-                    }
-                    logger.info(f"Loaded MIN strategy targets from joint file")
-            else:
-                # Default: standard format with 'indices' and 'scores'
-                if 'indices' not in loaded_data or 'scores' not in loaded_data:
-                    logger.error(f"Mining targets file missing 'indices' or 'scores' keys for mode '{distill_mode}'!")
+            # Detect mapping mode from file
+            file_mode = loaded_data.get('mode', 'index_mapping')  # Default to index for legacy files
+            self.mining_mode = file_mode
+            
+            if file_mode == 'id_mapping':
+                # ID-based mapping (image-level targets)
+                logger.info("Detected ID-based mapping (image-level targets)")
+                
+                if 'image_ids' not in loaded_data or 'indices' not in loaded_data or 'scores' not in loaded_data:
+                    logger.error("ID-mapping format requires 'image_ids', 'indices', and 'scores' keys!")
                     self.mining_targets = None
                 else:
                     self.mining_targets = {
                         'indices': loaded_data['indices'],
                         'scores': loaded_data['scores']
                     }
-                    logger.info(f"Loaded standard format targets")
-            
-            # Validate and log structure
-            if self.mining_targets is not None:
-                n_samples = self.mining_targets['indices'].shape[0]
-                mined_k = self.mining_targets['indices'].shape[1]
-                logger.info(f"Loaded mining targets: {n_samples:,} samples, {mined_k} neighbors each")
+                    
+                    # Build image_id -> row index lookup table
+                    self.image_id_to_mining_row = {}
+                    for row_idx, img_id in enumerate(loaded_data['image_ids'].tolist()):
+                        self.image_id_to_mining_row[img_id] = row_idx
+                    
+                    n_rows = self.mining_targets['indices'].shape[0]
+                    mined_k = self.mining_targets['indices'].shape[1]
+                    logger.info(f"Loaded ID-mapping targets: {n_rows:,} images, {mined_k} neighbors each")
+                    
+            else:
+                # Index-based mapping (caption-level targets, legacy format)
+                logger.info("Detected index-based mapping (caption-level targets)")
                 
-                # Slice to distill_top_k if specified
-                if self.distill_top_k and self.distill_top_k < mined_k:
+                # Handle legacy joint format with max/min keys
+                if distill_mode == 'max' and 'max_indices' in loaded_data:
+                    self.mining_targets = {
+                        'indices': loaded_data['max_indices'],
+                        'scores': loaded_data['max_scores']
+                    }
+                    logger.info("Loaded MAX strategy targets")
+                elif distill_mode == 'min' and 'min_indices' in loaded_data:
+                    self.mining_targets = {
+                        'indices': loaded_data['min_indices'],
+                        'scores': loaded_data['min_scores']
+                    }
+                    logger.info("Loaded MIN strategy targets")
+                elif 'indices' in loaded_data and 'scores' in loaded_data:
+                    self.mining_targets = {
+                        'indices': loaded_data['indices'],
+                        'scores': loaded_data['scores']
+                    }
+                    logger.info("Loaded standard index-based targets")
+                else:
+                    logger.error("Mining targets file missing required keys!")
+                    self.mining_targets = None
+                
+                if self.mining_targets is not None:
+                    n_rows = self.mining_targets['indices'].shape[0]
+                    mined_k = self.mining_targets['indices'].shape[1]
+                    logger.info(f"Loaded index-mapping targets: {n_rows:,} samples, {mined_k} neighbors each")
+            
+            # Slice to distill_top_k if specified
+            if self.mining_targets is not None and self.distill_top_k:
+                mined_k = self.mining_targets['indices'].shape[1]
+                if self.distill_top_k < mined_k:
                     self.mining_targets['indices'] = self.mining_targets['indices'][:, :self.distill_top_k]
                     self.mining_targets['scores'] = self.mining_targets['scores'][:, :self.distill_top_k]
                     logger.info(f"Sliced to top_k={self.distill_top_k} neighbors")
+                    
         elif mining_targets_path:
             logger.warning(f"Mining targets path specified but file not found: {mining_targets_path}")
         
@@ -234,15 +257,28 @@ class CocoImageDataset(Dataset):
         
         # 6. Add Knowledge Distillation targets (if available)
         if self.mining_targets is not None:
-            # Check bounds (in case dataset was truncated in debug mode)
-            if idx < self.mining_targets['indices'].shape[0]:
-                output['soft_target_indices'] = self.mining_targets['indices'][idx]
-                output['soft_target_scores'] = self.mining_targets['scores'][idx]
+            k = self.mining_targets['indices'].shape[1]
+            
+            if self.mining_mode == 'id_mapping':
+                # ID-based lookup: use image_id to find the row
+                mining_row = self.image_id_to_mining_row.get(image_id)
+                
+                if mining_row is not None:
+                    output['soft_target_indices'] = self.mining_targets['indices'][mining_row]
+                    output['soft_target_scores'] = self.mining_targets['scores'][mining_row]
+                else:
+                    # Image ID not found in mining targets (shouldn't happen normally)
+                    output['soft_target_indices'] = torch.zeros(k, dtype=torch.long)
+                    output['soft_target_scores'] = torch.zeros(k, dtype=torch.float32)
             else:
-                # Fallback: return zeros if index out of bounds (shouldn't happen normally)
-                k = self.mining_targets['indices'].shape[1]
-                output['soft_target_indices'] = torch.zeros(k, dtype=torch.long)
-                output['soft_target_scores'] = torch.zeros(k, dtype=torch.float32)
+                # Index-based lookup: use caption index directly
+                if idx < self.mining_targets['indices'].shape[0]:
+                    output['soft_target_indices'] = self.mining_targets['indices'][idx]
+                    output['soft_target_scores'] = self.mining_targets['scores'][idx]
+                else:
+                    # Index out of bounds (debug mode truncation)
+                    output['soft_target_indices'] = torch.zeros(k, dtype=torch.long)
+                    output['soft_target_scores'] = torch.zeros(k, dtype=torch.float32)
         
         return output
 

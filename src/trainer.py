@@ -4,7 +4,7 @@ import logging
 import wandb
 import os
 import time
-from .utils import AverageMeter, compute_recall_at_k
+from .utils import AverageMeter, compute_recall_at_k, compute_map_at_k
 from .loss import DistillationLoss
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,15 @@ class Trainer:
         self.use_wandb = use_wandb
         self.log_freq = config['logging']['log_freq']
         self.checkpoint_dir = config['logging']['checkpoint_dir']
+        
+        # Best score tracking for checkpointing and WandB summary
         self.best_r1 = 0.0
+        self.best_metrics = {
+            't2i_r1': 0.0, 't2i_r5': 0.0, 't2i_r10': 0.0,
+            'i2t_r1': 0.0, 'i2t_r5': 0.0, 'i2t_r10': 0.0,
+            't2i_map5': 0.0, 't2i_map10': 0.0,
+            'i2t_map5': 0.0, 'i2t_map10': 0.0,
+        }
         
         # Initialize Mixed Precision Training (AMP)
         self.use_amp = torch.cuda.is_available()
@@ -86,6 +94,10 @@ class Trainer:
             wandb.define_metric("val/i2t_r1", summary="max")
             wandb.define_metric("val/i2t_r5", summary="max")
             wandb.define_metric("val/i2t_r10", summary="max")
+            wandb.define_metric("val/t2i_map5", summary="max")
+            wandb.define_metric("val/t2i_map10", summary="max")
+            wandb.define_metric("val/i2t_map5", summary="max")
+            wandb.define_metric("val/i2t_map10", summary="max")
 
     def _compute_current_alpha(self, epoch: int) -> float:
         """
@@ -463,34 +475,55 @@ class Trainer:
         unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
         img_embeds_unique = img_embeds[first_occurrence_indices]
         
+        # Compute Recall@K metrics
         r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
         
-        # Log
+        # Compute MAP@K metrics
+        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10])
+        
+        # Log results to console
         logger.info(
             f"Epoch {epoch_log} Results:\n"
-            f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f}\n"
-            f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f}"
+            f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f} | MAP@5: {map_t2i[5]:.2f} | MAP@10: {map_t2i[10]:.2f}\n"
+            f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f} | MAP@5: {map_i2t[5]:.2f} | MAP@10: {map_i2t[10]:.2f}"
         )
         
+        # Current metrics dictionary
+        current_metrics = {
+            't2i_r1': r_t2i[1], 't2i_r5': r_t2i[5], 't2i_r10': r_t2i[10],
+            'i2t_r1': r_i2t[1], 'i2t_r5': r_i2t[5], 'i2t_r10': r_i2t[10],
+            't2i_map5': map_t2i[5], 't2i_map10': map_t2i[10],
+            'i2t_map5': map_i2t[5], 'i2t_map10': map_i2t[10],
+        }
+        
         if self.use_wandb:
-            # Log for both int (normal epoch) and str (e.g., "TEST_FINAL")
+            # Build log data dictionary
             log_data = {
                 "val/t2i_r1": r_t2i[1], "val/t2i_r5": r_t2i[5], "val/t2i_r10": r_t2i[10],
                 "val/i2t_r1": r_i2t[1], "val/i2t_r5": r_i2t[5], "val/i2t_r10": r_i2t[10],
+                "val/t2i_map5": map_t2i[5], "val/t2i_map10": map_t2i[10],
+                "val/i2t_map5": map_i2t[5], "val/i2t_map10": map_i2t[10],
             }
             
-            # If epoch is a number, add epoch info; otherwise don't use custom string as step
+            # If epoch is a number, add epoch info; otherwise handle test logging
             if isinstance(epoch, int):
                 log_data["epoch"] = epoch
             else:
-                # If epoch is a string like "TEST_FINAL", we can add a prefix to distinguish it
-                # or log it directly. WandB typically works on a step basis.
-                # It's best to add test results as separate "summary" metrics:
+                # For test evaluation (e.g., "TEST_FINAL"), store as summary metrics
                 for k, v in log_data.items():
                     wandb.run.summary[f"test_{k.split('/')[1]}"] = v
             
             try:
                 wandb.log(log_data)
+                
+                # Update best metrics in WandB summary if new best is found
+                # This ensures the run summary always shows MAX values
+                for metric_name, current_value in current_metrics.items():
+                    if current_value > self.best_metrics[metric_name]:
+                        self.best_metrics[metric_name] = current_value
+                        # Update WandB summary with best value
+                        wandb.run.summary[f"best_val_{metric_name}"] = current_value
+                        
             except Exception as e:
                 logger.warning(f"Failed to log to W&B: {e}")
             
