@@ -17,9 +17,9 @@
 #   caption   -> mining_text.pt
 #
 #SBATCH --job-name=mining
-#SBATCH --output=/users/beyza.urhan/experiments/runs/%j_mining.log
-#SBATCH --error=/users/beyza.urhan/experiments/runs/%j_mining_err.log
-#SBATCH --time=02-00:00:00
+#SBATCH --output=/users/beyza.urhan/experiments/runs/%j/mining.log
+#SBATCH --error=/users/beyza.urhan/experiments/runs/%j/err.log
+#SBATCH --time=07-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=48G
