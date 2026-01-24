@@ -17,8 +17,8 @@
 #   caption   -> mining_text.pt
 #
 #SBATCH --job-name=mining
-#SBATCH --output=/users/beyza.urhan/experiments/runs/%j/slurm.log
-#SBATCH --error=/users/beyza.urhan/experiments/runs/%j/err.log
+#SBATCH --output=/users/beyza.urhan/experiments/runs/%j_mining.log
+#SBATCH --error=/users/beyza.urhan/experiments/runs/%j_mining_err.log
 #SBATCH --time=02-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
@@ -34,9 +34,13 @@ set -euo pipefail
 # ------------------------------------------------------------------
 # CRITICAL CHECK: MOUNT VERIFICATION
 # ------------------------------------------------------------------
-if [ ! -d "/output" ]; then
-    echo "FATAL ERROR: '/output' directory does not exist inside the container."
-    echo "This indicates a mount failure. Exiting to prevent writing to host root."
+echo "Checking mounts..."
+echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+echo "  /workspace/datasets/coco: $(ls /workspace/datasets/coco 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+
+if [ ! -d "/workspace/datasets/coco" ]; then
+    echo "FATAL ERROR: '/workspace/datasets/coco' not mounted. Check container-mounts."
     exit 1
 fi
 
@@ -58,8 +62,9 @@ fi
 # ------------------------------------------------------------------
 # ENVIRONMENT & DIRECTORIES
 # ------------------------------------------------------------------
-JOB_DIR="/output/${SLURM_JOB_ID}"
-mkdir -p "$JOB_DIR"
+# /output is mounted from /users/beyza.urhan/experiments/runs
+JOB_DIR="/output/${SLURM_JOB_ID}_mining"
+mkdir -p "$JOB_DIR" || echo "Warning: Could not create $JOB_DIR"
 
 # W&B Setup
 export WANDB_DIR="$JOB_DIR"
@@ -113,8 +118,7 @@ python3 -u tools/mine_pairwise_sim.py \
     --config config.yaml \
     --top_k "$TOP_K" \
     --batch_size "$BATCH_SIZE" \
-    --query_chunk_size "$QUERY_CHUNK_SIZE" \
-    2>&1 | tee "$JOB_DIR/mining_${MODALITY}.log"
+    --query_chunk_size "$QUERY_CHUNK_SIZE"
 
 echo ""
 echo "=========================================="
