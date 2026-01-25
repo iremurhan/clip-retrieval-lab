@@ -4,12 +4,7 @@
 #
 # Description:
 #   Automates the downloading and setup of the Flickr30k dataset.
-#   It uses the Kaggle API to fetch the images and downloads the 
-#   Karpathy split JSONs from Stanford servers.
-#
-# Prerequisites:
-#   1. 'kaggle' CLI tool installed (pip install kaggle)
-#   2. Kaggle API key configured (~/.kaggle/kaggle.json)
+#   Uses 'python3 -m kaggle' to bypass 'noexec' permission issues.
 #
 # Usage:
 #   bash scripts/setup/download_flickr.sh
@@ -28,8 +23,9 @@ echo "Target Directory: $TARGET_DIR"
 mkdir -p "$TARGET_DIR"
 
 # --- 1. Check Prerequisites ---
-if ! command -v kaggle &> /dev/null; then
-    echo "[ERROR] 'kaggle' CLI not found."
+# Check if we can import kaggle module in python
+if ! python3 -c "import kaggle" &> /dev/null; then
+    echo "[ERROR] 'kaggle' python module not found."
     echo "Please install it using: pip install kaggle"
     exit 1
 fi
@@ -49,8 +45,8 @@ echo "[1/3] Downloading images via Kaggle API..."
 if [ -d "$TARGET_DIR/images" ] && [ $(find "$TARGET_DIR/images" -name "*.jpg" | wc -l) -gt 30000 ]; then
     echo "      Images found. Skipping download."
 else
-    # Download and unzip directly to target
-    kaggle datasets download -d "$KAGGLE_DATASET" -p "$TARGET_DIR" --unzip
+    # Download and unzip directly to target using python3 -m kaggle
+    python3 -m kaggle datasets download -d "$KAGGLE_DATASET" -p "$TARGET_DIR" --unzip
 
     echo "      Organizing directory structure..."
     
