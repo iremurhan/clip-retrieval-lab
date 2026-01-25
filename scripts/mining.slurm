@@ -3,15 +3,19 @@
 # Unified Mining Script for Knowledge Distillation
 #
 # Usage:
-#   sbatch --export=MINING_MODALITY=<modality> scripts/mining.slurm
-#   Or via wrapper: ./scripts/run_mining.sh <modality>
+#   sbatch --export=MINING_MODALITY=<modality>,MINING_CONFIG=<config> scripts/mining.slurm
+#   Or via wrapper: ./scripts/run_mining.sh <modality> [config_file]
 #
 # Modalities:
 #   visual    - Image-Image via CLIP vision embeddings
 #   consensus - Image-Image via caption consensus
 #   caption   - Text-Text direct similarity
 #
-# Output files (in datasets/coco/):
+# Config files:
+#   config.yaml       - COCO dataset (default)
+#   config_flickr.yaml - Flickr30k dataset
+#
+# Output files (in datasets/{dataset}/pairwise_similarities/):
 #   visual    -> mining_image_visual.pt
 #   consensus -> mining_image_consensus.pt
 #   caption   -> mining_text.pt
@@ -26,8 +30,8 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
-#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
-#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,MINING_MODALITY,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE
+#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE
 
 set -euo pipefail
 
@@ -48,6 +52,7 @@ fi
 # ARGUMENTS & DEFAULTS
 # ------------------------------------------------------------------
 MODALITY="${MINING_MODALITY:-caption}"
+CONFIG_FILE="${MINING_CONFIG:-config.yaml}"
 TOP_K="${TOP_K:-50}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-100}"
@@ -56,6 +61,12 @@ QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-100}"
 if [[ ! "$MODALITY" =~ ^(visual|consensus|caption)$ ]]; then
     echo "ERROR: Invalid MINING_MODALITY '$MODALITY'"
     echo "Valid options: visual, consensus, caption"
+    exit 1
+fi
+
+# Validate config file
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "ERROR: Config file not found: $CONFIG_FILE"
     exit 1
 fi
 
@@ -87,6 +98,7 @@ cd /workspace
 
 echo "=========================================="
 echo "Job ID:          ${SLURM_JOB_ID}"
+echo "Config:          ${CONFIG_FILE}"
 echo "Modality:        ${MODALITY}"
 echo "Top-K:           ${TOP_K}"
 echo "Batch Size:      ${BATCH_SIZE}"
@@ -94,18 +106,25 @@ echo "Query Chunk:     ${QUERY_CHUNK_SIZE}"
 echo "Job Dir:         ${JOB_DIR}"
 echo "=========================================="
 
+# Extract dataset name from config file for display
+if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
+    DATASET_NAME="flickr30k"
+else
+    DATASET_NAME="coco"
+fi
+
 case $MODALITY in
     visual)
         echo "Mode: Image-Image via Vision Embeddings"
-        echo "Output: datasets/coco/pairwise_similarities/mining_image_visual.pt"
+        echo "Output: datasets/${DATASET_NAME}/pairwise_similarities/mining_image_visual.pt"
         ;;
     consensus)
         echo "Mode: Image-Image via Caption Consensus"
-        echo "Output: datasets/coco/pairwise_similarities/mining_image_consensus.pt"
+        echo "Output: datasets/${DATASET_NAME}/pairwise_similarities/mining_image_consensus.pt"
         ;;
     caption)
         echo "Mode: Text-Text Direct Similarity"
-        echo "Output: datasets/coco/pairwise_similarities/mining_text.pt"
+        echo "Output: datasets/${DATASET_NAME}/pairwise_similarities/mining_text.pt"
         ;;
 esac
 
@@ -115,7 +134,7 @@ echo "Starting mining process..."
 # Run unified mining script
 python3 -u tools/mine_pairwise_sim.py \
     --modality "$MODALITY" \
-    --config config.yaml \
+    --config "$CONFIG_FILE" \
     --top_k "$TOP_K" \
     --batch_size "$BATCH_SIZE" \
     --query_chunk_size "$QUERY_CHUNK_SIZE"

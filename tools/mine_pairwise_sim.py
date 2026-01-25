@@ -341,7 +341,8 @@ def main():
     output_path = os.path.join(output_dir, output_filenames[args.modality])
     
     # Initialize wandb
-    wandb.init(project="mining", job_type=f"mining_{args.modality}", config=vars(args))
+    wandb_project = config.get('logging', {}).get('wandb_project', 'mining')
+    wandb.init(project=wandb_project, job_type=f"mining_{args.modality}", config=vars(args))
     
     # Load CLIP model
     model, tokenizer, processor = load_clip_model(config['model']['image_model_name'], device)
