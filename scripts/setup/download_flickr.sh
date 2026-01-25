@@ -1,122 +1,100 @@
 #!/bin/bash
+#
 # scripts/setup/download_flickr.sh
 #
-# Downloads Flickr30k dataset from HuggingFace Hub.
-# Uses huggingface-cli for reliable download.
+# Description:
+#   Automates the downloading and setup of the Flickr30k dataset.
+#   It uses the Kaggle API to fetch the images and downloads the 
+#   Karpathy split JSONs from Stanford servers.
 #
-# Dataset: nlphuji/flickr30k
-# Contents: images.tar.gz + dataset.json (Karpathy format)
+# Prerequisites:
+#   1. 'kaggle' CLI tool installed (pip install kaggle)
+#   2. Kaggle API key configured (~/.kaggle/kaggle.json)
 #
 # Usage:
-#   ./scripts/setup/download_flickr.sh
-#   DATA_DIR=/custom/path ./scripts/setup/download_flickr.sh
+#   bash scripts/setup/download_flickr.sh
+#
 
-set -e  # Exit on error
+set -e
 
-# Target directory (can be overridden via environment variable)
-DATA_DIR="${DATA_DIR:-$HOME/experiments/datasets/flickr30k}"
+TARGET_DIR="datasets/flickr30k"
+KAGGLE_DATASET="hsankesara/flickr-image-dataset"
 
-echo "=============================================="
-echo "Downloading Flickr30k Dataset"
-echo "=============================================="
-echo "Target directory: $DATA_DIR"
-echo ""
+echo "========================================================"
+echo "  Setting up Flickr30k Dataset"
+echo "========================================================"
+echo "Target Directory: $TARGET_DIR"
 
-# Check if huggingface-cli is installed
-if ! command -v huggingface-cli &> /dev/null; then
-    echo "[ERROR] huggingface-cli not found."
-    echo "Install with: pip install huggingface_hub"
+mkdir -p "$TARGET_DIR"
+
+# --- 1. Check Prerequisites ---
+if ! command -v kaggle &> /dev/null; then
+    echo "[ERROR] 'kaggle' CLI not found."
+    echo "Please install it using: pip install kaggle"
     exit 1
 fi
 
-# Create directory
-mkdir -p "$DATA_DIR"
-
-# Check if already downloaded
-if [ -d "$DATA_DIR/images" ] && [ -f "$DATA_DIR/dataset_flickr30k.json" ]; then
-    echo "[OK] Flickr30k already downloaded and extracted."
-    echo "Structure:"
-    ls -lh "$DATA_DIR"
-    exit 0
+if [ ! -f ~/.kaggle/kaggle.json ]; then
+    echo "[ERROR] Kaggle API key not found at ~/.kaggle/kaggle.json"
+    echo "Please download your API key from Kaggle Settings and place it there."
+    echo "Ensure permissions are correct: chmod 600 ~/.kaggle/kaggle.json"
+    exit 1
 fi
 
-# Download from HuggingFace Hub
-echo "[1/3] Downloading from HuggingFace Hub..."
-echo "      This may take a while depending on your connection speed."
+# --- 2. Download Images via Kaggle ---
 echo ""
+echo "[1/3] Downloading images via Kaggle API..."
 
-huggingface-cli download nlphuji/flickr30k \
-    --repo-type dataset \
-    --local-dir "$DATA_DIR" \
-    --local-dir-use-symlinks False
-
-echo ""
-echo "[2/3] Download complete. Checking contents..."
-
-# List downloaded files
-ls -lh "$DATA_DIR"
-
-# Extract images if tar.gz exists
-if [ -f "$DATA_DIR/images.tar.gz" ]; then
-    echo ""
-    echo "[3/3] Extracting images.tar.gz..."
-    
-    cd "$DATA_DIR"
-    tar -xzf images.tar.gz
-    
-    # Verify extraction
-    if [ -d "images" ] || [ -d "flickr30k-images" ]; then
-        echo "[OK] Images extracted successfully."
-        
-        # Rename if needed (some versions use flickr30k-images)
-        if [ -d "flickr30k-images" ] && [ ! -d "images" ]; then
-            mv flickr30k-images images
-            echo "     Renamed flickr30k-images -> images"
-        fi
-        
-        # Optionally remove tar.gz to save space
-        read -p "Remove images.tar.gz to save space? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm images.tar.gz
-            echo "[OK] Removed images.tar.gz"
-        fi
-    else
-        echo "[WARN] Extraction may have failed. Check contents manually."
-    fi
-elif [ -d "$DATA_DIR/images" ]; then
-    echo "[3/3] Images already extracted. Skipping."
+# Check if images already exist to avoid re-downloading
+if [ -d "$TARGET_DIR/images" ] && [ $(find "$TARGET_DIR/images" -name "*.jpg" | wc -l) -gt 30000 ]; then
+    echo "      Images found. Skipping download."
 else
-    echo "[WARN] images.tar.gz not found. Dataset may be incomplete."
-    echo "       Check HuggingFace repo for the correct structure."
+    # Download and unzip directly to target
+    kaggle datasets download -d "$KAGGLE_DATASET" -p "$TARGET_DIR" --unzip
+
+    echo "      Organizing directory structure..."
+    
+    # The Kaggle dataset usually extracts into a nested folder like 'flickr30k_images/flickr30k_images/...'
+    # We consolidate everything into $TARGET_DIR/images
+    
+    mkdir -p "$TARGET_DIR/images"
+    
+    # Find and move all jpg files to the target images folder
+    find "$TARGET_DIR" -type f -name "*.jpg" -exec mv {} "$TARGET_DIR/images/" \;
+    
+    # Clean up empty folders left behind by the unzip
+    find "$TARGET_DIR" -type d -name "flickr30k_images" -exec rm -rf {} +
+    
+    echo "      Cleanup complete."
 fi
 
-# Rename/copy dataset JSON if needed
-if [ -f "$DATA_DIR/dataset.json" ] && [ ! -f "$DATA_DIR/dataset_flickr30k.json" ]; then
-    cp "$DATA_DIR/dataset.json" "$DATA_DIR/dataset_flickr30k.json"
-    echo "[OK] Copied dataset.json -> dataset_flickr30k.json"
+# Verify image count
+IMG_COUNT=$(find "$TARGET_DIR/images" -name "*.jpg" | wc -l)
+echo "      Total images: $IMG_COUNT"
+
+if [ "$IMG_COUNT" -lt 31000 ]; then
+    echo "[WARNING] Expected ~31,783 images, found only $IMG_COUNT."
 fi
 
-# Final verification
+# --- 3. Download Karpathy Splits ---
 echo ""
-echo "=============================================="
-echo "Download Complete!"
-echo "=============================================="
-echo "Directory: $DATA_DIR"
-echo ""
-echo "Expected structure:"
-echo "  flickr30k/"
-echo "    images/          (31,783 images)"
-echo "    dataset_flickr30k.json  (Karpathy splits)"
-echo ""
-echo "Current contents:"
-ls -lh "$DATA_DIR"
+echo "[2/3] Downloading Karpathy Splits (JSON)..."
 
-# Count images if directory exists
-if [ -d "$DATA_DIR/images" ]; then
-    IMG_COUNT=$(find "$DATA_DIR/images" -type f \( -name "*.jpg" -o -name "*.png" \) | wc -l)
-    echo ""
-    echo "Image count: $IMG_COUNT"
+if [ ! -f "$TARGET_DIR/dataset_flickr30k.json" ]; then
+    wget -q https://cs.stanford.edu/people/karpathy/deepimagesent/caption_datasets.zip -O caption_datasets.zip
+    unzip -q -o caption_datasets.zip
+    mv dataset_flickr30k.json "$TARGET_DIR/"
+    
+    # Remove unnecessary files
+    rm caption_datasets.zip dataset_coco.json dataset_flickr8k.json
+    echo "      Downloaded dataset_flickr30k.json"
+else
+    echo "      dataset_flickr30k.json already exists."
 fi
 
-echo "=============================================="
+echo ""
+echo "========================================================"
+echo "  Setup Complete!"
+echo "  Images: $(pwd)/$TARGET_DIR/images/"
+echo "  Splits: $(pwd)/$TARGET_DIR/dataset_flickr30k.json"
+echo "========================================================"
