@@ -17,7 +17,7 @@
 #
 # Output files (in datasets/{dataset}/pairwise_similarities/):
 #   visual    -> mining_image_visual.pt
-#   consensus -> mining_image_consensus.pt
+#   consensus -> mining_image_consensus_{mean,min,max}.pt (3 files, computed in single run)
 #   caption   -> mining_text.pt
 #
 #SBATCH --job-name=mining
@@ -123,7 +123,8 @@ case $MODALITY in
         ;;
     consensus)
         echo "Mode: Image-Image via Caption Consensus"
-        echo "Output: datasets/${DATASET_NAME}/pairwise_similarities/mining_image_consensus.pt"
+        echo "Output: datasets/${DATASET_NAME}/pairwise_similarities/mining_image_consensus_{mean,min,max}.pt"
+        echo "        (All 3 strategies computed in a single run)"
         ;;
     caption)
         echo "Mode: Text-Text Direct Similarity"

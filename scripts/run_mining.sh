@@ -7,7 +7,7 @@
 #
 # Modalities:
 #   visual    - Image-Image similarity via CLIP vision embeddings
-#   consensus - Image-Image similarity via caption consensus (5x5 matrix mean)
+#   consensus - Image-Image similarity via caption consensus (5x5 matrix: MEAN, MIN, MAX)
 #   caption   - Text-Text direct cosine similarity
 #
 # Config files:
@@ -15,9 +15,9 @@
 #   config_flickr.yaml - Flickr30k dataset
 #
 # Output files (in datasets/{dataset}/pairwise_similarities/):
-#   visual    -> mining_image_visual.pt    (ID-based mapping)
-#   consensus -> mining_image_consensus.pt (ID-based mapping)
-#   caption   -> mining_text.pt            (index-based mapping)
+#   visual    -> mining_image_visual.pt                    (ID-based mapping)
+#   consensus -> mining_image_consensus_{mean,min,max}.pt   (ID-based mapping, 3 files)
+#   caption   -> mining_text.pt                            (index-based mapping)
 #
 
 set -e
