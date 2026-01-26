@@ -4,7 +4,7 @@
 #
 # Description:
 #   Automates the downloading and setup of the Flickr30k dataset.
-#   Uses 'python3 -m kaggle' to bypass 'noexec' permission issues.
+#   Uses HuggingFace Hub for reliable download (no Kaggle API required).
 #
 # Usage:
 #   bash scripts/setup/download_flickr.sh
@@ -13,7 +13,7 @@
 set -e
 
 TARGET_DIR="datasets/flickr30k"
-KAGGLE_DATASET="hsankesara/flickr-image-dataset"
+HF_DATASET="nlphuji/flickr30k"
 
 echo "========================================================"
 echo "  Setting up Flickr30k Dataset"
@@ -23,74 +23,117 @@ echo "Target Directory: $TARGET_DIR"
 mkdir -p "$TARGET_DIR"
 
 # --- 1. Check Prerequisites ---
-# Check if we can import kaggle module in python
-if ! python3 -c "import kaggle" &> /dev/null; then
-    echo "[ERROR] 'kaggle' python module not found."
-    echo "Please install it using: pip install kaggle"
+if ! python3 -c "import huggingface_hub" &> /dev/null; then
+    echo "[ERROR] 'huggingface_hub' python module not found."
+    echo "Please install it using: pip install huggingface_hub"
     exit 1
 fi
 
-if [ ! -f ~/.kaggle/kaggle.json ]; then
-    echo "[ERROR] Kaggle API key not found at ~/.kaggle/kaggle.json"
-    echo "Please download your API key from Kaggle Settings and place it there."
-    echo "Ensure permissions are correct: chmod 600 ~/.kaggle/kaggle.json"
-    exit 1
-fi
-
-# --- 2. Download Images via Kaggle ---
+# --- 2. Download Images via HuggingFace Hub ---
 echo ""
-echo "[1/3] Downloading images via Kaggle API..."
+echo "[1/3] Downloading images via HuggingFace Hub..."
 
 # Check if images already exist to avoid re-downloading
-if [ -d "$TARGET_DIR/images" ] && [ $(find "$TARGET_DIR/images" -name "*.jpg" | wc -l) -gt 30000 ]; then
+if [ -d "$TARGET_DIR/flickr30k_images" ] && [ $(find "$TARGET_DIR/flickr30k_images" -name "*.jpg" | wc -l) -gt 30000 ]; then
     echo "      Images found. Skipping download."
 else
-    # Download and unzip directly to target using python3 -m kaggle
-    python3 -m kaggle datasets download -d "$KAGGLE_DATASET" -p "$TARGET_DIR" --unzip
+    # Download using huggingface_hub
+    python3 << EOF
+from huggingface_hub import snapshot_download
+import os
+
+target_dir = "$TARGET_DIR"
+repo_id = "$HF_DATASET"
+
+print("      Downloading from HuggingFace Hub...")
+snapshot_download(
+    repo_id=repo_id,
+    repo_type="dataset",
+    local_dir=target_dir,
+    local_dir_use_symlinks=False
+)
+print("      Download complete.")
+EOF
 
     echo "      Organizing directory structure..."
     
-    # The Kaggle dataset usually extracts into a nested folder like 'flickr30k_images/flickr30k_images/...'
-    # We consolidate everything into $TARGET_DIR/images
-    
-    mkdir -p "$TARGET_DIR/images"
-    
-    # Find and move all jpg files to the target images folder
-    find "$TARGET_DIR" -type f -name "*.jpg" -exec mv {} "$TARGET_DIR/images/" \;
-    
-    # Clean up empty folders left behind by the unzip
-    find "$TARGET_DIR" -type d -name "flickr30k_images" -exec rm -rf {} +
-    
-    echo "      Cleanup complete."
+    # HuggingFace usually downloads to flickr30k_images/ or images/
+    if [ -d "$TARGET_DIR/flickr30k_images" ]; then
+        echo "      Found flickr30k_images/ directory"
+    elif [ -d "$TARGET_DIR/images" ]; then
+        echo "      Found images/ directory"
+        # Rename to flickr30k_images for consistency
+        mv "$TARGET_DIR/images" "$TARGET_DIR/flickr30k_images"
+    else
+        echo "      Searching for image directory..."
+        # Find the directory with most jpg files
+        IMG_DIR=$(find "$TARGET_DIR" -type d -exec sh -c 'echo "$(find "$1" -name "*.jpg" | wc -l) $1"' _ {} \; | sort -rn | head -1 | cut -d' ' -f2-)
+        if [ -n "$IMG_DIR" ] && [ "$IMG_DIR" != "$TARGET_DIR" ]; then
+            mv "$IMG_DIR" "$TARGET_DIR/flickr30k_images"
+            echo "      Moved to flickr30k_images/"
+        else
+            echo "[WARNING] Could not find image directory. Please check manually."
+        fi
+    fi
 fi
 
 # Verify image count
-IMG_COUNT=$(find "$TARGET_DIR/images" -name "*.jpg" | wc -l)
-echo "      Total images: $IMG_COUNT"
-
-if [ "$IMG_COUNT" -lt 31000 ]; then
-    echo "[WARNING] Expected ~31,783 images, found only $IMG_COUNT."
+if [ -d "$TARGET_DIR/flickr30k_images" ]; then
+    IMG_COUNT=$(find "$TARGET_DIR/flickr30k_images" -name "*.jpg" | wc -l)
+    echo "      Total images: $IMG_COUNT"
+    
+    if [ "$IMG_COUNT" -lt 31000 ]; then
+        echo "[WARNING] Expected ~31,783 images, found only $IMG_COUNT."
+    fi
+else
+    echo "[WARNING] flickr30k_images directory not found."
 fi
 
-# --- 3. Download Karpathy Splits ---
+# --- 3. Download Karpathy Splits (JSON) ---
 echo ""
 echo "[2/3] Downloading Karpathy Splits (JSON)..."
 
-if [ ! -f "$TARGET_DIR/dataset_flickr30k.json" ]; then
+# Create caption_datasets directory if needed
+mkdir -p "$TARGET_DIR/caption_datasets"
+
+JSON_PATH="$TARGET_DIR/caption_datasets/dataset_flickr30k.json"
+
+if [ ! -f "$JSON_PATH" ]; then
+    # Download from Stanford
+    cd "$TARGET_DIR"
     wget -q https://cs.stanford.edu/people/karpathy/deepimagesent/caption_datasets.zip -O caption_datasets.zip
     unzip -q -o caption_datasets.zip
-    mv dataset_flickr30k.json "$TARGET_DIR/"
+    
+    # Move to caption_datasets subdirectory
+    mv dataset_flickr30k.json caption_datasets/
     
     # Remove unnecessary files
-    rm caption_datasets.zip dataset_coco.json dataset_flickr8k.json
+    rm -f caption_datasets.zip dataset_coco.json dataset_flickr8k.json
     echo "      Downloaded dataset_flickr30k.json"
 else
     echo "      dataset_flickr30k.json already exists."
 fi
 
+# --- 4. Final Verification ---
+echo ""
+echo "[3/3] Verifying setup..."
+
+if [ -d "$TARGET_DIR/flickr30k_images" ]; then
+    IMG_COUNT=$(find "$TARGET_DIR/flickr30k_images" -name "*.jpg" | wc -l)
+    echo "      Images: $IMG_COUNT found in flickr30k_images/"
+else
+    echo "      [WARNING] flickr30k_images/ directory not found"
+fi
+
+if [ -f "$JSON_PATH" ]; then
+    echo "      JSON: dataset_flickr30k.json found"
+else
+    echo "      [WARNING] dataset_flickr30k.json not found"
+fi
+
 echo ""
 echo "========================================================"
 echo "  Setup Complete!"
-echo "  Images: $(pwd)/$TARGET_DIR/images/"
-echo "  Splits: $(pwd)/$TARGET_DIR/dataset_flickr30k.json"
+echo "  Images: $TARGET_DIR/flickr30k_images/"
+echo "  JSON:   $JSON_PATH"
 echo "========================================================"
