@@ -41,10 +41,13 @@ set -euo pipefail
 echo "Checking mounts..."
 echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
 echo "  /workspace/datasets/coco: $(ls /workspace/datasets/coco 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+echo "  /workspace/datasets/flickr30k: $(ls /workspace/datasets/flickr30k 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
 echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
 
-if [ ! -d "/workspace/datasets/coco" ]; then
-    echo "FATAL ERROR: '/workspace/datasets/coco' not mounted. Check container-mounts."
+# Check that at least one dataset is mounted (actual dataset determined by config)
+if [ ! -d "/workspace/datasets/coco" ] && [ ! -d "/workspace/datasets/flickr30k" ]; then
+    echo "FATAL ERROR: No dataset directories found. Check container-mounts."
+    echo "Expected at least one of: /workspace/datasets/coco or /workspace/datasets/flickr30k"
     exit 1
 fi
 

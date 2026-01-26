@@ -50,7 +50,7 @@ from PIL import Image
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.data import CocoImageDataset
+from src.data import CaptionImageDataset
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -189,12 +189,14 @@ def mine_visual(model, processor, dataset, image_ids: list, top_k: int, device: 
 def mine_consensus(all_text_embeds, image_to_indices, image_ids: list, top_k: int, 
                    device: torch.device, query_chunk_size: int = 50):
     """
-    Mine Image-Image similarity using caption consensus (5x5 matrix mean).
+    Mine Image-Image similarity using caption consensus (5x5 matrix).
     
-    Returns ID-based mapping format.
+    Computes MEAN, MIN, and MAX aggregation strategies and returns all three.
+    Returns a dict with keys: 'mean', 'min', 'max', each containing ID-based mapping format.
     """
     logger.info("=" * 60)
     logger.info("MODE: CONSENSUS (Image-Image via Caption Agreement)")
+    logger.info("Computing MEAN, MIN, and MAX strategies...")
     logger.info("=" * 60)
     
     n_images = len(image_ids)
@@ -216,9 +218,14 @@ def mine_consensus(all_text_embeds, image_to_indices, image_ids: list, top_k: in
     
     keys_flat = structured_embeds.view(-1, dim)
     
-    logger.info(f"Mining Top-{top_k} neighbors using MEAN consensus...")
+    logger.info(f"Mining Top-{top_k} neighbors using MEAN, MIN, and MAX consensus...")
     
-    indices_list, scores_list = [], []
+    # Storage for all three strategies
+    results = {
+        'mean': {'indices_list': [], 'scores_list': []},
+        'min': {'indices_list': [], 'scores_list': []},
+        'max': {'indices_list': [], 'scores_list': []}
+    }
     
     for i in tqdm(range(0, n_images, query_chunk_size), desc="Mining Consensus"):
         end = min(i + query_chunk_size, n_images)
@@ -230,27 +237,39 @@ def mine_consensus(all_text_embeds, image_to_indices, image_ids: list, top_k: in
         full_sim = queries_flat @ keys_flat.T
         full_sim = full_sim.view(batch_size, 5, n_images, 5)
         
-        # MEAN aggregation: average over all 25 caption pairs
-        mean_sim = full_sim.mean(dim=(1, 3))  # [B, N]
+        # Compute all three aggregation strategies
+        # full_sim shape: [B, 5, N, 5] where each [5, 5] matrix contains 25 caption pair similarities
+        mean_sim = full_sim.mean(dim=(1, 3))  # [B, N] - average over all 25 caption pairs
+        # Flatten the 5x5 matrices to get all 25 values, then take min/max
+        full_sim_flat = full_sim.view(batch_size, n_images, -1)  # [B, N, 25]
+        min_sim = full_sim_flat.min(dim=2)[0]  # [B, N] - min over all 25 pairs
+        max_sim = full_sim_flat.max(dim=2)[0]  # [B, N] - max over all 25 pairs
         
-        # Mask self-similarity
+        # Mask self-similarity for all strategies
         for b in range(batch_size):
             mean_sim[b, i + b] = -float('inf')
+            min_sim[b, i + b] = -float('inf')
+            max_sim[b, i + b] = -float('inf')
         
-        # Get top-k
-        top_scores, top_indices = mean_sim.topk(top_k, dim=1)
-        indices_list.append(top_indices.cpu())
-        scores_list.append(top_scores.cpu())
+        # Get top-k for each strategy
+        for strategy_name, sim_matrix in [('mean', mean_sim), ('min', min_sim), ('max', max_sim)]:
+            top_scores, top_indices = sim_matrix.topk(top_k, dim=1)
+            results[strategy_name]['indices_list'].append(top_indices.cpu())
+            results[strategy_name]['scores_list'].append(top_scores.cpu())
     
-    indices = torch.cat(indices_list, dim=0)
-    scores = torch.cat(scores_list, dim=0)
+    # Concatenate and format results for each strategy
+    output = {}
+    for strategy_name in ['mean', 'min', 'max']:
+        indices = torch.cat(results[strategy_name]['indices_list'], dim=0)
+        scores = torch.cat(results[strategy_name]['scores_list'], dim=0)
+        output[strategy_name] = {
+            "mode": "id_mapping",
+            "image_ids": torch.tensor(image_ids, dtype=torch.long),
+            "indices": indices,
+            "scores": scores
+        }
     
-    return {
-        "mode": "id_mapping",
-        "image_ids": torch.tensor(image_ids, dtype=torch.long),
-        "indices": indices,
-        "scores": scores
-    }
+    return output
 
 
 # =============================================================================
@@ -310,7 +329,7 @@ def main():
     parser.add_argument('--modality', type=str, required=True, choices=['visual', 'consensus', 'caption'],
                         help='Mining modality: visual (image-image), consensus (caption agreement), caption (text-text)')
     parser.add_argument('--config', type=str, default='config.yaml', help='Path to config file')
-    parser.add_argument('--output_dir', type=str, default=None, help='Output directory (default: datasets/coco)')
+    parser.add_argument('--output_dir', type=str, default=None, help='Output directory (default: read from config data.images_path)')
     parser.add_argument('--top_k', type=int, default=50, help='Number of neighbors to mine')
     parser.add_argument('--batch_size', type=int, default=512, help='Batch size for embedding extraction')
     parser.add_argument('--query_chunk_size', type=int, default=100, help='Query chunk size for mining')
@@ -333,9 +352,10 @@ def main():
     logger.info(f"Output directory: {output_dir}")
     
     # Output filename based on modality
+    # Note: consensus generates 3 files (mean, min, max) - see consensus handling below
     output_filenames = {
         'visual': 'mining_image_visual.pt',
-        'consensus': 'mining_image_consensus.pt',
+        'consensus': 'mining_image_consensus_mean.pt',  # Primary file (mean), but all 3 are saved
         'caption': 'mining_text.pt'
     }
     output_path = os.path.join(output_dir, output_filenames[args.modality])
@@ -348,7 +368,7 @@ def main():
     model, tokenizer, processor = load_clip_model(config['model']['image_model_name'], device)
     
     # Load dataset
-    dataset = CocoImageDataset(
+    dataset = CaptionImageDataset(
         images_root_path=config['data']['images_path'],
         captions_path=config['data']['captions_path'],
         tokenizer=tokenizer,
@@ -391,15 +411,32 @@ def main():
         )
         
     elif args.modality == 'consensus':
-        # Consensus mode: extract text embeddings, then compute consensus
+        # Consensus mode: extract text embeddings, then compute consensus (MEAN, MIN, MAX)
         all_text_embeds = compute_text_embeddings(dataset, tokenizer, model, args.batch_size, device)
         del model
         torch.cuda.empty_cache()
         
-        result = mine_consensus(
+        results_dict = mine_consensus(
             all_text_embeds, image_to_indices, image_ids_ordered, args.top_k, device,
             query_chunk_size=args.query_chunk_size
         )
+        
+        # Save all three strategies (mean, min, max) to separate files
+        for strategy in ['mean', 'min', 'max']:
+            strategy_output_path = os.path.join(output_dir, f'mining_image_consensus_{strategy}.pt')
+            logger.info(f"Saving {strategy.upper()} consensus results to {strategy_output_path}")
+            torch.save(results_dict[strategy], strategy_output_path)
+            
+            # Log summary for each strategy
+            result = results_dict[strategy]
+            logger.info(f"\n{strategy.upper()} Consensus Summary:")
+            logger.info(f"  Total images: {len(result['image_ids']):,}")
+            logger.info(f"  Indices shape: {result['indices'].shape}")
+            logger.info(f"  Scores shape: {result['scores'].shape}")
+            logger.info(f"  Score range: [{result['scores'].min():.4f}, {result['scores'].max():.4f}]")
+        
+        # Set result to mean for wandb logging (use mean as primary)
+        result = results_dict['mean']
         
     else:  # caption
         # Caption mode: extract text embeddings, direct similarity
@@ -412,16 +449,22 @@ def main():
             query_chunk_size=args.query_chunk_size
         )
     
-    # Save results
-    logger.info(f"Saving results to {output_path}")
-    torch.save(result, output_path)
+    # Save results (for non-consensus modalities, or consensus mean as primary)
+    if args.modality != 'consensus':
+        logger.info(f"Saving results to {output_path}")
+        torch.save(result, output_path)
     
     # Log summary
     logger.info("\n" + "=" * 60)
     logger.info("MINING COMPLETE")
     logger.info("=" * 60)
     logger.info(f"Modality: {args.modality}")
-    logger.info(f"Output mode: {result['mode']}")
+    if args.modality == 'consensus':
+        logger.info("Strategies saved: MEAN, MIN, MAX")
+        logger.info(f"Primary output (MEAN): {os.path.join(output_dir, 'mining_image_consensus_mean.pt')}")
+    else:
+        logger.info(f"Output mode: {result['mode']}")
+        logger.info(f"Saved to: {output_path}")
     
     if result['mode'] == 'id_mapping':
         logger.info(f"Total images: {len(result['image_ids']):,}")
@@ -429,7 +472,6 @@ def main():
     logger.info(f"Scores shape: {result['scores'].shape}")
     logger.info(f"Top-K: {args.top_k}")
     logger.info(f"Score range: [{result['scores'].min():.4f}, {result['scores'].max():.4f}]")
-    logger.info(f"Saved to: {output_path}")
     logger.info("=" * 60)
     
     # Log to wandb

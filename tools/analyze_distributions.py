@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.data import CocoImageDataset
+from src.data import CaptionImageDataset
 
 
 def setup_seed(seed=42):
@@ -217,7 +217,7 @@ def main():
     print(f"Captions: {captions_path}")
 
     # Load dataset
-    dataset = CocoImageDataset(
+    dataset = CaptionImageDataset(
         images_root_path=images_root,
         captions_path=captions_path,
         tokenizer=tokenizer,

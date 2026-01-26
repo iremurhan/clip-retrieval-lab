@@ -19,7 +19,7 @@ from torchvision.transforms import InterpolationMode
 # Configure logger
 logger = logging.getLogger(__name__)
 
-class CocoImageDataset(Dataset):
+class CaptionImageDataset(Dataset):
     def __init__(
         self, 
         images_root_path, 
@@ -35,8 +35,8 @@ class CocoImageDataset(Dataset):
     ):
         """
         Args:
-            images_root_path (str): Root directory containing image folders (train2014/val2014).
-            captions_path (str): Path to the Karpathy JSON file.
+            images_root_path (str): Root directory containing image folders (e.g., train2014/val2014 for COCO, or images/ for Flickr30k).
+            captions_path (str): Path to the Karpathy JSON file (supports COCO and Flickr30k formats).
             tokenizer: HuggingFace tokenizer instance.
             max_length (int): Maximum token sequence length (CLIP default: 77).
             split (str): 'train', 'val', or 'test'.
@@ -184,20 +184,18 @@ class CocoImageDataset(Dataset):
                 current_split = 'train'
 
             if current_split == split:
-                # Support different ID field names across datasets:
-                # - COCO: 'cocoid' or 'id'
-                # - Flickr30k: 'imgid'
+                # Support COCO ('cocoid'), Flickr ('imgid'), and generic ('id')
                 if 'cocoid' in img:
                     img_id = int(img['cocoid'])
-                elif 'id' in img:
-                    img_id = int(img['id'])
                 elif 'imgid' in img:
                     img_id = int(img['imgid'])
+                elif 'id' in img:
+                    img_id = int(img['id'])
                 else:
-                    raise ValueError(f"Image entry missing 'cocoid', 'id', or 'imgid': {img}")
+                    raise ValueError(f"Image entry missing 'cocoid', 'imgid', or 'id': {img}")
                 
                 # Limit to exactly 5 captions per image to match evaluation assumptions
-                # MS-COCO can have 6-7 captions, but we need exactly 5 for consistent evaluation
+                # Some datasets (e.g., MS-COCO) can have 6-7 captions, but we standardize to 5 for consistent evaluation
                 sentences = img['sentences'][:5]
                 
                 if len(sentences) < 5:
@@ -319,7 +317,7 @@ def get_dataloader(config, tokenizer, split='train'):
     else:
         distill_mode = 'simple'
     
-    dataset = CocoImageDataset(
+    dataset = CaptionImageDataset(
         images_root_path=images_root,
         captions_path=config['data']['captions_path'],
         tokenizer=tokenizer,
