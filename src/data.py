@@ -224,7 +224,20 @@ class CaptionImageDataset(Dataset):
         caption = sample['caption']
         
         # 1. Load Image
-        image_path = os.path.join(self.images_root_path, sample['filepath'], sample['filename'])
+        # Construct image path: handle cases where filepath might be empty or redundant
+        filepath = sample.get('filepath', '').strip()
+        filename = sample['filename']
+        
+        if filepath:
+            # Try full path first
+            image_path = os.path.join(self.images_root_path, filepath, filename)
+            # If file doesn't exist, try without filepath (in case it's redundant)
+            if not os.path.exists(image_path):
+                image_path = os.path.join(self.images_root_path, filename)
+        else:
+            # No filepath in JSON, use images_root_path directly
+            image_path = os.path.join(self.images_root_path, filename)
+        
         image = Image.open(image_path).convert('RGB')
 
         # 2. Apply Transforms
