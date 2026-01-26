@@ -4,7 +4,7 @@
 # Data Configuration
 # ==========================================
 data:
-  images_path: "datasets/flickr30k/images"
+  images_path: "datasets/flickr30k/flickr30k_images"
   # Caption path: Using Karpathy JSON structure
   captions_path: "datasets/flickr30k/caption_datasets/dataset_flickr30k.json"
   batch_size: 256
