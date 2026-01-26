@@ -346,7 +346,19 @@ def main():
         config = yaml.safe_load(f)
     
     # Determine output directory: datasets/{dataset}/pairwise_similarities/
-    base_data_dir = args.output_dir or config['data']['images_path']
+    # Note: images_path might be datasets/coco or datasets/flickr30k/flickr30k_images
+    # We want pairwise_similarities at the dataset root level, not inside images folder
+    if args.output_dir:
+        base_data_dir = args.output_dir
+    else:
+        images_path = config['data']['images_path']
+        # If images_path ends with a subdirectory (e.g., flickr30k_images), go up one level
+        # Otherwise use it directly (e.g., datasets/coco)
+        if os.path.basename(images_path) in ['images', 'train2014', 'val2014']:
+            base_data_dir = os.path.dirname(images_path)
+        else:
+            base_data_dir = images_path
+    
     output_dir = os.path.join(base_data_dir, 'pairwise_similarities')
     os.makedirs(output_dir, exist_ok=True)
     logger.info(f"Output directory: {output_dir}")
