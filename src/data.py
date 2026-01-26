@@ -184,13 +184,17 @@ class CocoImageDataset(Dataset):
                 current_split = 'train'
 
             if current_split == split:
-                if 'cocoid' not in img:
-                    if 'id' in img:
-                        img_id = int(img['id'])
-                    else:
-                        raise ValueError(f"Image entry missing 'cocoid' or 'id': {img}")     
-                else:
+                # Support different ID field names across datasets:
+                # - COCO: 'cocoid' or 'id'
+                # - Flickr30k: 'imgid'
+                if 'cocoid' in img:
                     img_id = int(img['cocoid'])
+                elif 'id' in img:
+                    img_id = int(img['id'])
+                elif 'imgid' in img:
+                    img_id = int(img['imgid'])
+                else:
+                    raise ValueError(f"Image entry missing 'cocoid', 'id', or 'imgid': {img}")
                 
                 # Limit to exactly 5 captions per image to match evaluation assumptions
                 # MS-COCO can have 6-7 captions, but we need exactly 5 for consistent evaluation
