@@ -14,3 +14,4 @@ __pycache__/
 # Dataset
 datasets/
 checkpoints
+*.pt
