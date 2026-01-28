@@ -31,7 +31,7 @@
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
-#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE
 
 set -euo pipefail
 
@@ -86,12 +86,20 @@ if [ -f /env/wandb.env ]; then
     set -a; source /env/wandb.env; set +a
 fi
 
+if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
+    WANDB_PROJECT_AUTO="mining-flickr30k"
+else
+    WANDB_PROJECT_AUTO="mining-coco"
+fi
+
 if [ -z "${WANDB_API_KEY:-}" ]; then
     export WANDB_MODE=offline
     echo "W&B API Key not found. Running offline."
 else
     export WANDB_MODE=online
     export WANDB_NAME="${SLURM_JOB_ID}_mining_${MODALITY}"
+    export WANDB_PROJECT="$WANDB_PROJECT_AUTO"
+    echo "W&B Project auto-set: ${WANDB_PROJECT}"
 fi
 
 # ------------------------------------------------------------------
