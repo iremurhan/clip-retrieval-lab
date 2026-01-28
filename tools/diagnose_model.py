@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import logging
+import base64
 from tqdm import tqdm
 import torch.nn.functional as F
 from transformers import CLIPTokenizer
@@ -421,8 +422,32 @@ def aggregate_statistics(failures):
 
 
 def generate_html_report(all_failures, output_html):
-    """Generate a standalone HTML report for all failures."""
+    """Generate a standalone HTML report for all failures.
+
+    Images are embedded as base64 data URIs so that the HTML file
+    is fully self-contained and portable across machines.
+    """
     os.makedirs(os.path.dirname(output_html), exist_ok=True)
+
+    def image_to_base64(img_path: str) -> str:
+        """Encode image file as base64 string. Returns empty string on failure."""
+        if not img_path:
+            return ""
+        try:
+            with open(img_path, "rb") as img_file:
+                return base64.b64encode(img_file.read()).decode("utf-8")
+        except Exception as exc:
+            logger.warning(f"Failed to read image for HTML report: {img_path} ({exc})")
+            return ""
+
+    def img_tag(img_path: str, extra_style: str = "") -> str:
+        """Return an <img> tag with base64-embedded image, or a placeholder if missing."""
+        b64 = image_to_base64(img_path)
+        if not b64:
+            return '<div class="missing-img">Image not found</div>'
+        # Default to jpeg; for Flickr/COCO this is usually correct.
+        style_attr = f' style="{extra_style}"' if extra_style else ""
+        return f'<img src="data:image/jpeg;base64,{b64}" class="thumb"{style_attr}>'
 
     def scores_html(scores):
         return (
@@ -440,14 +465,15 @@ def generate_html_report(all_failures, output_html):
         if direction == "t2i":
             query_html = f'<div class="query-text">{case["query_caption"]}</div>'
         else:
+            query_img_tag = img_tag(case["query_image_path"])
             query_html = (
-                f'<img src="{case["query_image_path"]}" class="thumb">'
+                f"{query_img_tag}"
                 f'<div class="caption-list">{"<br>".join(case["gt_captions"])}</div>'
             )
 
         # Column 2: Ground Truth
         if direction == "t2i":
-            gt_html = f'<img src="{case["gt_image_path"]}" class="thumb">'
+            gt_html = img_tag(case["gt_image_path"])
         else:
             gt_html = '<div class="gt-text">' + "<br>".join(case["gt_captions"]) + "</div>"
 
@@ -456,9 +482,11 @@ def generate_html_report(all_failures, output_html):
         for item in case["top5"]:
             border_color = "green" if item["is_gt"] else "red"
             if direction == "t2i":
+                img_html = img_tag(
+                    item["image_path"], extra_style=f"border: 3px solid {border_color};"
+                )
                 cell_content = (
-                    f'<img src="{item["image_path"]}" class="thumb" '
-                    f'style="border: 3px solid {border_color};">'
+                    f"{img_html}"
                     f'<div class="score">Score: {item["score_model"]:.3f}</div>'
                     f'<div class="caption">{item.get("caption_example","")}</div>'
                 )
