@@ -26,10 +26,12 @@
 #   - Code:      /users/beyza.urhan/tez_v2_clean           -> /workspace
 #   - COCO:      /users/beyza.urhan/experiments/datasets/coco -> /workspace/datasets/coco
 #   - Flickr30k: /users/beyza.urhan/experiments/datasets/flickr30k -> /workspace/datasets/flickr30k
+#   - Experiments root (checkpoints, etc.):
+#               /users/beyza.urhan/experiments             -> /exp
 #   - Runs:      /users/beyza.urhan/experiments/runs       -> /output
 #   - Env:       /users/beyza.urhan/experiments/env        -> /env
 #
-#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
+#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments:/exp,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
 
 # Pass W&B Env vars
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE
@@ -85,13 +87,13 @@ echo "Starting failure analysis..."
 
 if [ "$DATASET" = "flickr" ]; then
     CONFIG="config_flickr.yaml"
-    CHECKPOINT="/output/flickr_best_model.pth"   # adjust if needed
+    CHECKPOINT="/exp/model_checkpoint.pth"   # default: /users/beyza.urhan/experiments/model_checkpoint.pth
     IMAGE_ROOT="/workspace/datasets/flickr30k/flickr30k_images"
     CAPTIONS_PATH="/workspace/datasets/flickr30k/caption_datasets/dataset_flickr30k.json"
     DIRECTION="both"
 elif [ "$DATASET" = "coco" ]; then
     CONFIG="config_coco.yaml"
-    CHECKPOINT="/output/coco_best_model.pth"     # adjust if needed
+    CHECKPOINT="/exp/model_checkpoint.pth"     # update if you have a COCO-specific checkpoint
     IMAGE_ROOT="/workspace/datasets/coco"
     CAPTIONS_PATH="/workspace/datasets/coco/caption_datasets/dataset_coco.json"
     DIRECTION="both"
