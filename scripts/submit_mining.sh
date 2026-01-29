@@ -1,6 +1,6 @@
 #!/bin/bash
-# Submit mining job. Usage: bash ./scripts/submit_mining.sh <modality> [config]
-# Logs: results/{coco|flickr30k}/{job_id}/
+# Submit mining job. Usage: ./scripts/submit_mining.sh <modality> [config]
+# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, mining.log)
 set -e
 
 MODALITY="${1:-caption}"
