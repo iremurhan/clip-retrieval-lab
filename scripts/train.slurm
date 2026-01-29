@@ -22,14 +22,10 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 
-# ------------------------------------------------------------------
-# PATH MAPPING
-# ------------------------------------------------------------------
-#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
-
-# SLURM stdout+stderr -> slurm.out (override from start_training.sh)
-#SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
-#SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
+# Mounts: if NOT MOUNTED on cluster, replace ${HOME} with your home path (echo $HOME)
+#SBATCH --container-mounts=${HOME}/tez_v2_clean:/workspace,${HOME}/experiments/datasets/coco:/workspace/datasets/coco,${HOME}/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,${HOME}/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,${HOME}/experiments/results:/output/results,${HOME}/experiments/env:/env
+#SBATCH --output=${HOME}/experiments/results/%j/slurm.out
+#SBATCH --error=${HOME}/experiments/results/%j/slurm.out
 # Pass W&B Env vars and PYTHONPATH so container finds src
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
 
