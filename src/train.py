@@ -11,6 +11,7 @@ import logging
 import wandb
 import os
 import time
+import random
 from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k
 from .utils import compute_grad_norm
 
@@ -370,8 +371,66 @@ class Trainer:
                         
             except Exception as e:
                 logger.warning(f"Failed to log to W&B: {e}")
+
+            if self.use_wandb:
+                try:
+                    self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
+                except Exception as e:
+                    logger.warning(f"Qualitative table logging failed: {e}")
             
         return r_t2i[1]
+
+    def _log_qualitative_table(self, epoch, txt_embeds, img_embeds_unique, first_occurrence_indices):
+        """
+        Logs a WandB Table visualizing Text-to-Image retrieval.
+        Columns: Caption | Ground Truth | Rank 1 | Rank 2 | Rank 3
+        """
+        num_samples = len(txt_embeds)
+        sample_count = min(5, num_samples)
+        indices = random.sample(range(num_samples), sample_count)
+
+        columns = ["Caption", "Ground Truth", "Rank 1", "Rank 2", "Rank 3"]
+        table = wandb.Table(columns=columns)
+        dataset = self.val_loader.dataset
+
+        for idx in indices:
+            sample = dataset.samples[idx]
+            caption = sample["caption"]
+            filename = sample["filename"]
+            filepath = sample.get("filepath", "")
+            if filepath:
+                img_path = os.path.join(dataset.images_root_path, filepath, filename)
+            else:
+                img_path = os.path.join(dataset.images_root_path, filename)
+
+            try:
+                gt_image = wandb.Image(img_path)
+            except Exception:
+                gt_image = wandb.Image(torch.zeros(3, 224, 224), caption="Img Not Found")
+
+            query_emb = txt_embeds[idx].to(self.device)
+            sims = torch.matmul(img_embeds_unique.to(self.device), query_emb)
+            topk_scores, topk_indices = sims.topk(3)
+
+            retrieved_images = []
+            for rank, ret_idx in enumerate(topk_indices):
+                dataset_idx = first_occurrence_indices[ret_idx.item()]
+                ret_sample = dataset.samples[dataset_idx]
+                ret_filename = ret_sample["filename"]
+                ret_filepath = ret_sample.get("filepath", "")
+                if ret_filepath:
+                    ret_path = os.path.join(dataset.images_root_path, ret_filepath, ret_filename)
+                else:
+                    ret_path = os.path.join(dataset.images_root_path, ret_filename)
+                score_str = f"Score: {topk_scores[rank].item():.2f}"
+                try:
+                    retrieved_images.append(wandb.Image(ret_path, caption=score_str))
+                except Exception:
+                    retrieved_images.append(wandb.Image(torch.zeros(3, 224, 224), caption="Err"))
+
+            table.add_data(caption, gt_image, *retrieved_images)
+
+        wandb.log({"val/qualitative_results": table}, commit=False)
 
     def fit(self, start_epoch=0):
         eval_frequency = self.config['logging']['eval_freq'] 
