@@ -1,9 +1,9 @@
 #!/bin/bash
-# Mining job. Prefer: ./scripts/submit_mining.sh <modality> [config]
+# Mining job. REQUIRED: Must run inside container (--container-image); host execution is not allowed.
+# Prefer: ./scripts/submit_mining.sh <modality> [config]
 # Direct: sbatch --export=MINING_MODALITY=...,MINING_CONFIG=... scripts/mining.slurm
 # Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, mining.log, wandb/). W&B: mining.
 # Modalities: visual | consensus | caption. Configs: configs/config_coco.yaml | configs/config_flickr.yaml
-#
 #SBATCH --job-name=mining
 #SBATCH --time=07-00:00:00
 #SBATCH --gpus=1
@@ -20,7 +20,7 @@
 set -euo pipefail
 
 echo "=========================================="
-echo "MOUNT CHECK (job must run inside container with #SBATCH --container-mounts)"
+echo "MOUNT CHECK (container required; host execution not allowed)"
 echo "=========================================="
 WS_OK=0
 COCO_OK=0
@@ -39,25 +39,29 @@ echo "  /output/results               -> $( [ $OUT_OK -eq 1 ] && echo "OK" || ec
 if [ $WS_OK -eq 0 ] || [ $COCO_OK -eq 0 ] && [ $FLICKR_OK -eq 0 ]; then
     IN_CONTAINER=0
     [ -f /.dockerenv ] || [ -f /run/.containerenv ] && IN_CONTAINER=1
+    HN=$(hostname)
     echo ""
     echo "--- DIAGNOSIS ---"
     echo "  SLURM_JOB_ID:    ${SLURM_JOB_ID:- (not set)}"
     echo "  PWD:             $(pwd)"
-    echo "  Hostname:        $(hostname)"
+    echo "  Hostname:        $HN"
     echo "  In container:    $([ $IN_CONTAINER -eq 1 ] && echo 'yes' || echo 'NO (running on host)')"
     echo ""
-    echo "FATAL: /workspace and /output are not visible."
-    echo ""
-    echo "CONCLUSION: This job ran on the HOST, not inside the container."
-    echo "So #SBATCH --container-image and #SBATCH --container-mounts were IGNORED."
-    echo "You already verified that host paths exist (tez_v2_clean, experiments/datasets/..., results)."
-    echo "The cluster did not start the container for this job."
+    if [ "$HN" = "ultramarine" ] || [ "$HN" = "ultramarine.ulakbim.gov.tr" ]; then
+        echo "  NOTE: Hostname is the login/submit node. Container jobs usually run on COMPUTE nodes."
+        echo "        If the job ran on the login node, containers are often disabled there."
+        echo "        Check: squeue -u \$USER (job NODE); scontrol show job $SLURM_JOB_ID (NodeList)."
+        echo ""
+    fi
+    echo "FATAL: This script MUST run inside a container. Running on the host is not allowed."
+    echo "       /workspace and /output are not visible -> container was not started."
+    echo "       #SBATCH --container-image and --container-mounts were ignored."
     echo ""
     echo "NEXT STEPS:"
-    echo "  1. Ask Ultramarine/HPC support: 'Which partition or account enables container jobs (Pyxis/Enroot)?'"
-    echo "  2. Try a partition that supports containers, e.g.: sbatch --partition=<gpu-with-containers> ..."
-    echo "  3. Check: scontrol show partition  (look for container-related info)"
-    echo "  4. Check cluster docs for 'container', 'Pyxis', 'Enroot', 'singularity'."
+    echo "  1. Ask HPC support: which partition/account enables container jobs (Pyxis/Enroot)."
+    echo "  2. Submit with a container-enabled partition: sbatch --partition=<...> ..."
+    echo "  3. Ensure job runs on a compute node, not the login node (ultramarine)."
+    echo "  4. Check: scontrol show partition; cluster docs for 'container', 'Pyxis', 'Enroot'."
     exit 1
 fi
 echo "=========================================="
