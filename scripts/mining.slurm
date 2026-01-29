@@ -35,10 +35,10 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
-# Mounts: if NOT MOUNTED on cluster, replace ${HOME} with your home path (echo $HOME)
-#SBATCH --container-mounts=${HOME}/tez_v2_clean:/workspace,${HOME}/experiments/datasets/coco:/workspace/datasets/coco,${HOME}/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,${HOME}/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,${HOME}/experiments/results:/output/results,${HOME}/experiments/env:/env
-#SBATCH --output=${HOME}/experiments/results/%j/slurm.out
-#SBATCH --error=${HOME}/experiments/results/%j/slurm.out
+# Mounts and output: absolute paths (Pyxis does not expand variables in #SBATCH)
+#SBATCH --container-mounts=/home/beyza.urhan/tez_v2_clean:/workspace,/home/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/home/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/home/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/home/beyza.urhan/experiments/results:/output/results,/home/beyza.urhan/experiments/env:/env
+#SBATCH --output=/home/beyza.urhan/experiments/results/%j/slurm.out
+#SBATCH --error=/home/beyza.urhan/experiments/results/%j/slurm.out
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE,PYTHONPATH=/workspace
 
 set -euo pipefail
@@ -81,14 +81,13 @@ if [ ! -f "/workspace/$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# Determine dataset from config file path
+# Dataset from config path (for job dir only; W&B project is always "mining")
 if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
     DATASET="flickr30k"
-    WANDB_PROJECT_AUTO="mining-flickr30k"
 else
     DATASET="coco"
-    WANDB_PROJECT_AUTO="mining-coco"
 fi
+WANDB_PROJECT_AUTO="mining"
 
 # ------------------------------------------------------------------
 # ENVIRONMENT & DIRECTORIES

@@ -1,10 +1,9 @@
 # Base configuration shared across datasets.
 #
-# Dataset-specific files (e.g. config_coco.yaml, config_flickr.yaml) should only define:
+# Dataset-specific files (e.g. config_coco.yaml, config_flickr.yaml) only define:
 # - data paths (images_path, captions_path)
-# - logging.wandb_project
 #
-# This base config defines the scientific/training defaults.
+# W&B: single project "retrieval" for training; dataset is in run name and config.
 
 model:
   image_model_name: "openai/clip-vit-large-patch14-336"
@@ -50,6 +49,7 @@ debug:
 
 logging:
   use_wandb: true
+  wandb_project: "retrieval"
   log_freq: 500
   eval_freq: 1
   save_freq: 3
