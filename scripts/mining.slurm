@@ -56,7 +56,7 @@ fi
 # ------------------------------------------------------------------
 MODALITY="${MINING_MODALITY:-caption}"
 CONFIG_FILE="${MINING_CONFIG:-config.yaml}"
-TOP_K="${TOP_K:-50}"
+TOP_K="${TOP_K:-1000}"
 BATCH_SIZE="${BATCH_SIZE:-512}"
 QUERY_CHUNK_SIZE="${QUERY_CHUNK_SIZE:-100}"
 
