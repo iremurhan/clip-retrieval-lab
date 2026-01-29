@@ -5,7 +5,8 @@
 #
 # Output Structure:
 #   experiments/results/{dataset}/{job_id}/
-#     - output.log     (all logs: container, setup, training)
+#     - slurm.out      (script/SLURM: container, setup, job messages)
+#     - training.log   (Python/training output only)
 #     - checkpoints/   (model checkpoints)
 #     - wandb/         (WandB files if enabled)
 #
@@ -26,10 +27,9 @@
 # ------------------------------------------------------------------
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 
-# SLURM stdout/stderr (override from start_training.sh to put under results/{dataset}/{job_id}/)
-#SBATCH --output=/users/beyza.urhan/experiments/results/%j/output.log
-#SBATCH --error=/users/beyza.urhan/experiments/results/%j/output.err
-
+# SLURM stdout+stderr -> slurm.out (override from start_training.sh)
+#SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
 # Pass W&B Env vars and PYTHONPATH so container finds src
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
 
@@ -127,17 +127,16 @@ echo "Starting training..."
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 
-# Run training
-# Redirect both stdout and stderr to train.log (no separate err.log)
+# Run training (Python output only -> training.log; script output -> slurm.out)
 python3 -u run.py \
     --config "$CONFIG_FILE" \
     --override \
         debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
         logging.wandb_project="$WANDB_PROJECT_AUTO" \
-    2>&1 | tee "$JOB_DIR/train.log"
+    > "$JOB_DIR/training.log" 2>&1
 
-TRAIN_EXIT_CODE=${PIPESTATUS[0]}
+TRAIN_EXIT_CODE=$?
 
 echo ""
 echo "=========================================="

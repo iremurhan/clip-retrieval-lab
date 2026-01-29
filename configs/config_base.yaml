@@ -15,6 +15,7 @@ model:
 
 loss:
   use_clip_loss: true
+  temperature: 0.07
 
 training:
   # DataLoader-related defaults (will be mirrored into data.* at runtime)
