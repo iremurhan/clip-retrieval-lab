@@ -38,7 +38,6 @@ Usage:
 """
 
 import argparse
-import yaml
 import torch
 import torch.nn.functional as F
 import os
@@ -53,6 +52,7 @@ from PIL import Image
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data import CaptionImageDataset
+from src.setup import setup_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -388,13 +388,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
     
-    # Load config
-    with open(args.config) as f:
-        config = yaml.safe_load(f)
-    
-    # Determine output directory: datasets/{dataset}/pairwise_similarities/
-    # Note: images_path might be datasets/coco or datasets/flickr30k/flickr30k_images
-    # We want pairwise_similarities at the dataset root level, not inside images folder
+    # Load config (merge base + dataset-specific so model params like image_model_name are available)
+    try:
+        config = setup_config(config_path=args.config)
+    except Exception as e:
+        logger.error(f"Failed to load config with setup_config: {e}")
+        sys.exit(1)
+
     if args.output_dir:
         base_data_dir = args.output_dir
     else:
@@ -417,22 +417,17 @@ def main():
         "caption": "mining_text.pt",  # legacy, not used for new FaNe files, but kept for compatibility
     }
     output_path = os.path.join(output_dir, output_filenames[args.modality])
-    
-    # Initialize wandb
-    # WANDB_PROJECT must be set by SLURM script or in config
-    wandb_project = os.environ.get("WANDB_PROJECT") or config.get("logging", {}).get("wandb_project")
-    if not wandb_project:
-        raise ValueError(
-            "WANDB_PROJECT must be set either via environment variable (from SLURM script) "
-            "or in config['logging']['wandb_project']"
-        )
+
+    wandb_project = os.environ.get("WANDB_PROJECT") or config.get("logging", {}).get("wandb_project") or "mining"
     images_path = config.get("data", {}).get("images_path", "")
     dataset_name = "flickr30k" if "flickr" in images_path else "coco"
     wb_config = dict(vars(args))
     wb_config["dataset"] = dataset_name
-    wandb.init(project=wandb_project, job_type=f"mining_{args.modality}", config=wb_config)
-    
-    # Load CLIP model
+    try:
+        wandb.init(project=wandb_project, job_type=f"mining_{args.modality}", config=wb_config)
+    except Exception as e:
+        logger.warning(f"WandB init failed: {e}. Continuing without WandB.")
+
     model, tokenizer, processor = load_clip_model(config["model"]["image_model_name"], device)
     
     # Load dataset (TRAIN split only)
@@ -578,19 +573,18 @@ def main():
     logger.info(f"Top-K: {args.top_k}")
     logger.info(f"Score range: [{result['scores'].min():.4f}, {result['scores'].max():.4f}]")
     logger.info("=" * 60)
-    
-    # Log to wandb
-    wandb.log(
-        {
-            "n_samples": n_samples,
-            "n_images": n_images,
-            "score_min": result["scores"].min().item(),
-            "score_max": result["scores"].max().item(),
-            "score_mean": result["scores"].mean().item(),
-        }
-    )
-    
-    wandb.finish()
+
+    if wandb.run is not None:
+        wandb.log(
+            {
+                "n_samples": n_samples,
+                "n_images": n_images,
+                "score_min": result["scores"].min().item(),
+                "score_max": result["scores"].max().item(),
+                "score_mean": result["scores"].mean().item(),
+            }
+        )
+        wandb.finish()
 
 
 if __name__ == "__main__":
