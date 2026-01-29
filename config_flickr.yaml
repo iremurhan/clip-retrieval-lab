@@ -60,7 +60,7 @@ training:
 # ==========================================
 logging:
   use_wandb: true
-  wandb_project: "flickr30k-retrieval-thesis"
+  wandb_project: "retrieval-flickr30k"
   log_freq: 500              # Log every 500 batches to see progress
   eval_freq: 1              # Evaluate every 1 epochs
   save_freq: 3              # Save checkpoint every 3 epochs
