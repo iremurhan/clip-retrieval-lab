@@ -37,16 +37,27 @@ echo "  /workspace/datasets/flickr30k -> $( [ $FLICKR_OK -eq 1 ] && echo "OK" ||
 echo "  /output/results               -> $( [ $OUT_OK -eq 1 ] && echo "OK" || echo "MISSING" )"
 
 if [ $WS_OK -eq 0 ] || [ $COCO_OK -eq 0 ] && [ $FLICKR_OK -eq 0 ]; then
+    IN_CONTAINER=0
+    [ -f /.dockerenv ] || [ -f /run/.containerenv ] && IN_CONTAINER=1
     echo ""
-    echo "FATAL: Container mounts are not visible. Possible causes:"
-    echo "  1. Job is running on the host, not in the container (--container-image/--container-mounts ignored)."
-    echo "  2. Cluster uses Pyxis/Enroot: mount paths must be absolute and host dirs must exist."
-    echo "  3. On the submit node, verify host paths exist:"
-    echo "     ls /users/beyza.urhan/tez_v2_clean"
-    echo "     ls /users/beyza.urhan/experiments/datasets/coco"
-    echo "     ls /users/beyza.urhan/experiments/datasets/flickr30k"
-    echo "     ls /users/beyza.urhan/experiments/results"
-    echo "  If those exist, ask support whether container jobs are enabled for this partition/account."
+    echo "--- DIAGNOSIS ---"
+    echo "  SLURM_JOB_ID:    ${SLURM_JOB_ID:- (not set)}"
+    echo "  PWD:             $(pwd)"
+    echo "  Hostname:        $(hostname)"
+    echo "  In container:    $([ $IN_CONTAINER -eq 1 ] && echo 'yes' || echo 'NO (running on host)')"
+    echo ""
+    echo "FATAL: /workspace and /output are not visible."
+    echo ""
+    echo "CONCLUSION: This job ran on the HOST, not inside the container."
+    echo "So #SBATCH --container-image and #SBATCH --container-mounts were IGNORED."
+    echo "You already verified that host paths exist (tez_v2_clean, experiments/datasets/..., results)."
+    echo "The cluster did not start the container for this job."
+    echo ""
+    echo "NEXT STEPS:"
+    echo "  1. Ask Ultramarine/HPC support: 'Which partition or account enables container jobs (Pyxis/Enroot)?'"
+    echo "  2. Try a partition that supports containers, e.g.: sbatch --partition=<gpu-with-containers> ..."
+    echo "  3. Check: scontrol show partition  (look for container-related info)"
+    echo "  4. Check cluster docs for 'container', 'Pyxis', 'Enroot', 'singularity'."
     exit 1
 fi
 echo "=========================================="
