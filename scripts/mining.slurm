@@ -12,9 +12,9 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
-#SBATCH --container-mounts=/home/beyza.urhan/tez_v2_clean:/workspace,/home/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/home/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/home/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/home/beyza.urhan/experiments/results:/output/results,/home/beyza.urhan/experiments/env:/env
-#SBATCH --output=/home/beyza.urhan/experiments/results/coco/%j/slurm.out
-#SBATCH --error=/home/beyza.urhan/experiments/results/coco/%j/slurm.out
+#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
+#SBATCH --output=/users/beyza.urhan/experiments/results/coco/%j/slurm.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/coco/%j/slurm.out
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE,PYTHONPATH=/workspace
 
 set -euo pipefail
