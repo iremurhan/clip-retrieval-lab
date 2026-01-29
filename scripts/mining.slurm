@@ -1,4 +1,8 @@
 #!/bin/bash
+# Direct run (no wrapper): from repo root, create output dir once then:
+#   sbatch --export=MINING_MODALITY=caption,MINING_CONFIG=configs/config_coco.yaml scripts/mining.slurm
+#   sbatch --export=MINING_MODALITY=caption,MINING_CONFIG=configs/config_flickr.yaml scripts/mining.slurm
+# Prerequisite: mkdir -p ~/experiments/results/coco ~/experiments/results/flickr30k
 #SBATCH --job-name=mining
 #SBATCH --time=07-00:00:00
 #SBATCH --gpus=1
