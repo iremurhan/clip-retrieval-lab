@@ -1,10 +1,6 @@
 #!/bin/bash
-#
-# Wrapper script to submit training jobs easily.
-# Usage: ./scripts/start_training.sh <run_name> [config_path]
-
-# Two files: slurm.out (script), training.log (Python) under ~/experiments/results/{dataset}/{job_id}/
-
+# Submit training job. Usage: bash ./scripts/start_training.sh <run_name> [config_path]
+# Logs: results/{coco|flickr30k}/{job_id}/
 set -e
 
 if [ -z "$1" ]; then
@@ -17,7 +13,6 @@ fi
 EXP_NAME="$1"
 CONFIG="${2:-configs/config_coco.yaml}"
 
-# Infer dataset for SLURM output path (so output.log goes in job folder)
 if [[ "$CONFIG" == *"flickr"* ]]; then
     DATASET="flickr30k"
 else
@@ -26,11 +21,12 @@ fi
 
 RESULTS_ROOT="${EXPERIMENTS_RESULTS:-$HOME/experiments/results}"
 SLURM_OUT="${RESULTS_ROOT}/${DATASET}/%j/slurm.out"
+mkdir -p "${RESULTS_ROOT}/${DATASET}"
 
 echo "------------------------------------------------"
 echo "Run name:  ${EXP_NAME}"
 echo "Config:    ${CONFIG}"
-echo "Logs:      ${RESULTS_ROOT}/${DATASET}/<job_id>/slurm.out, training.log"
+echo "Job dir:   ${RESULTS_ROOT}/${DATASET}/<job_id>/ (slurm.out, training.log, checkpoints/)"
 echo "------------------------------------------------"
 
 JOB_ID=$(sbatch --job-name="${EXP_NAME}" \
@@ -39,4 +35,4 @@ JOB_ID=$(sbatch --job-name="${EXP_NAME}" \
     scripts/train.slurm "${EXP_NAME}" "${CONFIG}" | awk '{print $NF}')
 
 mkdir -p "${RESULTS_ROOT}/${DATASET}/${JOB_ID}"
-echo "Job ${JOB_ID} submitted. Logs: ${RESULTS_ROOT}/${DATASET}/${JOB_ID}/slurm.out, training.log"
+echo "Job ${JOB_ID} submitted. Logs: ${RESULTS_ROOT}/${DATASET}/${JOB_ID}/"

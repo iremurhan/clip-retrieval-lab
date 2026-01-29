@@ -426,7 +426,11 @@ def main():
             "WANDB_PROJECT must be set either via environment variable (from SLURM script) "
             "or in config['logging']['wandb_project']"
         )
-    wandb.init(project=wandb_project, job_type=f"mining_{args.modality}", config=vars(args))
+    images_path = config.get("data", {}).get("images_path", "")
+    dataset_name = "flickr30k" if "flickr" in images_path else "coco"
+    wb_config = dict(vars(args))
+    wb_config["dataset"] = dataset_name
+    wandb.init(project=wandb_project, job_type=f"mining_{args.modality}", config=wb_config)
     
     # Load CLIP model
     model, tokenizer, processor = load_clip_model(config["model"]["image_model_name"], device)
