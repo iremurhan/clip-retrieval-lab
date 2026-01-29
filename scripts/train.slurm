@@ -5,7 +5,7 @@
 #
 # Output Structure:
 #   experiments/results/{dataset}/{job_id}/
-#     - train.log      (training logs)
+#     - output.log     (all logs: container, setup, training)
 #     - checkpoints/   (model checkpoints)
 #     - wandb/         (WandB files if enabled)
 #
@@ -26,8 +26,12 @@
 # ------------------------------------------------------------------
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 
-# Pass W&B Env vars
-#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE
+# SLURM stdout/stderr (override from start_training.sh to put under results/{dataset}/{job_id}/)
+#SBATCH --output=/users/beyza.urhan/experiments/results/%j/output.log
+#SBATCH --error=/users/beyza.urhan/experiments/results/%j/output.err
+
+# Pass W&B Env vars and PYTHONPATH so container finds src
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
 
 set -euo pipefail
 
@@ -49,7 +53,7 @@ fi
 EXP_NAME="${1:-}"
 CONFIG_FILE="${2:-configs/config_coco.yaml}"
 
-# Validate config file
+# Validate config file (use explicit path, e.g. configs/config_coco.yaml)
 if [ ! -f "/workspace/$CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
     exit 1
@@ -121,6 +125,7 @@ fi
 echo "Starting training..."
 
 cd /workspace
+export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 
 # Run training
 # Redirect both stdout and stderr to train.log (no separate err.log)
