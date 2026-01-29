@@ -37,7 +37,7 @@ loss:
 # Training Configuration
 # ==========================================
 training:
-  epochs: 50
+  epochs: 20
 
   # --- Learning Rate Groups ---
   # 1. CLIP's projection layers (visual_projection, text_projection)
