@@ -2,7 +2,7 @@
 # Mining job. Prefer: ./scripts/submit_mining.sh <modality> [config]
 # Direct: sbatch --export=MINING_MODALITY=...,MINING_CONFIG=... scripts/mining.slurm
 # Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, mining.log, wandb/). W&B: mining.
-# Modalities: visual | consensus | caption. Configs: config_coco.yaml | config_flickr.yaml
+# Modalities: visual | consensus | caption. Configs: configs/config_coco.yaml | configs/config_flickr.yaml
 #
 #SBATCH --job-name=mining
 #SBATCH --time=07-00:00:00
@@ -72,7 +72,6 @@ else
     export WANDB_MODE=online
     export WANDB_NAME="${SLURM_JOB_ID}_mining_${MODALITY}"
     export WANDB_PROJECT="$WANDB_PROJECT_AUTO"
-    echo "W&B Project auto-set: ${WANDB_PROJECT}"
 fi
 
 cd /workspace
@@ -107,6 +106,7 @@ esac
 
 echo ""
 echo "Starting mining process..."
+
 python3 -u tools/mine_pairwise_sim.py \
     --modality "$MODALITY" \
     --config "$CONFIG_FILE" \
@@ -124,7 +124,7 @@ if [ $MINING_EXIT_CODE -eq 0 ]; then
 else
     echo "Mining failed with exit code: $MINING_EXIT_CODE"
 fi
-echo "Results saved to: $JOB_DIR"
+echo "Job dir: $JOB_DIR"
 echo "=========================================="
 
 exit $MINING_EXIT_CODE
