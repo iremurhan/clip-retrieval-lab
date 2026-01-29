@@ -1,9 +1,4 @@
 #!/bin/bash
-# Mining job. REQUIRED: Must run inside container (--container-image); host execution is not allowed.
-# Prefer: ./scripts/submit_mining.sh <modality> [config]
-# Direct: sbatch --export=MINING_MODALITY=...,MINING_CONFIG=... scripts/mining.slurm
-# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, mining.log, wandb/). W&B: mining.
-# Modalities: visual | consensus | caption. Configs: configs/config_coco.yaml | configs/config_flickr.yaml
 #SBATCH --job-name=mining
 #SBATCH --time=07-00:00:00
 #SBATCH --gpus=1
