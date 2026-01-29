@@ -1,3 +1,10 @@
+"""
+src/model.py
+------------
+Model architecture for Cross-Modal Retrieval.
+Implements DualEncoder using OpenAI CLIP as the backbone with optional projection heads.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

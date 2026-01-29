@@ -33,7 +33,7 @@ from transformers import CLIPTokenizer
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.model import DualEncoder
-from src.data import get_dataloader, CaptionImageDataset
+from src.data import create_image_text_dataloader, CaptionImageDataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -658,7 +658,7 @@ def main():
     tokenizer = CLIPTokenizer.from_pretrained(clip_model_name)
 
     logger.info(f"Loading {args.split} split...")
-    loader = get_dataloader(config, tokenizer, split=args.split)
+    loader = create_image_text_dataloader(config, tokenizer, split=args.split)
     dataset: CaptionImageDataset = loader.dataset
 
     logger.info(f"Building DualEncoder model and loading checkpoint: {args.checkpoint}")

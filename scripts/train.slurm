@@ -3,12 +3,16 @@
 # Usage:
 #   sbatch --job-name="EXP_NAME" scripts/train.slurm "EXP_NAME" ["CONFIG_PATH"]
 #
+# Output Structure:
+#   experiments/results/{dataset}/{job_id}/
+#     - train.log      (training logs)
+#     - checkpoints/   (model checkpoints)
+#     - wandb/         (WandB files if enabled)
+#
 # The W&B project is set automatically:
 #   - If the config path contains "flickr":  retrieval-flickr30k
 #   - Otherwise:                             retrieval-coco
 #
-#SBATCH --output=/users/beyza.urhan/experiments/runs/%j/slurm.log
-#SBATCH --error=/users/beyza.urhan/experiments/runs/%j/err.log
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
@@ -20,7 +24,7 @@
 # ------------------------------------------------------------------
 # PATH MAPPING
 # ------------------------------------------------------------------
-#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
+#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 
 # Pass W&B Env vars
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE
@@ -28,44 +32,63 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------
+# MOUNT VERIFICATION
+# ------------------------------------------------------------------
+echo "Checking mounts..."
+echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+
+if [ ! -d "/workspace" ] || [ ! -d "/output" ]; then
+    echo "FATAL ERROR: Required mounts not found. Check container-mounts."
+    exit 1
+fi
+
+# ------------------------------------------------------------------
 # ENVIRONMENT & DIRECTORIES
 # ------------------------------------------------------------------
 EXP_NAME="${1:-}"
-CONFIG_FILE="${2:-config.yaml}"
+CONFIG_FILE="${2:-configs/config_coco.yaml}"
 
-# 1. Job Directory (ALWAYS use Job ID only - Robust & Simple)
-JOB_DIR="/output/${SLURM_JOB_ID}"
+# Validate config file
+if [ ! -f "/workspace/$CONFIG_FILE" ]; then
+    echo "ERROR: Config file not found: $CONFIG_FILE"
+    exit 1
+fi
 
-# Subdirectories
-LOGS_DIR="$JOB_DIR/logs"
-META_DIR="$JOB_DIR/metadata"
+# Determine dataset from config file path
+if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
+    DATASET="flickr30k"
+    WANDB_PROJECT_AUTO="retrieval-flickr30k"
+else
+    DATASET="coco"
+    WANDB_PROJECT_AUTO="retrieval-coco"
+fi
+
+# Job Directory Structure: results/{dataset}/{job_id}/
+JOB_DIR="/output/results/${DATASET}/${SLURM_JOB_ID}"
 CKPT_DIR="$JOB_DIR/checkpoints"
 
 # Create directories
-mkdir -p "$JOB_DIR" "$LOGS_DIR" "$META_DIR" "$CKPT_DIR"
+mkdir -p "$JOB_DIR" "$CKPT_DIR"
 
 echo "=========================================="
 echo "Job ID:        ${SLURM_JOB_ID}"
 echo "Experiment:    ${EXP_NAME:- (Unnamed)}"
+echo "Dataset:       ${DATASET}"
 echo "Job Directory: ${JOB_DIR}"
 echo "=========================================="
 
 # ------------------------------------------------------------------
 # W&B SETUP
 # ------------------------------------------------------------------
-export WANDB_DIR="$LOGS_DIR"
+export WANDB_DIR="$JOB_DIR"
 
 # Load W&B Env file if mounted
 if [ -f /env/wandb.env ]; then
     set -a; source /env/wandb.env; set +a
 fi
 
-# Deduce WANDB project from config path
-if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
-    WANDB_PROJECT_AUTO="retrieval-flickr30k"
-else
-    WANDB_PROJECT_AUTO="retrieval-coco"
-fi
+# WANDB_PROJECT_AUTO already set above based on dataset
 
 # Configure W&B mode based on API key
 if [ -n "${WANDB_API_KEY:-}" ]; then
@@ -88,12 +111,8 @@ fi
 # ------------------------------------------------------------------
 # METADATA SAVING
 # ------------------------------------------------------------------
-echo "Job ID: ${SLURM_JOB_ID}" > "$META_DIR/experiment_metadata.txt"
-echo "Experiment: ${EXP_NAME:-}" >> "$META_DIR/experiment_metadata.txt"
-echo "Date: $(date)" >> "$META_DIR/experiment_metadata.txt"
-
 if [ -f "/workspace/$CONFIG_FILE" ]; then
-    cp "/workspace/$CONFIG_FILE" "$META_DIR/config_saved.yaml"
+    cp "/workspace/$CONFIG_FILE" "$JOB_DIR/config.yaml"
 fi
 
 # ------------------------------------------------------------------
@@ -104,14 +123,14 @@ echo "Starting training..."
 cd /workspace
 
 # Run training
-# Note: output.log is inside the ID folder, preventing any mix-up
-python3 -u train.py \
+# Redirect both stdout and stderr to train.log (no separate err.log)
+python3 -u run.py \
     --config "$CONFIG_FILE" \
     --override \
         debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
         logging.wandb_project="$WANDB_PROJECT_AUTO" \
-    2>&1 | tee "$LOGS_DIR/training_output.log"
+    2>&1 | tee "$JOB_DIR/train.log"
 
 TRAIN_EXIT_CODE=${PIPESTATUS[0]}
 

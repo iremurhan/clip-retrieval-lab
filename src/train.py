@@ -1,27 +1,20 @@
+"""
+src/train.py
+------------
+Training engine for Cross-Modal Retrieval.
+Implements the Trainer class that handles training loops, evaluation, checkpointing, and WandB logging.
+"""
+
 import torch
 import torch.nn.functional as F
 import logging
 import wandb
 import os
 import time
-from .utils import AverageMeter, compute_recall_at_k, compute_map_at_k
-from .loss import DistillationLoss
+from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k
+from .utils import compute_grad_norm
 
 logger = logging.getLogger(__name__)
-
-
-def compute_grad_norm(model):
-    """
-    Compute the total L2 gradient norm across all parameters.
-    Useful for monitoring training stability and detecting gradient explosions.
-    """
-    total_norm = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            total_norm += param_norm.item() ** 2
-    total_norm = total_norm ** 0.5
-    return total_norm
 
 
 class Trainer:
@@ -57,28 +50,6 @@ class Trainer:
             self.scaler = None
             logger.info("Mixed Precision Training (AMP) disabled (CPU mode).")
         
-        # ---------------------------------------------------------
-        # Knowledge Distillation Setup with Linear Decay
-        # ---------------------------------------------------------
-        self.use_distillation = False
-        self.distill_loss_fn = None
-        self.distill_alpha_start = 0.0
-        self.total_epochs = config['training']['epochs']
-        
-        distillation_config = config.get('distillation', {})
-        if distillation_config.get('enabled'):
-            self.use_distillation = True
-            self.distill_alpha_start = distillation_config.get('alpha')
-            distill_temp = distillation_config.get('temperature')
-            
-            self.distill_loss_fn = DistillationLoss(temperature=distill_temp)
-            
-            logger.info(
-                f"Knowledge Distillation enabled: "
-                f"alpha_start={self.distill_alpha_start} (linear decay to 0), "
-                f"temperature={distill_temp}"
-            )
-        
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         
@@ -98,28 +69,6 @@ class Trainer:
             wandb.define_metric("val/t2i_map10", summary="max")
             wandb.define_metric("val/i2t_map5", summary="max")
             wandb.define_metric("val/i2t_map10", summary="max")
-
-    def _compute_current_alpha(self, epoch: int) -> float:
-        """
-        Compute current distillation alpha using linear decay.
-        
-        Formula: alpha = alpha_start * (1 - epoch / (total_epochs - 1))
-        
-        - At epoch 0: alpha = alpha_start
-        - At last epoch (total_epochs - 1): alpha = 0
-        
-        Args:
-            epoch: Current epoch index (0-based)
-        
-        Returns:
-            Current alpha value
-        """
-        if self.total_epochs <= 1:
-            return self.distill_alpha_start
-        
-        decay_factor = 1.0 - (epoch / (self.total_epochs - 1))
-        current_alpha = self.distill_alpha_start * max(0.0, decay_factor)
-        return current_alpha
 
     def load_checkpoint(self, checkpoint_path):
         """
@@ -206,8 +155,6 @@ class Trainer:
     def train_epoch(self, epoch):
         self.model.train()
         losses = AverageMeter()
-        losses_clip = AverageMeter()
-        losses_distill = AverageMeter()
         batch_time = AverageMeter()
         
         num_batches = len(self.train_loader)
@@ -215,12 +162,6 @@ class Trainer:
         
         # Check if we should use CLIP's native loss (with learnable temperature)
         use_clip_loss = self.config['loss'].get('use_clip_loss', False)
-        
-        # Compute current alpha with linear decay
-        current_alpha = self._compute_current_alpha(epoch) if self.use_distillation else 0.0
-        
-        if self.use_distillation:
-            logger.info(f"Epoch {epoch+1}: Distillation alpha = {current_alpha:.4f}")
         
         # Initialize grad_norm for logging
         grad_norm = 0.0
@@ -231,69 +172,27 @@ class Trainer:
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
             
-            # For distillation: get batch indices and teacher targets
-            batch_indices = batch['index'].to(self.device) if self.use_distillation else None
-            soft_target_indices = batch.get('soft_target_indices')
-            soft_target_scores = batch.get('soft_target_scores')
-            
-            if soft_target_indices is not None:
-                soft_target_indices = soft_target_indices.to(self.device)
-            if soft_target_scores is not None:
-                soft_target_scores = soft_target_scores.to(self.device)
-            
             # ============================================================
             # Forward Pass with Mixed Precision (AMP)
             # ============================================================
             if self.use_amp:
-                # Use autocast for forward pass
                 with torch.amp.autocast(device_type='cuda'):
-                    # Option A: Use CLIP's Native Loss (Learnable Temperature)
                     if use_clip_loss:
-                        loss_clip, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
-                        # Get text embeddings for distillation
-                        if self.use_distillation and soft_target_indices is not None:
-                            txt_embeds = self.model.clip.get_text_features(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask
-                            )
-                            txt_embeds = F.normalize(txt_embeds, p=2, dim=1)
+                        loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                     else:
                         images_aug = batch['image_aug'].to(self.device)
-                        
-                        # Forward (Original Views)
                         img_embeds, txt_embeds = self.model(images, input_ids, attention_mask)
                         
                         img_aug_embeds = None
                         txt_aug_embeds = None
 
-                        # A. Image Intra-Modal (Img <-> Img_Aug)
                         if self.config['loss'].get('intra_img_weight', 0.0) > 0:
                             img_aug_embeds, _ = self.model(images_aug, input_ids, attention_mask)
 
-                        # B. Text Intra-Modal (Text <-> Text_Aug)
-                        # SimCSE style: Pass same text again (dropout acts as augmentation)
                         if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
                             _, txt_aug_embeds = self.model(images, input_ids, attention_mask)
                         
-                        loss_clip = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
-                    
-                    # Knowledge Distillation Loss
-                    loss_distill = torch.tensor(0.0, device=self.device)
-                    
-                    if self.use_distillation and soft_target_indices is not None and current_alpha > 0:
-                        student_text_logits = txt_embeds @ txt_embeds.t()
-                        
-                        loss_distill = self.distill_loss_fn(
-                            student_logits=student_text_logits,
-                            batch_indices=batch_indices,
-                            teacher_indices=soft_target_indices,
-                            teacher_scores=soft_target_scores
-                        )
-                        
-                        # Combine losses with dynamic alpha
-                        loss = (1 - current_alpha) * loss_clip + current_alpha * loss_distill
-                    else:
-                        loss = loss_clip
+                        loss = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
                 
                 # Backward with gradient scaling
                 self.optimizer.zero_grad()
@@ -308,50 +207,21 @@ class Trainer:
             else:
                 # Standard precision training
                 if use_clip_loss:
-                    loss_clip, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
-                    if self.use_distillation and soft_target_indices is not None:
-                        txt_embeds = self.model.clip.get_text_features(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask
-                        )
-                        txt_embeds = F.normalize(txt_embeds, p=2, dim=1)
+                    loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                 else:
                     images_aug = batch['image_aug'].to(self.device)
-                    
-                    # Forward (Original Views)
                     img_embeds, txt_embeds = self.model(images, input_ids, attention_mask)
                     
-                    # Conditional Forward (Augmented Views for Intra-Modal Loss)
                     img_aug_embeds = None
                     txt_aug_embeds = None
 
-                    # A. Image Intra-Modal (Img <-> Img_Aug)
                     if self.config['loss'].get('intra_img_weight', 0.0) > 0:
                         img_aug_embeds, _ = self.model(images_aug, input_ids, attention_mask)
 
-                    # B. Text Intra-Modal (Text <-> Text_Aug)
-                    # SimCSE style: Pass same text again (dropout acts as augmentation)
                     if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
                         _, txt_aug_embeds = self.model(images, input_ids, attention_mask)
                     
-                    loss_clip = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
-                
-                # Knowledge Distillation Loss (Non-AMP)
-                loss_distill = torch.tensor(0.0, device=self.device)
-                
-                if self.use_distillation and soft_target_indices is not None and current_alpha > 0:
-                    student_text_logits = txt_embeds @ txt_embeds.t()
-                    
-                    loss_distill = self.distill_loss_fn(
-                        student_logits=student_text_logits,
-                        batch_indices=batch_indices,
-                        teacher_indices=soft_target_indices,
-                        teacher_scores=soft_target_scores
-                    )
-                    
-                    loss = (1 - current_alpha) * loss_clip + current_alpha * loss_distill
-                else:
-                    loss = loss_clip
+                    loss = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
                 
                 # Backward
                 self.optimizer.zero_grad()
@@ -366,65 +236,39 @@ class Trainer:
             
             # Update metrics
             losses.update(loss.item(), images.size(0))
-            losses_clip.update(loss_clip.item(), images.size(0))
-            if self.use_distillation:
-                losses_distill.update(loss_distill.item(), images.size(0))
             
             # Measure batch time
             batch_time.update(time.time() - end_time)
             end_time = time.time()
 
             if step % self.log_freq == 0:
-                # Calculate fractional epoch for smooth WandB charts
                 fractional_epoch = epoch + (step / num_batches)
-                
-                # Calculate throughput (samples per second)
                 samples_per_sec = batch_size / batch_time.val if batch_time.val > 0 else 0
                 
-                # Get all learning rates from different param groups
                 lr_dict = {}
                 for i, param_group in enumerate(self.optimizer.param_groups):
                     group_name = param_group.get('name', f'group_{i}')
                     lr_dict[f"train/lr_{group_name}"] = param_group['lr']
                 
-                # Primary LR for console logging
                 primary_lr = self.optimizer.param_groups[0]['lr']
                 
-                if self.use_distillation:
-                    logger.info(
-                        f"Epoch {epoch+1} [{step}/{num_batches}] "
-                        f"Loss: {losses.avg:.4f} (CLIP: {losses_clip.avg:.4f}, Distill: {losses_distill.avg:.4f}) | "
-                        f"α: {current_alpha:.4f} | LR: {primary_lr:.6f} | "
-                        f"GradNorm: {grad_norm:.2f} | Speed: {samples_per_sec:.1f} samples/s"
-                    )
-                else:
-                    logger.info(
-                        f"Epoch {epoch+1} [{step}/{num_batches}] "
-                        f"Loss: {losses.avg:.4f} | LR: {primary_lr:.6f} | "
-                        f"GradNorm: {grad_norm:.2f} | Speed: {samples_per_sec:.1f} samples/s"
-                    )
+                logger.info(
+                    f"Epoch {epoch+1} [{step}/{num_batches}] "
+                    f"Loss: {losses.avg:.4f} | LR: {primary_lr:.6f} | "
+                    f"GradNorm: {grad_norm:.2f} | Speed: {samples_per_sec:.1f} samples/s"
+                )
                 
                 if self.use_wandb:
                     try:
-                        # Build comprehensive log dict
                         log_dict = {
                             "train/loss": losses.val,
-                            "train/loss_clip": losses_clip.val,
                             "train/epoch": fractional_epoch,
                             "train/step": step,
                             "train/grad_norm": grad_norm,
                             "train/samples_per_sec": samples_per_sec,
                             "train/batch_time": batch_time.val,
                         }
-                        
-                        # Add all learning rates
                         log_dict.update(lr_dict)
-                        
-                        # Add distillation metrics if enabled
-                        if self.use_distillation:
-                            log_dict["train/loss_distill"] = losses_distill.val
-                            log_dict["train/current_alpha"] = current_alpha
-                        
                         wandb.log(log_dict)
                     except Exception as e:
                         logger.warning(f"Failed to log to W&B: {e}")
