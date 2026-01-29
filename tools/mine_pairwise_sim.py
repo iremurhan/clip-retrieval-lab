@@ -400,7 +400,7 @@ def main():
     else:
         images_path = config["data"]["images_path"]
         # If images_path ends with a typical images subdirectory, go up one level
-        if os.path.basename(images_path) in ["images", "train2014", "val2014"]:
+        if os.path.basename(images_path) in ["flickr30k_images", "train2014", "val2014"]:
             base_data_dir = os.path.dirname(images_path)
         else:
             base_data_dir = images_path
@@ -419,7 +419,13 @@ def main():
     output_path = os.path.join(output_dir, output_filenames[args.modality])
     
     # Initialize wandb
-    wandb_project = config.get("logging", {}).get("wandb_project", "mining")
+    # WANDB_PROJECT must be set by SLURM script or in config
+    wandb_project = os.environ.get("WANDB_PROJECT") or config.get("logging", {}).get("wandb_project")
+    if not wandb_project:
+        raise ValueError(
+            "WANDB_PROJECT must be set either via environment variable (from SLURM script) "
+            "or in config['logging']['wandb_project']"
+        )
     wandb.init(project=wandb_project, job_type=f"mining_{args.modality}", config=vars(args))
     
     # Load CLIP model
