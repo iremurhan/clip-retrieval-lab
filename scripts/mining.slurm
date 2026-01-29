@@ -1,20 +1,16 @@
 #!/bin/bash
-# Training. Prefer: ./scripts/start_training.sh <run_name> [config]
-# Direct: sbatch --job-name=NAME scripts/train.slurm NAME [config]
-# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, checkpoints/, wandb/). W&B: retrieval.
-#
-#SBATCH --time=7-00:00:00
+#SBATCH --job-name=mining
+#SBATCH --partition=gpu
+#SBATCH --time=07-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=40G
+#SBATCH --mem-per-gpu=48G
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
-#SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT
-#SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
-
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/coco/%j/slurm.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/coco/%j/slurm.out
-#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE,PYTHONPATH=/workspace
+
 set -euo pipefail
 
 echo "=========================================="
