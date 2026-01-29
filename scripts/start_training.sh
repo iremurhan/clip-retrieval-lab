@@ -3,7 +3,7 @@
 # Wrapper script to submit training jobs easily.
 # Usage: ./scripts/start_training.sh <run_name> [config_path]
 
-# SLURM stdout/stderr go to ~/experiments/results/{dataset}/{job_id}/output.log
+# Two files: slurm.out (script), training.log (Python) under ~/experiments/results/{dataset}/{job_id}/
 
 set -e
 
@@ -25,18 +25,18 @@ else
 fi
 
 RESULTS_ROOT="${EXPERIMENTS_RESULTS:-$HOME/experiments/results}"
-OUT_ERR="${RESULTS_ROOT}/${DATASET}/%j/output"
+SLURM_OUT="${RESULTS_ROOT}/${DATASET}/%j/slurm.out"
 
 echo "------------------------------------------------"
 echo "Run name:  ${EXP_NAME}"
 echo "Config:    ${CONFIG}"
-echo "Output:    ${RESULTS_ROOT}/${DATASET}/<job_id>/output.log"
+echo "Logs:      ${RESULTS_ROOT}/${DATASET}/<job_id>/slurm.out, training.log"
 echo "------------------------------------------------"
 
 JOB_ID=$(sbatch --job-name="${EXP_NAME}" \
-    --output="${OUT_ERR}.log" \
-    --error="${OUT_ERR}.err" \
+    --output="${SLURM_OUT}" \
+    --error="${SLURM_OUT}" \
     scripts/train.slurm "${EXP_NAME}" "${CONFIG}" | awk '{print $NF}')
 
 mkdir -p "${RESULTS_ROOT}/${DATASET}/${JOB_ID}"
-echo "Job ${JOB_ID} submitted. Logs: ${RESULTS_ROOT}/${DATASET}/${JOB_ID}/output.log"
+echo "Job ${JOB_ID} submitted. Logs: ${RESULTS_ROOT}/${DATASET}/${JOB_ID}/slurm.out, training.log"

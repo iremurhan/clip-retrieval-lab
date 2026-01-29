@@ -9,8 +9,9 @@
 #
 # Output Structure:
 #   experiments/results/{dataset}/{job_id}/
-#     - output.log       (all logs: container, setup, mining)
-#     - wandb/           (WandB files if enabled)
+#     - slurm.out         (script/SLURM: container, setup, job messages)
+#     - mining.log        (Python/mining output only)
+#     - wandb/            (WandB files if enabled)
 #
 # Mining Output Files (in datasets/{dataset}/pairwise_similarities/):
 #   visual    -> mining_image_visual.pt
@@ -35,9 +36,9 @@
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
-# SBATCH output/error (override with --output/--error to put under results/{dataset}/{job_id}/)
-#SBATCH --output=/users/beyza.urhan/experiments/results/%j/output.log
-#SBATCH --error=/users/beyza.urhan/experiments/results/%j/output.err
+# SBATCH stdout+stderr -> slurm.out
+#SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE,PYTHONPATH=/workspace
 
 set -euo pipefail
@@ -153,17 +154,16 @@ esac
 echo ""
 echo "Starting mining process..."
 
-# Run unified mining script
-# Redirect both stdout and stderr to mining.log (no separate err.log)
+# Run mining (Python output only -> mining.log; script output -> slurm.out)
 python3 -u tools/mine_pairwise_sim.py \
     --modality "$MODALITY" \
     --config "$CONFIG_FILE" \
     --top_k "$TOP_K" \
     --batch_size "$BATCH_SIZE" \
     --query_chunk_size "$QUERY_CHUNK_SIZE" \
-    2>&1 | tee "$JOB_DIR/mining.log"
+    > "$JOB_DIR/mining.log" 2>&1
 
-MINING_EXIT_CODE=${PIPESTATUS[0]}
+MINING_EXIT_CODE=$?
 
 echo ""
 echo "=========================================="
