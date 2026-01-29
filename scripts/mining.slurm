@@ -19,17 +19,37 @@
 
 set -euo pipefail
 
-echo "Checking mounts..."
-echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
-echo "  /workspace/datasets/coco: $(ls /workspace/datasets/coco 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
-echo "  /workspace/datasets/flickr30k: $(ls /workspace/datasets/flickr30k 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
-echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+echo "=========================================="
+echo "MOUNT CHECK (job must run inside container with #SBATCH --container-mounts)"
+echo "=========================================="
+WS_OK=0
+COCO_OK=0
+FLICKR_OK=0
+OUT_OK=0
+[ -d "/workspace" ] && WS_OK=1
+[ -d "/workspace/datasets/coco" ] && COCO_OK=1
+[ -d "/workspace/datasets/flickr30k" ] && FLICKR_OK=1
+[ -d "/output" ] && [ -d "/output/results" ] && OUT_OK=1
 
-if [ ! -d "/workspace/datasets/coco" ] && [ ! -d "/workspace/datasets/flickr30k" ]; then
-    echo "FATAL ERROR: No dataset directories found. Check container-mounts."
-    echo "Expected at least one of: /workspace/datasets/coco or /workspace/datasets/flickr30k"
+echo "  /workspace                    -> $( [ $WS_OK -eq 1 ] && echo "OK ($(ls /workspace 2>/dev/null | wc -l) items)" || echo "MISSING" )"
+echo "  /workspace/datasets/coco      -> $( [ $COCO_OK -eq 1 ] && echo "OK" || echo "MISSING" )"
+echo "  /workspace/datasets/flickr30k -> $( [ $FLICKR_OK -eq 1 ] && echo "OK" || echo "MISSING" )"
+echo "  /output/results               -> $( [ $OUT_OK -eq 1 ] && echo "OK" || echo "MISSING" )"
+
+if [ $WS_OK -eq 0 ] || [ $COCO_OK -eq 0 ] && [ $FLICKR_OK -eq 0 ]; then
+    echo ""
+    echo "FATAL: Container mounts are not visible. Possible causes:"
+    echo "  1. Job is running on the host, not in the container (--container-image/--container-mounts ignored)."
+    echo "  2. Cluster uses Pyxis/Enroot: mount paths must be absolute and host dirs must exist."
+    echo "  3. On the submit node, verify host paths exist:"
+    echo "     ls /users/beyza.urhan/tez_v2_clean"
+    echo "     ls /users/beyza.urhan/experiments/datasets/coco"
+    echo "     ls /users/beyza.urhan/experiments/datasets/flickr30k"
+    echo "     ls /users/beyza.urhan/experiments/results"
+    echo "  If those exist, ask support whether container jobs are enabled for this partition/account."
     exit 1
 fi
+echo "=========================================="
 
 MODALITY="${MINING_MODALITY:-caption}"
 CONFIG_FILE="${MINING_CONFIG:-configs/config_coco.yaml}"
