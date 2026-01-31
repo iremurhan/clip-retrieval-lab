@@ -6,9 +6,8 @@
 #SBATCH --ntasks=1                # Tek görev
 #SBATCH --gres=gpu:1              # 1 adet GPU
 #SBATCH --cpus-per-task=8         # Veri yükleme için CPU çekirdekleri
-#SBATCH --mem=32G                 # RAM miktarı (Dataset boyutuna göre artırılabilir)
+#SBATCH --mem=40G                 # RAM miktarı (Dataset boyutuna göre artırılabilir)
 #SBATCH --time=04:00:00           # Zaman sınırı (Saat:Dakika:Saniye)
-#SBATCH --partition=gpu           # Partition adı (Cluster'ınıza göre değiştirin)
 
 # Hata durumunda durdur ve komutları ekrana bas
 set -e
