@@ -1,61 +1,59 @@
 #!/bin/bash
-#SBATCH --job-name=mining_sim
-#SBATCH --output=logs/%x_%j.out   # Log dosyası (logs klasörü olmalı)
-#SBATCH --error=logs/%x_%j.err    # Hata log dosyası
-#SBATCH --nodes=1                 # Tek node
-#SBATCH --ntasks=1                # Tek görev
-#SBATCH --gres=gpu:1              # 1 adet GPU
-#SBATCH --cpus-per-task=8         # Veri yükleme için CPU çekirdekleri
-#SBATCH --mem=40G                 # RAM miktarı (Dataset boyutuna göre artırılabilir)
-#SBATCH --time=04:00:00           # Zaman sınırı (Saat:Dakika:Saniye)
+#SBATCH --job-name=mining_coco
+#SBATCH --output=mining_log_%j.out  # Log dosyası buraya oluşacak
+#SBATCH --error=mining_log_%j.out
+#SBATCH --time=04:00:00
+#SBATCH --gpus=1
+#SBATCH --cpus-per-gpu=8
+#SBATCH --mem-per-gpu=40G
+#SBATCH --container-image=biremurhan/image-text-contrast:v0.4
+#SBATCH --mail-type=FAIL
+#SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 
-# Hata durumunda durdur ve komutları ekrana bas
-set -e
-set -x
+# ------------------------------------------------------------------
+# MOUNT AYARLARI (Sunucu Yolları -> Container Yolları)
+# ------------------------------------------------------------------
+#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 
-# -----------------------------------------------------------------------
-# 1. Ortam Değişkenleri ve Sanal Ortam
-# -----------------------------------------------------------------------
-# Cluster'a özgü modülleri yükleyin (Gerekirse)
-# module load cuda/11.8
-# module load python/3.10
+# WandB ve diğer değişkenleri içeri aktar
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE
 
-# Conda veya venv ortamınızı aktif edin
-source activate my_env_name  # Kendi ortam adınızı buraya yazın
+set -euo pipefail
 
-# Python path ayarı (Proje ana dizinini görmesi için)
-export PYTHONPATH=$PYTHONPATH:$(pwd)
+echo "=========================================="
+echo "Job ID:        ${SLURM_JOB_ID}"
+echo "Node:          ${SLURMD_NODENAME}"
+echo "Date:          $(date)"
+echo "=========================================="
 
-# WandB Ayarları (Kodunuzda wandb kullanıldığı için)
-export WANDB_PROJECT="knowledge-distillation-mining"
-# export WANDB_MODE="offline" # İnternet yoksa offline mod
-# export WANDB_API_KEY="YOUR_KEY_HERE"
+# ------------------------------------------------------------------
+# KONTROLLER
+# ------------------------------------------------------------------
+# Container içinde mountlar çalışmış mı?
+if [ ! -d "/workspace/datasets/coco" ]; then
+    echo "HATA: /workspace/datasets/coco klasörü bulunamadı."
+    echo "Lütfen host makinede '/users/beyza.urhan/experiments/datasets/coco' yolunu kontrol edin."
+    exit 1
+fi
 
-# -----------------------------------------------------------------------
-# 2. Parametreler
-# -----------------------------------------------------------------------
-# mine_pairwise_sim.py içindeki argparse seçeneklerine göre ayarlar
-# Seçenekler: "visual", "consensus", "caption"
-MODALITY="caption" 
+if [ ! -d "/output/results" ]; then
+    echo "HATA: /output/results klasörü bulunamadı."
+    exit 1
+fi
 
-CONFIG_PATH="config.yaml"
-TOP_K=1000
-BATCH_SIZE=512
-CHUNK_SIZE=5000
+# ------------------------------------------------------------------
+# ÇALIŞTIRMA
+# ------------------------------------------------------------------
+cd /workspace
 
-echo "Başlangıç Zamanı: $(date)"
-echo "Çalıştırılan Modality: $MODALITY"
-echo "Config Dosyası: $CONFIG_PATH"
+# Text-Text Mining Başlat (COCO için)
+echo "Mining Başlıyor..."
 
-# -----------------------------------------------------------------------
-# 3. Python Scriptini Çalıştırma
-# -----------------------------------------------------------------------
-python tools/mine_pairwise_sim.py \
-    --modality $MODALITY \
-    --config $CONFIG_PATH \
-    --top_k $TOP_K \
-    --batch_size $BATCH_SIZE \
-    --query_chunk_size $CHUNK_SIZE \
-    --output_dir "./datasets/pairwise_similarities"
+python3 -u tools/mine_pairwise_sim.py \
+    --modality caption \
+    --config configs/config_coco.yaml \
+    --top_k 1000 \
+    --batch_size 512 \
+    --query_chunk_size 5000
 
-echo "Bitiş Zamanı: $(date)"
+echo "Mining Tamamlandı."
