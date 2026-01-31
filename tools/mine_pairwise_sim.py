@@ -437,7 +437,6 @@ def main():
         tokenizer=tokenizer,
         split="train",
         transform=None,
-        intra_modal_aug=False,
     )
     
     # Handle debug mode
