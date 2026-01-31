@@ -1,18 +1,16 @@
 #!/bin/bash
-# Direct run (no wrapper): from repo root, create output dir once then:
-#   sbatch --export=MINING_MODALITY=caption,MINING_CONFIG=configs/config_coco.yaml scripts/mining.slurm
-#   sbatch --export=MINING_MODALITY=caption,MINING_CONFIG=configs/config_flickr.yaml scripts/mining.slurm
-# Prerequisite: mkdir -p ~/experiments/results/coco ~/experiments/results/flickr30k
-#SBATCH --job-name=mining
-#SBATCH --time=07-00:00:00
+# Mining (pairwise similarity). Prefer: ./scripts/submit_mining.sh <modality> [config]
+# Direct: sbatch --export=MINING_MODALITY=...,MINING_CONFIG=... scripts/mining.slurm
+# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, mining.log). W&B: mining.
+#SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=40G
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
-#SBATCH --output=/users/beyza.urhan/experiments/results/coco/%j/slurm.out
-#SBATCH --error=/users/beyza.urhan/experiments/results/coco/%j/slurm.out
-#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE,PYTHONPATH=/workspace
+#SBATCH --output=/users/beyza.urhan/experiments/results/{DATASET}/%j/mining_slurm.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/{DATASET}/%j/mining_slurm.out
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace,MINING_MODALITY,MINING_CONFIG,TOP_K,BATCH_SIZE,QUERY_CHUNK_SIZE
 
 set -euo pipefail
 
