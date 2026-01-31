@@ -91,13 +91,17 @@ class CaptionImageDataset(Dataset):
                 current_split = 'train'
 
             if current_split == split:
-                # Handle ID variations
+                # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
                 if 'cocoid' in img:
                     img_id = int(img['cocoid'])
                 elif 'imgid' in img:
                     img_id = int(img['imgid'])
-                else:
+                elif 'id' in img:
                     img_id = int(img['id'])
+                else:
+                    raise ValueError(
+                        f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
+                    )
                 
                 # Take exactly 5 captions
                 sentences = img['sentences'][:5]
