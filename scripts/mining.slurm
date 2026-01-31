@@ -18,11 +18,6 @@ echo "Checking mounts..."
 echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
 echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
 
-if [ ! -d "/workspace" ] || [ ! -d "/output" ]; then
-    echo "FATAL ERROR: Required mounts not found. Check container-mounts."
-    exit 1
-fi
-
 MODALITY="${MINING_MODALITY:-caption}"
 CONFIG_FILE="${MINING_CONFIG:-configs/config_coco.yaml}"
 TOP_K="${TOP_K:-1000}"
