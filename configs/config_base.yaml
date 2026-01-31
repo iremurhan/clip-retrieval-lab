@@ -22,7 +22,7 @@ training:
   num_workers: 8
   max_length: 77
 
-  epochs: 50
+  epochs: 20
   seed: 42
   optimizer: "adamw"
   scheduler: "cosine"
@@ -36,12 +36,6 @@ training:
 augment:
   image:
     enabled: true
-
-distillation:
-  enabled: true
-  top_k: 20
-  alpha: 0.4
-  temperature: 3
 
 debug:
   debug_mode: false
