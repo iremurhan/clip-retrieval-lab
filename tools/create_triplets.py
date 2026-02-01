@@ -5,29 +5,37 @@ import torch
 from tqdm import tqdm
 
 def load_dataset_json(json_path, split='train'):
-    """Dataset JSON dosyasını yükler ve caption-image eşleşmelerini çıkarır."""
+    """Load Karpathy JSON and build caption list in same order as src/data.py CaptionImageDataset (train)."""
     print(f"Loading dataset from: {json_path}")
     with open(json_path, 'r') as f:
         data = json.load(f)
     
-    # Karpathy split formatına göre filtrele
+    # Match data.py: train = 'train' or 'restval' (COCO restval), else exact split
     if split == 'train':
-        images = [img for img in data['images'] if img['split'] == 'train' or img.get('restval', False)]
+        images = [img for img in data['images'] if img['split'] in ('train', 'restval')]
     else:
         images = [img for img in data['images'] if img['split'] == split]
     
-    caption_list = []      # Tüm caption stringleri
-    caption_to_imgid = []  # caption_index -> imgid
-    imgid_to_filename = {} # imgid -> filename
+    caption_list = []
+    caption_to_imgid = []
+    imgid_to_filename = {}
     
     print(f"Processing {len(images)} images for split '{split}'...")
     
     for img in images:
-        img_id = img.get('imgid', img.get('id'))
-        filename = img['filename']
+        # Match data.py: cocoid (COCO), imgid (Flickr30k), id fallback
+        if 'cocoid' in img:
+            img_id = int(img['cocoid'])
+        elif 'imgid' in img:
+            img_id = int(img['imgid'])
+        elif 'id' in img:
+            img_id = int(img['id'])
+        else:
+            raise ValueError(f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}")
+        filename = img.get('filename', '')
         imgid_to_filename[img_id] = filename
-        
-        for sent in img['sentences']:
+        # Match data.py: exactly 5 captions per image
+        for sent in img['sentences'][:5]:
             caption_list.append(sent['raw'])
             caption_to_imgid.append(img_id)
             
@@ -67,17 +75,15 @@ def main():
     
     print(f"Generating triplets (Negatives: {args.num_negatives}, Max Threshold: {args.threshold})...")
     
-    # 3. Triplet Döngüsü
+    # 3. Triplet loop (order must match mining / CaptionImageDataset)
     for idx, (caption_text, pos_img_id) in enumerate(tqdm(zip(captions, caption_to_imgid), total=len(captions))):
-        
-        neighbors = mining_indices[idx]
-        scores = mining_values[idx]
-        
+        neighbors = mining_indices[idx].flatten()
+        scores = mining_values[idx].flatten()
         hard_negatives = []
         
-        for i, neg_idx in enumerate(neighbors):
-            neg_idx = neg_idx.item()
-            score = scores[i].item()
+        for i in range(len(neighbors)):
+            neg_idx = int(neighbors[i].item()) if hasattr(neighbors[i], 'item') else int(neighbors[i])
+            score = float(scores[i].item()) if hasattr(scores[i], 'item') else float(scores[i])
             
             # 1. Kendisi mi?
             if neg_idx == idx:
