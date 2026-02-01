@@ -420,11 +420,27 @@ def main():
 
     wandb_project = os.environ.get("WANDB_PROJECT") or config.get("logging", {}).get("wandb_project") or "mining"
     images_path = config.get("data", {}).get("images_path", "")
-    dataset_name = "flickr30k" if "flickr" in images_path else "coco"
+    # Short name for WandB grouping/filtering (explicit check from config path or images_path)
+    combined = images_path + args.config
+    if "flickr" in combined:
+        dataset_name = "flickr"
+        dataset_name_long = "flickr30k"
+    elif "coco" in combined:
+        dataset_name = "coco"
+        dataset_name_long = "coco"
+    else:
+        dataset_name = "unknown"
+        dataset_name_long = "unknown"
     wb_config = dict(vars(args))
-    wb_config["dataset"] = dataset_name
+    wb_config["dataset"] = dataset_name_long
+    wb_config["dataset_name"] = dataset_name
     try:
-        wandb.init(project=wandb_project, job_type=f"mining_{args.modality}", config=wb_config)
+        wandb.init(
+            project=wandb_project,
+            job_type=f"mining_{args.modality}",
+            config=wb_config,
+            tags=[dataset_name],
+        )
     except Exception as e:
         logger.warning(f"WandB init failed: {e}. Continuing without WandB.")
 
