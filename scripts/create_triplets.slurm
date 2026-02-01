@@ -10,10 +10,11 @@
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT,TARGET_DATASET
 #-------------------------------------------------------------------------------------------------
-# Usage:
-#   COCO:   sbatch --export=TARGET_DATASET=coco scripts/create_triplets.slurm
-#   Flickr: sbatch --export=ALL,TARGET_DATASET=flickr30k scripts/create_triplets.slurm
-# Prerequisite: run mining first so .pt files exist under datasets/{coco|flickr30k}/pairwise_similarities/
+# Usage (from repo root):
+#   Container: sbatch --export=TARGET_DATASET=coco scripts/create_triplets.slurm
+#   No container (data in ~/experiments/datasets):
+#     sbatch --export=TARGET_DATASET=coco,DATASETS_ROOT=$HOME/experiments/datasets scripts/create_triplets.slurm
+# Prerequisite: mining .pt files under {DATASETS_ROOT}/{coco|flickr30k}/pairwise_similarities/
 #-------------------------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -37,18 +38,20 @@ fi
 # Project root: use /workspace if container mount exists, else submission dir
 if [ -d "/workspace" ]; then
     WORKSPACE_ROOT="/workspace"
+    DATASETS_ROOT="${DATASETS_ROOT:-$WORKSPACE_ROOT/datasets}"
 else
     WORKSPACE_ROOT="${SLURM_SUBMIT_DIR:-.}"
-    echo ">>> /workspace not found, using WORKSPACE_ROOT=$WORKSPACE_ROOT"
+    DATASETS_ROOT="${DATASETS_ROOT:-$HOME/experiments/datasets}"
+    echo ">>> /workspace not found, using WORKSPACE_ROOT=$WORKSPACE_ROOT, DATASETS_ROOT=$DATASETS_ROOT"
 fi
 cd "$WORKSPACE_ROOT" || { echo "ERROR: Cannot cd to $WORKSPACE_ROOT"; exit 1; }
 
-# Paths relative to project root
-INPUT_JSON="datasets/${DATASET_NAME}/caption_datasets/dataset_${DATASET_NAME}.json"
-MINING_DIR="datasets/${DATASET_NAME}/pairwise_similarities"
+# Data paths (under DATASETS_ROOT so they work with or without container)
+INPUT_JSON="${DATASETS_ROOT}/${DATASET_NAME}/caption_datasets/dataset_${DATASET_NAME}.json"
+MINING_DIR="${DATASETS_ROOT}/${DATASET_NAME}/pairwise_similarities"
 INDICES_PATH="${MINING_DIR}/mining_text_top1000_indices.pt"
 VALUES_PATH="${MINING_DIR}/mining_text_top1000_values.pt"
-OUTPUT_JSON="datasets/${DATASET_NAME}/triplets.json"
+OUTPUT_JSON="${DATASETS_ROOT}/${DATASET_NAME}/triplets.json"
 
 # Log handling (only when running in container with /output mount)
 CURRENT_JOB_DIR="/output/results/${SLURM_JOB_ID}"
