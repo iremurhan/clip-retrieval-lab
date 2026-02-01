@@ -58,6 +58,7 @@ class Trainer:
         self.wandb_run = None
         if self.use_wandb and wandb.run is not None:
             self.wandb_run = wandb.run
+            wandb.config.update({"dataset_name": config.get('dataset_name', 'unknown')}, allow_val_change=True)
             # Define WandB summary metrics with max tracking for validation results
             # This ensures the dashboard always shows the best scores, even if current epoch is worse
             wandb.define_metric("val/t2i_r1", summary="max")
@@ -104,20 +105,12 @@ class Trainer:
 
     def save_checkpoint(self, epoch, is_best=False):
         """
-        Save checkpoint with robust error handling for disk quota issues.
-        
-        Always saves last_model.pth (for resuming training).
-        If is_best is True, also saves best_model.pth (for best performance).
-        
-        Args:
-            epoch: Current epoch number
-            is_best: Whether this is the best model so far
+        Save checkpoint. Only two files are ever written: last_model.pth (for resume)
+        and best_model.pth (only when is_best=True). No epoch-based checkpoints.
+        Disk errors are caught and logged; training continues.
         """
-        # Define checkpoint paths
         last_path = os.path.join(self.checkpoint_dir, "last_model.pth")
         best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
-        
-        # Build checkpoint dictionary
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -126,32 +119,22 @@ class Trainer:
             'best_r1': self.best_r1,
             'config': self.config
         }
-        
-        # Save scaler state if using AMP
         if self.use_amp:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-        
-        # Always save last_model.pth (overwrite previous one)
+
         try:
             torch.save(checkpoint, last_path)
             logger.info(f"Checkpoint saved: last_model.pth (epoch {epoch})")
         except OSError as e:
-            # Handle all disk errors (quota exceeded, no space, etc.)
-            logger.error(f"DISK ERROR: Could not save checkpoint at Epoch {epoch}. Training continues...")
-            print(f"Error detail: {e}")
-            # Don't raise - let training continue
+            logger.error(f"DISK ERROR: Could not save last_model.pth at Epoch {epoch}. {e}")
             return
-        
-        # If this is the best model, also save as best_model.pth
+
         if is_best:
             try:
                 torch.save(checkpoint, best_path)
                 logger.info(f"Saved best model to {best_path} (R@1: {self.best_r1:.2f})")
             except OSError as e:
-                # Handle all disk errors (quota exceeded, no space, etc.)
-                logger.error(f"DISK ERROR: Could not save checkpoint at Epoch {epoch}. Training continues...")
-                print(f"Error detail: {e}")
-                # Don't raise - let training continue
+                logger.error(f"DISK ERROR: Could not save best_model.pth at Epoch {epoch}. {e}")
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -167,6 +150,10 @@ class Trainer:
         # Initialize grad_norm for logging
         grad_norm = 0.0
         end_time = time.time()
+        
+        # Dynamic threshold for sweeps: update dataset FNE threshold from config if present
+        if hasattr(self.train_loader.dataset, 'fne_threshold'):
+            self.train_loader.dataset.fne_threshold = self.config.get('mining', {}).get('fne_threshold', self.train_loader.dataset.fne_threshold)
         
         for step, batch in enumerate(self.train_loader):
             images = batch['image'].to(self.device)
