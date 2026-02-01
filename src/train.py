@@ -72,6 +72,13 @@ class Trainer:
             wandb.define_metric("val/i2t_map5", summary="max")
             wandb.define_metric("val/i2t_map10", summary="max")
 
+        # Hard Negative Mining only runs when use_clip_loss is false
+        if config.get('mining', {}).get('enabled', False) and config.get('loss', {}).get('use_clip_loss', False):
+            logger.warning(
+                "mining.enabled=true but loss.use_clip_loss=true: Hard negatives will be IGNORED. "
+                "Set loss.use_clip_loss: false in config for Hard Negative Mining."
+            )
+
     def load_checkpoint(self, checkpoint_path):
         """
         Loads full training state from a checkpoint file.
@@ -159,6 +166,12 @@ class Trainer:
             images = batch['image'].to(self.device)
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
+
+            neg_input_ids = batch.get('negative_input_ids')
+            neg_attention_mask = batch.get('negative_attention_mask')
+            if neg_input_ids is not None:
+                neg_input_ids = neg_input_ids.to(self.device)
+                neg_attention_mask = neg_attention_mask.to(self.device)
             
             # ============================================================
             # Forward Pass with Mixed Precision (AMP)
@@ -168,19 +181,22 @@ class Trainer:
                     if use_clip_loss:
                         loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                     else:
-                        images_aug = batch['image_aug'].to(self.device)
-                        img_embeds, txt_embeds = self.model(images, input_ids, attention_mask)
-                        
+                        img_embeds = self.model.encode_image(images)
+                        txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                        neg_txt_embeds = None
+                        if neg_input_ids is not None:
+                            neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
-
                         if self.config['loss'].get('intra_img_weight', 0.0) > 0:
-                            img_aug_embeds, _ = self.model(images_aug, input_ids, attention_mask)
-
+                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
                         if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
-                            _, txt_aug_embeds = self.model(images, input_ids, attention_mask)
-                        
-                        loss = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
+                            txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                        loss = self.criterion(
+                            img_embeds, txt_embeds,
+                            img_aug_embeds, txt_aug_embeds,
+                            neg_txt_embeds
+                        )
                 
                 # Backward with gradient scaling
                 self.optimizer.zero_grad()
@@ -197,19 +213,22 @@ class Trainer:
                 if use_clip_loss:
                     loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                 else:
-                    images_aug = batch['image_aug'].to(self.device)
-                    img_embeds, txt_embeds = self.model(images, input_ids, attention_mask)
-                    
+                    img_embeds = self.model.encode_image(images)
+                    txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                    neg_txt_embeds = None
+                    if neg_input_ids is not None:
+                        neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
-
                     if self.config['loss'].get('intra_img_weight', 0.0) > 0:
-                        img_aug_embeds, _ = self.model(images_aug, input_ids, attention_mask)
-
+                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
                     if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
-                        _, txt_aug_embeds = self.model(images, input_ids, attention_mask)
-                    
-                    loss = self.criterion(img_embeds, txt_embeds, img_aug_embeds, txt_aug_embeds)
+                        txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                    loss = self.criterion(
+                        img_embeds, txt_embeds,
+                        img_aug_embeds, txt_aug_embeds,
+                        neg_txt_embeds
+                    )
                 
                 # Backward
                 self.optimizer.zero_grad()
