@@ -43,7 +43,6 @@ debug:
 
 logging:
   use_wandb: true
-  wandb_project: "retrieval"
   log_freq: 500
   eval_freq: 1
   save_freq: 3

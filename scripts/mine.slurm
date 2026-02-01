@@ -10,10 +10,10 @@
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=beyza.urhan@bogazici.edu.tr
 
-# Mount Ayarları
+# Mount settings
 #SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 
-# WandB değişkenlerini aktar
+# Pass WandB variables to container
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,WANDB_PROJECT
 
 set -euo pipefail
@@ -24,33 +24,32 @@ echo "Date:          $(date)"
 echo "=========================================="
 
 # ------------------------------------------------------------------
-# WANDB KURULUMU (Eksik olan kısım burasıydı)
+# WANDB SETUP
 # ------------------------------------------------------------------
-# Eğer env klasöründe wandb.env varsa onu yükle
+# Load wandb.env from /env if present
 if [ -f /env/wandb.env ]; then
-    echo "WandB environment dosyası yükleniyor..."
+    echo "Loading WandB environment file..."
     set -a
     source /env/wandb.env
     set +a
 else
-    echo "UYARI: /env/wandb.env bulunamadı. API Key eksik olabilir."
+    echo "WARNING: /env/wandb.env not found. API key may be missing."
 fi
 
-# 2. PROJE ADINI BURADA BELİRLİYORUZ (Dosyadakini Ezer)
-#    İstediğiniz proje adını tırnak içine yazın:
-export WANDB_PROJECT="mining-coco"
+# Set project name here (overrides file). Set your project name in quotes:
+export WANDB_PROJECT="mining"
 
-# Run adını da dinamik yapalım (Job ID eklensin)
+# Set run name dynamically (include Job ID)
 export WANDB_NAME="mining_top1000_${SLURM_JOB_ID}"
 
-echo "Aktif WandB Projesi: $WANDB_PROJECT"
+echo "Active WandB project: $WANDB_PROJECT"
 
 # ------------------------------------------------------------------
-# ÇALIŞTIRMA
+# EXECUTION
 # ------------------------------------------------------------------
 cd /workspace
 
-echo "Mining Başlıyor..."
+echo "Starting mining..."
 
 python3 -u tools/mine_pairwise_sim.py \
     --modality caption \
@@ -59,4 +58,4 @@ python3 -u tools/mine_pairwise_sim.py \
     --batch_size 512 \
     --query_chunk_size 5000
 
-echo "Mining Tamamlandı."
+echo "Mining completed."
