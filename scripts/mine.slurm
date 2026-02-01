@@ -1,8 +1,8 @@
 #!/bin/bash
 #-------------------------------------------------------------------------------------------------
 # Usage:
-#   COCO: sbatch --export=TARGET_DATASET=coco scripts/mine.slurm or sbatch scripts/mine.slurm
-#   Flickr30k: sbatch --export=TARGET_DATASET=flickr30k scripts/mine.slurm or sbatch --export=ALL,TARGET_DATASET=flickr30k scripts/mine.slurm
+#   COCO: sbatch --export=ALL,TARGET_DATASET=coco scripts/mine.slurm or sbatch scripts/mine.slurm
+#   Flickr30k: sbatch --export=ALL,TARGET_DATASET=flickr30k scripts/mine.slurm
 #
 # With wrapper:
 #   bash ./scripts/start_mining.sh coco
