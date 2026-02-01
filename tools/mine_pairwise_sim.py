@@ -420,10 +420,10 @@ def main():
 
     wandb_project = os.environ.get("WANDB_PROJECT") or config.get("logging", {}).get("wandb_project") or "mining"
     images_path = config.get("data", {}).get("images_path", "")
-    # Short name for WandB grouping/filtering (explicit check from config path or images_path)
+    # Dataset name for WandB grouping/filtering (explicit check from config path or images_path)
     combined = images_path + args.config
     if "flickr" in combined:
-        dataset_name = "flickr"
+        dataset_name = "flickr30k"
         dataset_name_long = "flickr30k"
     elif "coco" in combined:
         dataset_name = "coco"

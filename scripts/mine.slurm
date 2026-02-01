@@ -1,9 +1,12 @@
 #!/bin/bash
-# To run COCO: sbatch --export=TARGET_DATASET=coco scripts/mine.slurm or sbatch scripts/mine.slurm
-# To run Flickr: sbatch --export=TARGET_DATASET=flickr scripts/mine.slurm or sbatch --export=ALL,TARGET_DATASET=flickr scripts/mine.slurm
+#-------------------------------------------------------------------------------------------------
+# Usage:
+#   COCO: sbatch --export=TARGET_DATASET=coco scripts/mine.slurm or sbatch scripts/mine.slurm
+#   Flickr30k: sbatch --export=TARGET_DATASET=flickr30k scripts/mine.slurm or sbatch --export=ALL,TARGET_DATASET=flickr30k scripts/mine.slurm
+#-------------------------------------------------------------------------------------------------
 #SBATCH --job-name=mining
-#SBATCH --output=/users/beyza.urhan/experiments/results/{DATASET}/%j/mining_log.out
-#SBATCH --error=/users/beyza.urhan/experiments/results/{DATASET}/%j/mining_log.out
+#SBATCH --output=/users/beyza.urhan/experiments/results/%j/mining_log.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/%j/mining_log.out
 #SBATCH --time=07:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
@@ -24,23 +27,54 @@ set -euo pipefail
 # Default to 'coco' if TARGET_DATASET is not set
 DATASET="${TARGET_DATASET:-coco}"
 
-if [ "$DATASET" == "flickr" ]; then
+if [ "$DATASET" == "flickr30k" ] || [ "$DATASET" == "flickr" ]; then
+    DATASET_NAME="flickr30k"
     CONFIG_FILE="configs/config_flickr.yaml"
     echo ">>> MODE: FLICKR30K"
 elif [ "$DATASET" == "coco" ]; then
+    DATASET_NAME="coco"
     CONFIG_FILE="configs/config_coco.yaml"
     echo ">>> MODE: MS-COCO"
 else
-    echo "ERROR: Unknown dataset '$DATASET'. Use 'coco' or 'flickr'."
+    echo "ERROR: Unknown dataset '$DATASET'. Use 'coco' or 'flickr30k'."
     exit 1
 fi
+CURRENT_JOB_DIR="/output/results/${SLURM_JOB_ID}"
+
+TARGET_PARENT_DIR="/output/results/${DATASET_NAME}"
+TARGET_JOB_DIR="${TARGET_PARENT_DIR}/${SLURM_JOB_ID}"
+
 
 echo "=========================================="
-echo "Job ID:        ${SLURM_JOB_ID}"
-echo "Date:          $(date)"
-echo "Target dataset: ${TARGET_DATASET}"
-echo "Results directory: /users/beyza.urhan/experiments/results/${TARGET_DATASET}/${SLURM_JOB_ID}"
+echo "Job ID:      ${SLURM_JOB_ID}"
+echo "Dataset:     ${DATASET_NAME}"
+echo "Current:       ${CURRENT_JOB_DIR}"
+echo "Target:       ${TARGET_JOB_DIR}"
 echo "=========================================="
+
+# ------------------------------------------------------------------
+# FINALIZE / MOVE LOGIC
+# ------------------------------------------------------------------
+# Function to move the job directory to the dataset folder upon exit
+move_job_folder() {
+    echo "Job finished. Moving job directory to ${DATASET_NAME}..."
+    sync
+    
+    # Ensure target parent exists (safety check, even if it usually exists)
+    if [ ! -d "$TARGET_PARENT_DIR" ]; then
+        mkdir -p "$TARGET_PARENT_DIR"
+    fi
+
+    # Move the folder: results/JOB_ID -> results/DATASET_NAME/JOB_ID
+    if [ -d "$CURRENT_JOB_DIR" ]; then
+        mv "$CURRENT_JOB_DIR" "$TARGET_PARENT_DIR/"
+        echo "Successfully moved to: ${TARGET_PARENT_DIR}/${SLURM_JOB_ID}"
+    else
+        echo "WARNING: Current job directory not found at $CURRENT_JOB_DIR"
+    fi
+}
+# Execute move_job_folder when script exits (success or error)
+trap move_job_folder EXIT
 
 # ------------------------------------------------------------------
 # WANDB SETUP
