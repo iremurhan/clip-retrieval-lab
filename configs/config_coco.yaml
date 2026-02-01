@@ -1,3 +1,9 @@
 data:
   images_path: "datasets/coco"
   captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
+
+mining:
+  enabled: true
+  indices_path: "datasets/coco/pairwise_similarities/mining_text_top1000_indices.pt"
+  values_path: "datasets/coco/pairwise_similarities/mining_text_top1000_values.pt"
+  # fne_threshold: 0.90  # inherited from base; override here if needed
