@@ -2,8 +2,8 @@
 # To run COCO: sbatch --export=TARGET_DATASET=coco scripts/mine.slurm or sbatch scripts/mine.slurm
 # To run Flickr: sbatch --export=TARGET_DATASET=flickr scripts/mine.slurm or sbatch --export=ALL,TARGET_DATASET=flickr scripts/mine.slurm
 #SBATCH --job-name=mining
-#SBATCH --output=/users/beyza.urhan/experiments/results/%j/mining_log.out
-#SBATCH --error=/users/beyza.urhan/experiments/results/%j/mining_log.out
+#SBATCH --output=/users/beyza.urhan/experiments/results/{DATASET}/%j/mining_log.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/{DATASET}/%j/mining_log.out
 #SBATCH --time=07:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
