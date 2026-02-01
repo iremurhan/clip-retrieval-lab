@@ -13,7 +13,8 @@ model:
   unfreeze_strategy: "full"
 
 loss:
-  use_clip_loss: true
+  # Hard Negative Mining (FNE + neg_txt_embeds) only runs when use_clip_loss is false.
+  use_clip_loss: false
   temperature: 0.07
 
 training:

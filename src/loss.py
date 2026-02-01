@@ -110,41 +110,41 @@ class SymmetricInfoNCELoss(nn.Module):
         # Return average of both directions
         return (loss_a2b + loss_b2a) / 2
 
-    def forward(self, img_embeds, txt_embeds, img_aug_embeds=None, txt_aug_embeds=None):
+    def forward(self, img_embeds, txt_embeds, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
         """
-        Computes the complete retrieval loss with optional intra-modal regularization.
+        Computes the complete retrieval loss with optional intra-modal regularization and hard negatives.
         
         Args:
-            img_embeds (Tensor): [Batch_Size, Embed_Dim] - L2 normalized image embeddings
-            txt_embeds (Tensor): [Batch_Size, Embed_Dim] - L2 normalized text embeddings
-            img_aug_embeds (Tensor, optional): [Batch_Size, Embed_Dim] - Augmented image 
-                                               embeddings for intra-modal consistency
-            txt_aug_embeds (Tensor, optional): [Batch_Size, Embed_Dim] - Augmented text 
-                                               embeddings for intra-modal consistency
+            img_embeds: [N, D] - L2 normalized image embeddings
+            txt_embeds: [N, D] - L2 normalized text embeddings (positives)
+            img_aug_embeds: [N, D] optional - for intra-modal image loss
+            txt_aug_embeds: [N, D] optional - for intra-modal text loss
+            neg_txt_embeds: [N, D] optional - hard negative text embeddings (one per sample)
         
         Returns:
             Tensor: Scalar total loss value
         """
-        # 1. Inter-Modal Loss (Image ↔ Text) - MAIN OBJECTIVE
-        # Maximizes alignment between matched image-text pairs
-        # Minimizes alignment between mismatched pairs (in-batch negatives)
-        loss_inter = self.compute_symmetric_infonce_loss(img_embeds, txt_embeds)
-        
-        # 2. Intra-Modal Loss (Optional Regularization)
-        # Enforces consistency between original and augmented views within each modality
-        # This helps preserve structural information and improve robustness
-        
+        # 1. Inter-Modal Loss
+        if neg_txt_embeds is not None:
+            # Image -> (positive + negative) texts: all_texts = [txt_embeds; neg_txt_embeds] -> [2N, D]
+            all_texts = torch.cat([txt_embeds, neg_txt_embeds], dim=0)
+            logits_per_image = torch.matmul(img_embeds, all_texts.t()) / self.temperature
+            batch_size = img_embeds.shape[0]
+            labels = torch.arange(batch_size, device=img_embeds.device)
+            loss_i2t = self.criterion(logits_per_image, labels)
+            # Text -> Image: standard symmetric
+            logits_per_text = torch.matmul(txt_embeds, img_embeds.t()) / self.temperature
+            loss_t2i = self.criterion(logits_per_text, labels)
+            loss_inter = (loss_i2t + loss_t2i) / 2
+        else:
+            loss_inter = self.compute_symmetric_infonce_loss(img_embeds, txt_embeds)
+
+        # 2. Intra-Modal Loss (unchanged)
         loss_img = 0.0
         if self.w_img > 0 and img_aug_embeds is not None:
-            # Image Intra-Modal: Original images should be similar to their augmented versions
             loss_img = self.compute_symmetric_infonce_loss(img_embeds, img_aug_embeds)
-
         loss_txt = 0.0
         if self.w_txt > 0 and txt_aug_embeds is not None:
-            # Text Intra-Modal: Original texts should be similar to their augmented versions
-            # (Augmentation achieved via dropout in transformer layers)
             loss_txt = self.compute_symmetric_infonce_loss(txt_embeds, txt_aug_embeds)
 
-        # Total Loss = Inter-Modal + Weighted Intra-Modal Terms
-        total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
-        return total_loss
+        return loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)

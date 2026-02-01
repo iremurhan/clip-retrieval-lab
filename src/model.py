@@ -222,7 +222,21 @@ class DualEncoder(nn.Module):
         text_embeds = F.normalize(text_embeds, p=2, dim=1)
         
         return image_embeds, text_embeds
-    
+
+    def encode_image(self, images):
+        """Encode images only (L2-normalized). For use with separate text encoding (e.g. negatives)."""
+        image_embeds = self.clip.get_image_features(pixel_values=images)
+        if self.image_proj is not None:
+            image_embeds = self.image_proj(image_embeds)
+        return F.normalize(image_embeds, p=2, dim=1)
+
+    def encode_text(self, input_ids, attention_mask):
+        """Encode text only (L2-normalized). For use with separate image encoding (e.g. hard negatives)."""
+        text_embeds = self.clip.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
+        if self.text_proj is not None:
+            text_embeds = self.text_proj(text_embeds)
+        return F.normalize(text_embeds, p=2, dim=1)
+
     def forward_with_clip_loss(self, images, input_ids, attention_mask):
         """
         Alternative forward that returns CLIP's built-in contrastive loss.
