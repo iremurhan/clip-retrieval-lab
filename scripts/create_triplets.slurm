@@ -66,14 +66,17 @@ echo "=========================================="
 # FINALIZE / MOVE LOGIC (Logs will be moved to results/{dataset}/{job_id})
 # ------------------------------------------------------------------
 move_job_folder() {
+    if [ ! -d "/output" ] || [ ! -w "/output" ]; then
+        echo "Skipping log move (/output not available)."
+        return 0
+    fi
     echo "Job finished. Moving job directory to ${DATASET_NAME}..."
     sync
     if [ ! -d "$TARGET_PARENT_DIR" ]; then
-        mkdir -p "$TARGET_PARENT_DIR"
+        mkdir -p "$TARGET_PARENT_DIR" || { echo "WARNING: Could not mkdir $TARGET_PARENT_DIR"; return 0; }
     fi
     if [ -d "$CURRENT_JOB_DIR" ]; then
-        mv "$CURRENT_JOB_DIR" "$TARGET_PARENT_DIR/"
-        echo "Successfully moved to: ${TARGET_JOB_DIR}"
+        mv "$CURRENT_JOB_DIR" "$TARGET_PARENT_DIR/" && echo "Moved to ${TARGET_PARENT_DIR}/${SLURM_JOB_ID}"
     fi
 }
 trap move_job_folder EXIT
@@ -81,8 +84,6 @@ trap move_job_folder EXIT
 # ------------------------------------------------------------------
 # EXECUTION
 # ------------------------------------------------------------------
-cd /workspace
-
 echo "Starting triplet generation for $DATASET_NAME..."
 
 # Check if mining inputs exist
