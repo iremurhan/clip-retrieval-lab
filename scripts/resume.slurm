@@ -19,8 +19,8 @@
 #SBATCH --mem-per-gpu=40G
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
-#SBATCH --output=/users/beyza.urhan/experiments/results/{DATASET}/%j/slurm.out
-#SBATCH --error=/users/beyza.urhan/experiments/results/{DATASET}/%j/slurm.out
+#SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
 
 set -euo pipefail
@@ -121,16 +121,28 @@ fi
 echo "Results saved to: $JOB_DIR"
 echo "=========================================="
 
-# If training succeeded, remove last_model.pth (keep only best_model.pth to save disk)
-if [ $TRAIN_EXIT_CODE -eq 0 ]; then
-    if [ -f "$JOB_DIR/last_model.pth" ]; then
-        rm -f "$JOB_DIR/last_model.pth"
-    fi
+# Attempt to sync WandB logs before any cleanup.
+echo "Syncing WandB logs before cleanup..."
+SYNC_EXIT=1
+if [ -d "$JOB_DIR/wandb" ]; then
+    python3 -m wandb sync "$JOB_DIR/wandb/latest-run" > "$JOB_DIR/wandb_sync.log" 2>&1
+    SYNC_EXIT=$?
 fi
 
-# Always remove local W&B cache (logs/summaries are already synced in online mode)
-if [ -d "$JOB_DIR/wandb" ]; then
-    rm -rf "$JOB_DIR/wandb"
+if [ $SYNC_EXIT -eq 0 ]; then
+    echo "WandB sync successful. Local cache can be safely removed."
+    # If training succeeded, remove last_model.pth (keep only best_model.pth to save disk)
+    if [ $TRAIN_EXIT_CODE -eq 0 ]; then
+        if [ -f "$JOB_DIR/last_model.pth" ]; then
+            rm -f "$JOB_DIR/last_model.pth"
+        fi
+    fi
+    # Remove local WandB cache
+    if [ -d "$JOB_DIR/wandb" ]; then
+        rm -rf "$JOB_DIR/wandb"
+    fi
+else
+    echo "WARNING: WandB sync failed or was not run. Keeping '$JOB_DIR/wandb' and 'last_model.pth' for manual recovery."
 fi
 
 exit $TRAIN_EXIT_CODE
