@@ -58,7 +58,20 @@ class Trainer:
         self.wandb_run = None
         if self.use_wandb and wandb.run is not None:
             self.wandb_run = wandb.run
-            wandb.config.update({"dataset_name": config.get('dataset_name', 'unknown')}, allow_val_change=True)
+            # Log key config knobs for analysis/filtering
+            mining_cfg = config.get('mining', {})
+            loss_cfg = config.get('loss', {})
+            wandb.config.update(
+                {
+                    "dataset_name": config.get('dataset_name', 'unknown'),
+                    "mining_enabled": mining_cfg.get('enabled', False),
+                    "mining_fne_threshold": mining_cfg.get('fne_threshold', None),
+                    "mining_indices_path": mining_cfg.get('indices_path', None),
+                    "mining_values_path": mining_cfg.get('values_path', None),
+                    "use_clip_loss": loss_cfg.get('use_clip_loss', False),
+                },
+                allow_val_change=True,
+            )
             # Define WandB summary metrics with max tracking for validation results
             # This ensures the dashboard always shows the best scores, even if current epoch is worse
             wandb.define_metric("val/t2i_r1", summary="max")
