@@ -1,18 +1,32 @@
 #!/bin/bash
 # Launch a W&B hyperparameter sweep and submit multiple Slurm agents.
+# Dataset-specific sweep configs:
+#   - configs/sweep_flickr.yaml  (uses configs/config_flickr.yaml)
+#   - configs/sweep_coco.yaml    (uses configs/config_coco.yaml)
+#
 # Usage:
-#   bash scripts/launch_sweep.sh [NUM_AGENTS]
-#     NUM_AGENTS (optional) – number of parallel sweep workers (default: 3)
+#   bash scripts/launch_sweep.sh <DATASET> [NUM_AGENTS]
+#     DATASET     – flickr or coco
+#     NUM_AGENTS  – number of parallel sweep workers (default: 3)
 #
 # Examples:
-#   # Run 3 workers (default)
-#   bash scripts/launch_sweep.sh
+#   # Flickr30k sweep with 3 workers
+#   bash scripts/launch_sweep.sh flickr
 #
-#   # Run 5 workers
-#   bash scripts/launch_sweep.sh 5
+#   # COCO sweep with 5 workers
+#   bash scripts/launch_sweep.sh coco 5
 
-NUM_AGENTS=${1:-3} # Number of parallel sweep workers (default: 3)
-CONFIG_PATH="configs/sweep.yaml"
+DATASET=${1:-flickr}
+NUM_AGENTS=${2:-3} # Number of parallel sweep workers (default: 3)
+
+if [ "$DATASET" = "flickr" ] || [ "$DATASET" = "flickr30k" ]; then
+    CONFIG_PATH="configs/sweep_flickr.yaml"
+elif [ "$DATASET" = "coco" ]; then
+    CONFIG_PATH="configs/sweep_coco.yaml"
+else
+    echo "ERROR: Unknown dataset '$DATASET'. Use 'flickr' or 'coco'."
+    exit 1
+fi
 PROJECT_NAME="retrieval"
 
 # 1. Launch the W&B sweep inside the container and capture the SWEEP_ID
