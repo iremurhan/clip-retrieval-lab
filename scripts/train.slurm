@@ -1,8 +1,9 @@
 #!/bin/bash
+#!/bin/bash
 # Training. Prefer: bash ./scripts/start_training.sh flickr_fne_run configs/config_flickr.yaml
 # or bash ./scripts/start_training.sh coco_fne_run configs/config_coco.yaml
 # Direct: sbatch --job-name=NAME scripts/train.slurm NAME [config]
-# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, checkpoints/, wandb/). W&B: retrieval.
+# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, last_model.pth, best_model.pth, wandb/). W&B: retrieval.
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
@@ -40,14 +41,14 @@ fi
 WANDB_PROJECT_AUTO="retrieval"
 
 JOB_DIR="/output/results/${DATASET}/${SLURM_JOB_ID}"
-CKPT_DIR="$JOB_DIR/checkpoints"
-mkdir -p "$JOB_DIR" "$CKPT_DIR"
+CKPT_DIR="$JOB_DIR"
+mkdir -p "$JOB_DIR"
 
 echo "=========================================="
 echo "Job ID:        ${SLURM_JOB_ID}"
 echo "Experiment:    ${EXP_NAME:- (Unnamed)}"
 echo "Dataset:       ${DATASET}"
-echo "Job dir:       ${JOB_DIR} (slurm.out, training.log, checkpoints/, wandb/)"
+echo "Job dir:       ${JOB_DIR} (slurm.out, training.log, last_model.pth, best_model.pth, wandb/)"
 echo "=========================================="
 
 export WANDB_DIR="$JOB_DIR"
@@ -93,5 +94,17 @@ else
 fi
 echo "Results saved to: $JOB_DIR"
 echo "=========================================="
+
+# If training succeeded, remove last_model.pth (keep only best_model.pth to save disk)
+if [ $TRAIN_EXIT_CODE -eq 0 ]; then
+    if [ -f "$JOB_DIR/last_model.pth" ]; then
+        rm -f "$JOB_DIR/last_model.pth"
+    fi
+fi
+
+# Always remove local WandB cache (logs/summaries are already synced in online mode)
+if [ -d "$JOB_DIR/wandb" ]; then
+    rm -rf "$JOB_DIR/wandb"
+fi
 
 exit $TRAIN_EXIT_CODE
