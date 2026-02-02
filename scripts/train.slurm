@@ -70,10 +70,6 @@ else
     export WANDB_MODE=offline
 fi
 
-if [ -f "/workspace/$CONFIG_FILE" ]; then
-    cp "/workspace/$CONFIG_FILE" "$JOB_DIR/config.yaml"
-fi
-
 echo "Starting training..."
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
