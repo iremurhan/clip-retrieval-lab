@@ -1,5 +1,6 @@
 #!/bin/bash
-# Training. Prefer: ./scripts/start_training.sh <run_name> [config]
+# Training. Prefer: bash ./scripts/start_training.sh flickr_fne_run configs/config_flickr.yaml
+# or bash ./scripts/start_training.sh coco_fne_run configs/config_coco.yaml
 # Direct: sbatch --job-name=NAME scripts/train.slurm NAME [config]
 # Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, checkpoints/, wandb/). W&B: retrieval.
 #SBATCH --time=7-00:00:00
