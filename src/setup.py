@@ -130,9 +130,19 @@ def setup_tracker(config, debug_mode=False):
     if not project:
         logger.warning("wandb_project not set; skipping WandB init.")
         return
-    wandb.init(
-        project=project,
-        config=make_wandb_config(config),
-        name=run_name,
-        resume="allow",
-    )
+
+    wandb_id = config.get("logging", {}).get("wandb_id")
+    init_kwargs = {
+        "project": project,
+        "config": make_wandb_config(config),
+        "name": run_name,
+    }
+    # If a specific WandB run id is provided, force resume onto that run
+    if wandb_id:
+        init_kwargs["id"] = wandb_id
+        init_kwargs["resume"] = "must"
+    else:
+        # Otherwise allow WandB to create a new run or resume heuristically
+        init_kwargs["resume"] = "allow"
+
+    wandb.init(**init_kwargs)

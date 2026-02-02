@@ -142,18 +142,22 @@ class Trainer:
         if self.use_amp:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
 
+        # Always update last_model.pth for resume
         try:
             torch.save(checkpoint, last_path)
             logger.info(f"Checkpoint saved: last_model.pth (epoch {epoch})")
-        except OSError as e:
+        except (OSError, RuntimeError) as e:
+            # Do not crash training on disk errors; just log and continue.
             logger.error(f"DISK ERROR: Could not save last_model.pth at Epoch {epoch}. {e}")
             return
 
+        # Optionally update best_model.pth for best performance
         if is_best:
             try:
                 torch.save(checkpoint, best_path)
                 logger.info(f"Saved best model to {best_path} (R@1: {self.best_r1:.2f})")
-            except OSError as e:
+            except (OSError, RuntimeError) as e:
+                # Same here: log and keep training.
                 logger.error(f"DISK ERROR: Could not save best_model.pth at Epoch {epoch}. {e}")
 
     def train_epoch(self, epoch):
@@ -452,19 +456,14 @@ class Trainer:
         wandb.log({"val/qualitative_results": table}, commit=False)
 
     def fit(self, start_epoch=0):
-        eval_frequency = self.config['logging']['eval_freq'] 
-        save_frequency = self.config['logging']['save_freq']
+        eval_frequency = self.config['logging']['eval_freq']
 
         # If start_epoch is 0 (i.e., not resuming), run initial evaluation.
         if start_epoch == 0:
             logger.info("Running initial evaluation at Epoch 0...")
             score = self.evaluate(epoch=0)
-            
-            # At Epoch 0, only saving Last Model makes sense, not Best.
-            # However, to simplify: If score > 0, let this be the first record.
             if score > self.best_r1:
                 self.best_r1 = score
-                
             logger.info(f"Initial state saved. Starting training loop from Epoch {start_epoch}.")
 
         # --- MAIN TRAINING LOOP ---
@@ -472,33 +471,20 @@ class Trainer:
             # 1. Train one epoch
             train_loss = self.train_epoch(epoch)
             logger.info(f"Epoch {epoch+1} Training Loss: {train_loss:.4f}")
-            
-            # Determine when to evaluate and save
-            is_eval_time = ((epoch + 1) % eval_frequency == 0) or ((epoch + 1) == self.config['training']['epochs'])
-            is_save_time = ((epoch + 1) % save_frequency == 0) or ((epoch + 1) == self.config['training']['epochs'])
-
-            # Ensure checkpoint directory exists before any save operation
-            os.makedirs(self.checkpoint_dir, exist_ok=True)
 
             # 2. EVALUATION & BEST MODEL CHECK
             is_new_best = False
+            is_eval_time = ((epoch + 1) % eval_frequency == 0) or (
+                (epoch + 1) == self.config['training']['epochs']
+            )
             if is_eval_time:
                 score = self.evaluate(epoch)
-                
-                # Check if this is a new best model
                 is_new_best = score > self.best_r1
                 if is_new_best:
                     self.best_r1 = score
                     logger.info(f"New Best R@1: {score:.2f} found at Epoch {epoch+1}!")
-                    
-                    # Save best model immediately (independent of save_frequency)
-                    # Also saves last_model.pth as part of the save_checkpoint method
-                    self.save_checkpoint(epoch + 1, is_best=True)
-                elif is_save_time:
-                    # If not best but it's save time, just save last_model.pth
-                    self.save_checkpoint(epoch + 1, is_best=False)
 
-            # 3. PERIODIC CHECKPOINT SAVE (Last Model)
-            # Only save if we haven't already saved in the evaluation block above
-            if is_save_time and not is_eval_time:
-                self.save_checkpoint(epoch + 1, is_best=False)
+            # 3. SAVE CHECKPOINT EVERY EPOCH
+            # Always keep last_model.pth up to date for resume; also update best_model.pth when is_new_best=True
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+            self.save_checkpoint(epoch + 1, is_best=is_new_best)

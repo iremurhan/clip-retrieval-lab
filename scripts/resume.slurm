@@ -1,9 +1,18 @@
 #!/bin/bash
-#!/bin/bash
-# Training. Prefer: bash ./scripts/start_training.sh flickr_fne_run configs/config_flickr.yaml
-# or bash ./scripts/start_training.sh coco_fne_run configs/config_coco.yaml
-# Direct: sbatch --job-name=NAME scripts/train.slurm NAME [config]
-# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, last_model.pth, best_model.pth, wandb/). W&B: retrieval.
+# Resume training from an existing checkpoint and W&B run.
+# Usage:
+#   sbatch scripts/resume.slurm <RUN_NAME> <CONFIG> <WANDB_ID> <CKPT_PATH>
+#     RUN_NAME   – used for Slurm job name / W&B run name suffix
+#     CONFIG     – path to dataset config (e.g. configs/config_coco.yaml)
+#     WANDB_ID   – existing WandB run id to resume
+#     CKPT_PATH  – path to last_model.pth checkpoint to resume from
+#
+# Example:
+#   sbatch scripts/resume.slurm \
+#     resume_deneme \
+#     configs/config_coco.yaml \
+#     a1b2c3d4 \
+#     /users/beyza.urhan/experiments/results/coco/21074/last_model.pth
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
@@ -27,9 +36,22 @@ fi
 
 EXP_NAME="${1:-}"
 CONFIG_FILE="${2:-configs/config_coco.yaml}"
+WANDB_ID="${3:-}"
+RESUME_PATH="${4:-}"
+
+if [ -z "$WANDB_ID" ] || [ -z "$RESUME_PATH" ]; then
+    echo "ERROR: WANDB_ID and CKPT_PATH must be provided."
+    echo "Usage: sbatch scripts/resume.slurm <RUN_NAME> <CONFIG> <WANDB_ID> <CKPT_PATH>"
+    exit 1
+fi
 
 if [ ! -f "/workspace/$CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
+    exit 1
+fi
+
+if [ ! -f "$RESUME_PATH" ]; then
+    echo "ERROR: Checkpoint file not found: $RESUME_PATH"
     exit 1
 fi
 
@@ -48,7 +70,9 @@ echo "=========================================="
 echo "Job ID:        ${SLURM_JOB_ID}"
 echo "Experiment:    ${EXP_NAME:- (Unnamed)}"
 echo "Dataset:       ${DATASET}"
-echo "Job dir:       ${JOB_DIR} (slurm.out, training.log, last_model.pth, best_model.pth, wandb/)"
+echo "Job dir:       ${JOB_DIR} (slurm.out, resumed_training.log, last_model.pth, best_model.pth, wandb/)"
+echo "Resuming from: $RESUME_PATH"
+echo "W&B run id:    $WANDB_ID"
 echo "=========================================="
 
 export WANDB_DIR="$JOB_DIR"
@@ -71,26 +95,28 @@ else
     export WANDB_MODE=offline
 fi
 
-echo "Starting training..."
+echo "Starting resumed training..."
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 
 python3 -u run.py \
     --config "$CONFIG_FILE" \
+    --resume "$RESUME_PATH" \
     --override \
         debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
         logging.wandb_project="$WANDB_PROJECT_AUTO" \
-    > "$JOB_DIR/training.log" 2>&1
+        logging.wandb_id="$WANDB_ID" \
+    > "$JOB_DIR/resumed_training.log" 2>&1
 
 TRAIN_EXIT_CODE=$?
 
 echo ""
 echo "=========================================="
 if [ $TRAIN_EXIT_CODE -eq 0 ]; then
-    echo "Training completed successfully!"
+    echo "Resumed training completed successfully!"
 else
-    echo "Training failed with exit code: $TRAIN_EXIT_CODE"
+    echo "Resumed training failed with exit code: $TRAIN_EXIT_CODE"
 fi
 echo "Results saved to: $JOB_DIR"
 echo "=========================================="
@@ -102,9 +128,10 @@ if [ $TRAIN_EXIT_CODE -eq 0 ]; then
     fi
 fi
 
-# Always remove local WandB cache (logs/summaries are already synced in online mode)
+# Always remove local W&B cache (logs/summaries are already synced in online mode)
 if [ -d "$JOB_DIR/wandb" ]; then
     rm -rf "$JOB_DIR/wandb"
 fi
 
 exit $TRAIN_EXIT_CODE
+
