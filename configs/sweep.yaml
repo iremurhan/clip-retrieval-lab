@@ -1,0 +1,8 @@
+program: run.py
+method: bayes
+metric:
+  name: val/t2i_r1
+  goal: maximize
+parameters:
+  mining.fne_threshold:
+    values: [0.85, 0.90, 0.92, 0.95, 0.98]
