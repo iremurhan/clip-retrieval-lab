@@ -29,12 +29,26 @@ else
 fi
 PROJECT_NAME="retrieval"
 
+# Load WANDB_API_KEY from wandb.env file if it exists
+if [ -f ~/experiments/env/wandb.env ]; then
+    source ~/experiments/env/wandb.env
+    export WANDB_API_KEY
+fi
+
+# Verify WANDB_API_KEY is set
+if [ -z "$WANDB_API_KEY" ]; then
+    echo "ERROR: WANDB_API_KEY is not set. Please run:"
+    echo "  source ~/experiments/env/wandb.env"
+    echo "  export WANDB_API_KEY"
+    exit 1
+fi
+
 # 1. Launch the W&B sweep inside the container and capture the SWEEP_ID
 echo ">>> Launching W&B sweep inside container and capturing SWEEP_ID..."
 SWEEP_OUTPUT=$(srun --container-image=biremurhan/image-text-contrast:v0.4 \
      --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/env:/env \
      --container-env=WANDB_API_KEY \
-     bash -c "source /env/wandb.env && cd /workspace && wandb sweep $CONFIG_PATH 2>&1")
+     bash -c "source /env/wandb.env 2>/dev/null || true && cd /workspace && wandb sweep $CONFIG_PATH 2>&1")
 
 SWEEP_ID=$(echo "$SWEEP_OUTPUT" | grep 'wandb agent' | awk '{print $NF}')
 
