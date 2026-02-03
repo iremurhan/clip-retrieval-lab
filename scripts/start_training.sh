@@ -1,5 +1,6 @@
 #!/bin/bash
 # Submit training job. Usage: bash ./scripts/start_training.sh <run_name> [config_path]
+# Example: bash ./scripts/start_training.sh "my_experiment" "configs/config_coco.yaml"
 # Logs: results/{coco|flickr30k}/{job_id}/
 set -e
 
