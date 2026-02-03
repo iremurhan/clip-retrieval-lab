@@ -14,7 +14,7 @@ model:
 
 loss:
   # Hard Negative Mining (FNE + neg_txt_embeds) only runs when use_clip_loss is false.
-  use_clip_loss: true
+  use_clip_loss: false
   temperature: 0.07
 
 training:
@@ -50,7 +50,7 @@ logging:
   checkpoint_dir: "checkpoints"
 
 mining:
-  enabled: false
+  enabled: true
   indices_path: null
   values_path: null
   fne_threshold: 0.90
