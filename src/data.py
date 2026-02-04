@@ -191,11 +191,30 @@ class CaptionImageDataset(Dataset):
                 torch.tensor([self.caption_to_img_id[i] for i in indices.tolist()], dtype=torch.long) != image_id
             )
             valid_indices = indices[valid_mask].tolist()
+
             if valid_indices:
+                # Hard negative from mined neighbors (different image, below FNE threshold)
                 neg_idx = random.choice(valid_indices)
                 neg_caption = self.samples[neg_idx]['caption']
             else:
-                neg_caption = caption  # fallback: use positive (loss will be 0 / safe)
+                # No valid hard negative from mining → sample an easy negative:
+                # randomly choose another caption from a DIFFERENT image.
+                max_tries = 100
+                neg_idx = None
+                for _ in range(max_tries):
+                    candidate_idx = random.randrange(len(self.samples))
+                    if self.caption_to_img_id[candidate_idx] != image_id:
+                        neg_idx = candidate_idx
+                        break
+
+                if neg_idx is None:
+                    # Dataset is likely degenerate (single image); surface the issue explicitly.
+                    raise RuntimeError(
+                        f"Failed to sample an easy negative for index {idx}: "
+                        "could not find a caption from a different image_id."
+                    )
+
+                neg_caption = self.samples[neg_idx]['caption']
             neg_tokenized = self.tokenizer(
                 neg_caption,
                 padding='max_length',
