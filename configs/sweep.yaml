@@ -1,0 +1,27 @@
+program: run.py
+method: bayes
+
+metric:
+  # What to optimize in W&B
+  name: val/t2i_r1
+  goal: maximize
+
+# IMPORTANT: pass the base config here so `run.py --config ...` always gets a dataset
+# For Flickr30k sweeps, use config_flickr.yaml
+# For COCO sweeps, change to: configs/config_coco.yaml
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - "--config"
+  - "configs/config_flickr.yaml"  # change to config_coco.yaml for COCO sweeps
+  - ${args}
+
+parameters:
+  # Hyperparameter to sweep: False Negative Elimination threshold
+  mining.fne_threshold:
+    values: [0.85, 0.90, 0.92, 0.95, 0.98]
+
+  # Optional: sweep learning rate of the projection head
+  training.head_lr:
+    values: [0.001, 0.0005, 0.0001]

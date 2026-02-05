@@ -1,0 +1,24 @@
+program: run.py
+method: bayes
+
+metric:
+  name: val/t2i_r1
+  goal: maximize
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - "--config"
+  - "configs/config_coco.yaml"
+  - ${args}
+
+parameters:
+  mining.fne_threshold:
+    values: [0.85, 0.90, 0.92, 0.95, 0.98]
+  training.head_lr:
+    values: [0.001, 0.0005, 0.0001]
+  # CRITICAL: False negative elimination requires use_clip_loss=false
+  loss.use_clip_loss:
+    value: false
+
