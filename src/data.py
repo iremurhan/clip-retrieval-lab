@@ -1,9 +1,8 @@
-#!/usr/bin/env python3
 """
-data.py
--------
-
-Data loading and preprocessing for cross-modal retrieval.
+src/data.py
+-----------
+Data loading and preprocessing for Cross-Modal Retrieval.
+Handles dataset loading for Flickr30k and COCO using standard CLIP transforms.
 """
 
 import torch
@@ -11,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 import json
 import os
 import logging
+import random
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -18,90 +18,107 @@ from torchvision.transforms import InterpolationMode
 # Configure logger
 logger = logging.getLogger(__name__)
 
-class CocoImageDataset(Dataset):
-    def __init__(self, images_root_path, captions_path, tokenizer, max_length=50, split='train', transform=None, intra_modal_aug=False):
+class CaptionImageDataset(Dataset):
+    def __init__(
+        self,
+        images_root_path,
+        captions_path,
+        tokenizer,
+        max_length=77,
+        split='train',
+        transform=None,
+        mining_indices_path=None,
+        mining_values_path=None,
+        fne_threshold=0.90,
+    ):
         """
         Args:
-            images_root_path (str): Root directory containing image folders (train2014/val2014).
-            captions_path (str): Path to the Karpathy JSON file.
-            tokenizer: HuggingFace tokenizer instance.
-            max_length (int): Maximum token sequence length.
+            images_root_path (str): Path to image folder.
+            captions_path (str): Path to Karpathy JSON file.
+            tokenizer: HuggingFace tokenizer.
+            max_length (int): Token sequence length (Default: 77).
             split (str): 'train', 'val', or 'test'.
-            transform (callable, optional): Base transform to be applied to the image.
-            intra_modal_aug (bool): If True, generates a second augmented view of the image for intra-modal loss.
+            transform (callable, optional): Image transforms.
+            mining_indices_path (str, optional): Path to .pt file of neighbor indices [N, K].
+            mining_values_path (str, optional): Path to .pt file of neighbor similarity scores [N, K].
+            fne_threshold (float): Score above which a neighbor is treated as false negative (default 0.90).
         """
         self.images_root_path = images_root_path
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.split = split
-        self.intra_modal_aug = intra_modal_aug
+        self.fne_threshold = fne_threshold
+        self.mining_indices = None
+        self.mining_values = None
+        if mining_indices_path and mining_values_path and os.path.isfile(mining_indices_path) and os.path.isfile(mining_values_path):
+            self.mining_indices = torch.load(mining_indices_path, map_location='cpu')
+            self.mining_values = torch.load(mining_values_path, map_location='cpu')
+            logger.info(f"Mining loaded: indices {mining_indices_path}, values {mining_values_path}, fne_threshold={fne_threshold}")
         
-        # Define Transforms
+        # 1. Define Transforms (Standard CLIP Preprocessing)
         if transform is None:
-            # CLIP normalization values (different from ImageNet!)
-            # Source: https://github.com/openai/CLIP/blob/main/clip/clip.py
+            # CLIP normalization values
             normalize = transforms.Normalize(
                 mean=[0.48145466, 0.4578275, 0.40821073],
                 std=[0.26862954, 0.26130258, 0.27577711]
             )
             
             if split == 'train':
+                # Standard training transform (RandomResizedCrop is standard for training stability)
                 self.transform = transforms.Compose([
-                    # The goal is to obtain scale invariance
-                    transforms.RandomResizedCrop(336),
+                    transforms.RandomResizedCrop(336, scale=(0.9, 1.0)), # Mild augmentation
                     transforms.RandomHorizontalFlip(),
-                    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1),
+                    transforms.ToTensor(),
+                    normalize,
+                ])
+                # Separate augmentation transform for intra-modal consistency
+                self.transform_aug = transforms.Compose([
+                    transforms.RandomResizedCrop(336, scale=(0.9, 1.0)),
+                    transforms.RandomHorizontalFlip(),
                     transforms.ToTensor(),
                     normalize,
                 ])
             else:
-                # CLIP-style preprocessing for val/test @ 336px
-                # - Resize short edge to 336 with BICUBIC (CLIP's native interpolation)
-                # - CenterCrop to 336x336 (crop longer edge)
+                # Validation/Test: Deterministic CenterCrop
                 self.transform = transforms.Compose([
                     transforms.Resize(336, interpolation=InterpolationMode.BICUBIC),
                     transforms.CenterCrop(336),
                     transforms.ToTensor(),
                     normalize,
                 ])
+                self.transform_aug = self.transform  # Same for val/test
         else:
             self.transform = transform
+            self.transform_aug = transform
 
-        # ---------------------------------------------------------
-        # 1. Load Captions (Karpathy JSON)
-        # ---------------------------------------------------------
+        # 2. Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
         with open(captions_path, 'r') as f:
             data = json.load(f)
         
         self.samples = []
         
-        # Karpathy JSON structure: images list contains items with 'split' and 'sentences'
+        # Karpathy JSON parsing logic
         for img in data['images']:
             current_split = img['split']
             if current_split == 'restval' and split == 'train':
                 current_split = 'train'
 
             if current_split == split:
-                if 'cocoid' not in img:
-                    if 'id' in img:
-                        img_id = int(img['id'])
-                    else:
-                        raise ValueError(f"Image entry missing 'cocoid' or 'id': {img}")     
-                else:
+                # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
+                if 'cocoid' in img:
                     img_id = int(img['cocoid'])
-                
-                # Limit to exactly 5 captions per image to match evaluation assumptions
-                # MS-COCO can have 6-7 captions, but we need exactly 5 for consistent evaluation
-                sentences = img['sentences'][:5]
-                
-                if len(sentences) < 5:
-                    logger.warning(
-                        f"Image {img_id} has only {len(sentences)} captions (expected 5). "
-                        "This image will have fewer samples than expected."
+                elif 'imgid' in img:
+                    img_id = int(img['imgid'])
+                elif 'id' in img:
+                    img_id = int(img['id'])
+                else:
+                    raise ValueError(
+                        f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
                     )
                 
-                # Add exactly 5 captions (or fewer if image has < 5 captions)
+                # Take exactly 5 captions
+                sentences = img['sentences'][:5]
                 for sent in sentences:
                     self.samples.append({
                         'image_id': img_id,
@@ -110,7 +127,9 @@ class CocoImageDataset(Dataset):
                         'filename': img.get('filename', '')
                     })
                     
-        logger.info(f"Found {len(self.samples)} captions for split '{split}'.")
+        logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
+        # Map sample index -> image_id for FNE (exclude same-image negatives)
+        self.caption_to_img_id = [s['image_id'] for s in self.samples]
 
     def __len__(self):
         return len(self.samples)
@@ -121,21 +140,28 @@ class CocoImageDataset(Dataset):
         caption = sample['caption']
         
         # 1. Load Image
-        image_path = os.path.join(self.images_root_path, sample['filepath'], sample['filename'])
+        filepath = sample.get('filepath', '').strip()
+        filename = sample['filename']
+        
+        if filepath:
+            image_path = os.path.join(self.images_root_path, filepath, filename)
+            if not os.path.exists(image_path):
+                image_path = os.path.join(self.images_root_path, filename)
+        else:
+            image_path = os.path.join(self.images_root_path, filename)
+        
+        # Safety check for missing images
+        if not os.path.exists(image_path):
+            # Fallback strategy? Or raise error? For now, let's error out to notice data issues.
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
         image = Image.open(image_path).convert('RGB')
 
-        # 2. Apply Transforms
+        # 2. Transform Image (original and augmented for intra-modal loss)
         img_tensor = self.transform(image)
+        img_aug_tensor = self.transform_aug(image)
         
-        # 3. Generate Augmented View (if enabled for intra-modal learning)
-        if self.intra_modal_aug:
-            img_aug_tensor = self.transform(image)
-        else:
-            # If not augmenting, just return a copy or zero tensor
-            # Returning a clone ensures valid tensor shape
-            img_aug_tensor = img_tensor.clone()
-
-        # 4. Tokenize Text
+        # 3. Tokenize Text
         tokenized = self.tokenizer(
             caption,
             padding='max_length',
@@ -144,52 +170,106 @@ class CocoImageDataset(Dataset):
             return_tensors='pt'
         )
         
-        return {
-            'image': img_tensor,       
+        out = {
+            'image': img_tensor,
             'image_aug': img_aug_tensor,
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
-            'index': idx,
             'image_id': image_id
         }
 
-def get_dataloader(config, tokenizer, split='train'):
+        # 4. False Negative Elimination (FNE): optional hard negative from mining
+        if self.mining_indices is not None and self.mining_values is not None:
+            # Neighbors for this index: shape [K] or [1]
+            indices = self.mining_indices[idx]
+            values = self.mining_values[idx]
+            if indices.dim() == 0:
+                indices = indices.unsqueeze(0)
+                values = values.unsqueeze(0)
+            # Valid negatives: score <= fne_threshold (exclude FNs) and different image
+            valid_mask = (values <= self.fne_threshold) & (
+                torch.tensor([self.caption_to_img_id[i] for i in indices.tolist()], dtype=torch.long) != image_id
+            )
+            valid_indices = indices[valid_mask].tolist()
+
+            if valid_indices:
+                # Hard negative from mined neighbors (different image, below FNE threshold)
+                neg_idx = random.choice(valid_indices)
+                neg_caption = self.samples[neg_idx]['caption']
+            else:
+                # No valid hard negative from mining → sample an easy negative:
+                # randomly choose another caption from a DIFFERENT image.
+                max_tries = 100
+                neg_idx = None
+                for _ in range(max_tries):
+                    candidate_idx = random.randrange(len(self.samples))
+                    if self.caption_to_img_id[candidate_idx] != image_id:
+                        neg_idx = candidate_idx
+                        break
+
+                if neg_idx is None:
+                    # Dataset is likely degenerate (single image); surface the issue explicitly.
+                    raise RuntimeError(
+                        f"Failed to sample an easy negative for index {idx}: "
+                        "could not find a caption from a different image_id."
+                    )
+
+                neg_caption = self.samples[neg_idx]['caption']
+            neg_tokenized = self.tokenizer(
+                neg_caption,
+                padding='max_length',
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors='pt'
+            )
+            out['negative_input_ids'] = neg_tokenized['input_ids'].squeeze(0)
+            out['negative_attention_mask'] = neg_tokenized['attention_mask'].squeeze(0)
+
+        return out
+
+
+def create_image_text_dataloader(config, tokenizer, split='train'):
     """
-    Factory function to create dataloaders.
-    Strict Mode: All configurations must be present in the YAML file.
+    Factory function to create DataLoader for image-text retrieval datasets.
+    
+    Creates a DataLoader for Flickr30k or COCO datasets with appropriate
+    transforms, shuffling, and batch size based on the split.
+    When split is 'train' and config['mining'] exists, passes mining paths and fne_threshold for FNE.
     """
     shuffle = (split == 'train')
-    
-    intra_modal_aug = False
-    
-    if split == 'train':
-        intra_modal_aug = config['augment']['image']['enabled']
-    
     images_root = config['data']['images_path']
-    
-    dataset = CocoImageDataset(
+    captions_path = config['data']['captions_path']
+
+    mining_kwargs = {}
+    if split == 'train' and config.get('mining') is not None and config['mining'].get('enabled', False):
+        mining_cfg = config['mining']
+        mining_kwargs = {
+            'mining_indices_path': mining_cfg.get('indices_path'),
+            'mining_values_path': mining_cfg.get('values_path'),
+            'fne_threshold': mining_cfg.get('fne_threshold', 0.90),
+        }
+
+    dataset = CaptionImageDataset(
         images_root_path=images_root,
-        captions_path=config['data']['captions_path'],
+        captions_path=captions_path,
         tokenizer=tokenizer,
-        max_length=config['data'].get('max_length', 50),
+        max_length=config['data'].get('max_length', 77),
         split=split,
-        transform=None, # Sınıf içinde default transformları kullanacak (Train/Val ayrımı orada var)
-        intra_modal_aug=intra_modal_aug
+        **mining_kwargs
     )
 
     # Debug Truncation
-    if config['debug']['debug_mode']:
-        debug_limit = config['debug']['debug_samples']
-        
+    if config.get('debug', {}).get('debug_mode', False):
+        debug_limit = config['debug'].get('debug_samples', 100)
         if len(dataset.samples) > debug_limit:
-            logger.warning(f"DEBUG MODE: Truncating dataset from {len(dataset.samples)} to {debug_limit} samples.")
+            logger.warning(f"DEBUG MODE: Truncating dataset to {debug_limit} samples.")
             dataset.samples = dataset.samples[:debug_limit]
 
     loader = DataLoader(
         dataset,
-        batch_size=config['data']['batch_size'],
+        batch_size=config['training']['batch_size'], # Base Config yapısına uygun path
         shuffle=shuffle,
-        num_workers=config['data']['num_workers'],
+        num_workers=config['data'].get('num_workers', 4),
         pin_memory=True,
         drop_last=(split == 'train')
     )

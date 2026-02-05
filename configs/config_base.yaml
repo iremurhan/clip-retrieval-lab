@@ -1,0 +1,56 @@
+# Base configuration shared across datasets.
+#
+# Dataset-specific files (e.g. config_coco.yaml, config_flickr.yaml) only define:
+# - data paths (images_path, captions_path)
+#
+# W&B: single project "retrieval" for training; dataset is in run name and config.
+
+model:
+  image_model_name: "openai/clip-vit-large-patch14-336"
+  embed_dim: null
+  dropout: 0.1
+  unfreeze_vision_layers: 4
+  unfreeze_strategy: "full"
+
+loss:
+  # Hard Negative Mining (FNE + neg_txt_embeds) only runs when use_clip_loss is false.
+  use_clip_loss: false
+  temperature: 0.07
+
+training:
+  # DataLoader-related defaults (will be mirrored into data.* at runtime)
+  batch_size: 256
+  num_workers: 8
+  max_length: 77
+
+  epochs: 20
+  seed: 42
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 2
+
+  clip_projection_lr: 0.00005
+  head_lr: 0.0005
+  backbone_lr: 0.000002
+  weight_decay: 0.01
+
+augment:
+  image:
+    enabled: true
+
+debug:
+  debug_mode: false
+  debug_samples: 100
+
+logging:
+  use_wandb: true
+  log_freq: 500
+  eval_freq: 1
+  save_freq: 3
+  checkpoint_dir: "checkpoints"
+
+mining:
+  enabled: true
+  indices_path: null
+  values_path: null
+  fne_threshold: 0.85

@@ -1,100 +1,88 @@
 #!/bin/bash
-#
-# Usage: sbatch --job-name="EXP_NAME" scripts/train.slurm "EXP_NAME"
-#
-#SBATCH --output=/users/beyza.urhan/experiments/runs/%j/slurm.log
-#SBATCH --error=/users/beyza.urhan/experiments/runs/%j/err.log
+# Training. Prefer: bash ./scripts/start_training.sh flickr_fne_run configs/config_flickr.yaml
+# or bash ./scripts/start_training.sh coco_fne_run configs/config_coco.yaml
+# Direct: sbatch --job-name=NAME scripts/train.slurm NAME [config]
+# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, last_model.pth, best_model.pth, wandb/). W&B: retrieval.
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=40G
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.4
-
-# ------------------------------------------------------------------
-# PATH MAPPING
-# ------------------------------------------------------------------
-#SBATCH --container-mounts=/users/beyza.urhan/tez_v2_clean:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/runs:/output,/users/beyza.urhan/experiments/env:/env
-
-# Pass W&B Env vars
-#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE
+#SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
+#SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
+#SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
 
 set -euo pipefail
 
-# ------------------------------------------------------------------
-# ENVIRONMENT & DIRECTORIES
-# ------------------------------------------------------------------
+echo "Checking mounts..."
+echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+
+if [ ! -d "/workspace" ] || [ ! -d "/output" ]; then
+    echo "FATAL ERROR: Required mounts not found. Check container-mounts."
+    exit 1
+fi
+
 EXP_NAME="${1:-}"
+CONFIG_FILE="${2:-configs/config_coco.yaml}"
 
-# 1. Job Directory (ALWAYS use Job ID only - Robust & Simple)
-JOB_DIR="/output/${SLURM_JOB_ID}"
+if [ ! -f "/workspace/$CONFIG_FILE" ]; then
+    echo "ERROR: Config file not found: $CONFIG_FILE"
+    exit 1
+fi
 
-# Subdirectories
-LOGS_DIR="$JOB_DIR/logs"
-META_DIR="$JOB_DIR/metadata"
-CKPT_DIR="$JOB_DIR/checkpoints"
+if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
+    DATASET="flickr30k"
+else
+    DATASET="coco"
+fi
+WANDB_PROJECT_AUTO="retrieval"
 
-# Create directories
-mkdir -p "$JOB_DIR" "$LOGS_DIR" "$META_DIR" "$CKPT_DIR"
+JOB_DIR="/output/results/${DATASET}/${SLURM_JOB_ID}"
+CKPT_DIR="$JOB_DIR"
+mkdir -p "$JOB_DIR"
 
 echo "=========================================="
 echo "Job ID:        ${SLURM_JOB_ID}"
 echo "Experiment:    ${EXP_NAME:- (Unnamed)}"
-echo "Job Directory: ${JOB_DIR}"
+echo "Dataset:       ${DATASET}"
+echo "Job dir:       ${JOB_DIR} (slurm.out, training.log, last_model.pth, best_model.pth, wandb/)"
 echo "=========================================="
 
-# ------------------------------------------------------------------
-# W&B SETUP
-# ------------------------------------------------------------------
-export WANDB_DIR="$LOGS_DIR"
-
-# Load W&B Env file if mounted
+export WANDB_DIR="$JOB_DIR"
 if [ -f /env/wandb.env ]; then
     set -a; source /env/wandb.env; set +a
 fi
 
-# Configure W&B mode based on API key
 if [ -n "${WANDB_API_KEY:-}" ]; then
     export WANDB_MODE=online
-    
-    # W&B Name Format: ID_NAME (e.g., 20362_vit_baseline)
     if [ -n "$EXP_NAME" ]; then
         export WANDB_NAME="${SLURM_JOB_ID}_${EXP_NAME}"
     else
         export WANDB_NAME="${SLURM_JOB_ID}"
     fi
+
+    export WANDB_PROJECT="$WANDB_PROJECT_AUTO"
+    echo "W&B Project auto-set: $WANDB_PROJECT"
 else
     echo "W&B API Key not found. Switching to OFFLINE mode."
     export WANDB_MODE=offline
 fi
 
-# ------------------------------------------------------------------
-# METADATA SAVING
-# ------------------------------------------------------------------
-echo "Job ID: ${SLURM_JOB_ID}" > "$META_DIR/experiment_metadata.txt"
-echo "Experiment: ${EXP_NAME:-}" >> "$META_DIR/experiment_metadata.txt"
-echo "Date: $(date)" >> "$META_DIR/experiment_metadata.txt"
-
-if [ -f /workspace/config.yaml ]; then
-    cp /workspace/config.yaml "$META_DIR/config_saved.yaml"
-fi
-
-# ------------------------------------------------------------------
-# START TRAINING
-# ------------------------------------------------------------------
 echo "Starting training..."
-
 cd /workspace
+export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 
-# Run training
-# Note: output.log is inside the ID folder, preventing any mix-up
-python3 -u train.py \
-    --config config.yaml \
+python3 -u run.py \
+    --config "$CONFIG_FILE" \
     --override \
         debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
-    2>&1 | tee "$LOGS_DIR/training_output.log"
+        logging.wandb_project="$WANDB_PROJECT_AUTO" \
+    > "$JOB_DIR/training.log" 2>&1
 
-TRAIN_EXIT_CODE=${PIPESTATUS[0]}
+TRAIN_EXIT_CODE=$?
 
 echo ""
 echo "=========================================="
@@ -105,5 +93,29 @@ else
 fi
 echo "Results saved to: $JOB_DIR"
 echo "=========================================="
+
+# Attempt to sync WandB logs before any cleanup.
+echo "Syncing WandB logs before cleanup..."
+SYNC_EXIT=1
+if [ -d "$JOB_DIR/wandb" ]; then
+    python3 -m wandb sync "$JOB_DIR/wandb/latest-run" > "$JOB_DIR/wandb_sync.log" 2>&1
+    SYNC_EXIT=$?
+fi
+
+if [ $SYNC_EXIT -eq 0 ]; then
+    echo "WandB sync successful. Local cache can be safely removed."
+    # If training succeeded, remove last_model.pth (keep only best_model.pth to save disk)
+    if [ $TRAIN_EXIT_CODE -eq 0 ]; then
+        if [ -f "$JOB_DIR/last_model.pth" ]; then
+            rm -f "$JOB_DIR/last_model.pth"
+        fi
+    fi
+    # Remove local WandB cache
+    if [ -d "$JOB_DIR/wandb" ]; then
+        rm -rf "$JOB_DIR/wandb"
+    fi
+else
+    echo "WARNING: WandB sync failed or was not run. Keeping '$JOB_DIR/wandb' and 'last_model.pth' for manual recovery."
+fi
 
 exit $TRAIN_EXIT_CODE
