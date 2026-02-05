@@ -53,4 +53,4 @@ mining:
   enabled: true
   indices_path: null
   values_path: null
-  fne_threshold: 0.99
+  fne_threshold: 0.85
