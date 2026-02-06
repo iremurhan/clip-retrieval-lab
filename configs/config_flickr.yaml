@@ -1,8 +1,3 @@
 data:
   images_path: "datasets/flickr30k/flickr30k_images"
   captions_path: "datasets/flickr30k/caption_datasets/dataset_flickr30k.json"
-
-mining:
-  indices_path: "datasets/flickr30k/pairwise_similarities/mining_text_top1000_indices.pt"
-  values_path: "datasets/flickr30k/pairwise_similarities/mining_text_top1000_values.pt"
-  # fne_threshold: 0.90  # inherited from base; override here if needed (e.g. 0.85)

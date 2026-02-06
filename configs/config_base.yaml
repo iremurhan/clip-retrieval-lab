@@ -50,9 +50,3 @@ logging:
   eval_freq: 1
   save_freq: 3
   checkpoint_dir: "checkpoints"
-
-mining:
-  enabled: true
-  indices_path: null
-  values_path: null
-  fne_threshold: 0.85
