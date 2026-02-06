@@ -59,15 +59,7 @@ class Trainer:
         if self.use_wandb and wandb.run is not None:
             self.wandb_run = wandb.run
             # Log key config knobs for analysis/filtering
-            mining_cfg = config.get('mining', {})
-            loss_cfg = config.get('loss', {})
-            wandb.config.update(
-                {
                     "dataset_name": config.get('dataset_name', 'unknown'),
-                    "mining_enabled": mining_cfg.get('enabled', False),
-                    "mining_fne_threshold": mining_cfg.get('fne_threshold', None),
-                    "mining_indices_path": mining_cfg.get('indices_path', None),
-                    "mining_values_path": mining_cfg.get('values_path', None),
                     "use_clip_loss": loss_cfg.get('use_clip_loss', False),
                 },
                 allow_val_change=True,
@@ -85,12 +77,7 @@ class Trainer:
             wandb.define_metric("val/i2t_map5", summary="max")
             wandb.define_metric("val/i2t_map10", summary="max")
 
-        # Hard Negative Mining only runs when use_clip_loss is false
-        if config.get('mining', {}).get('enabled', False) and config.get('loss', {}).get('use_clip_loss', False):
-            logger.warning(
-                "mining.enabled=true but loss.use_clip_loss=true: Hard negatives will be IGNORED. "
-                "Set loss.use_clip_loss: false in config for Hard Negative Mining."
-            )
+
 
     def load_checkpoint(self, checkpoint_path):
         """
@@ -167,17 +154,13 @@ class Trainer:
         
         num_batches = len(self.train_loader)
         batch_size = self.config['data']['batch_size']
-        
-        # Check if we should use CLIP's native loss (with learnable temperature)
         use_clip_loss = self.config['loss'].get('use_clip_loss', False)
-        
+        intra_img_weight = self.config['loss'].get('intra_img_weight', 0.0)
+        intra_txt_weight = self.config['loss'].get('intra_txt_weight', 0.0)
+
         # Initialize grad_norm for logging
         grad_norm = 0.0
         end_time = time.time()
-        
-        # Dynamic threshold for sweeps: update dataset FNE threshold from config if present
-        if hasattr(self.train_loader.dataset, 'fne_threshold'):
-            self.train_loader.dataset.fne_threshold = self.config.get('mining', {}).get('fne_threshold', self.train_loader.dataset.fne_threshold)
         
         for step, batch in enumerate(self.train_loader):
             images = batch['image'].to(self.device)
@@ -205,9 +188,9 @@ class Trainer:
                             neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
-                        if self.config['loss'].get('intra_img_weight', 0.0) > 0:
+                        if intra_img_weight > 0:
                             img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                        if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
+                        if intra_txt_weight > 0:
                             txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
                         loss = self.criterion(
                             img_embeds, txt_embeds,
@@ -236,9 +219,9 @@ class Trainer:
                         neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
-                    if self.config['loss'].get('intra_img_weight', 0.0) > 0:
+                    if intra_img_weight > 0:
                         img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                    if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
+                    if intra_txt_weight > 0:
                         txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
                     loss = self.criterion(
                         img_embeds, txt_embeds,
