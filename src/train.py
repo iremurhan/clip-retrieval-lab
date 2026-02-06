@@ -2,7 +2,17 @@
 src/train.py
 ------------
 Training engine for Cross-Modal Retrieval.
-Implements the Trainer class that handles training loops, evaluation, checkpointing, and WandB logging.
+
+Usage:
+    This module is typically invoked via `run.py` or the Slurm script `scripts/train.slurm`.
+    
+    python run.py --config configs/config_val.yaml
+    
+    The Trainer class manages:
+    - Training loop with Mixed Precision (AMP)
+    - Evaluation (R@K, MAP@K)
+    - Checkpointing (best_model.pth, last_model.pth)
+    - Logging (WandB, Tensorboard-style metrics)
 """
 
 import torch
@@ -59,8 +69,10 @@ class Trainer:
         if self.use_wandb and wandb.run is not None:
             self.wandb_run = wandb.run
             # Log key config knobs for analysis/filtering
+            wandb.config.update(
+                {
                     "dataset_name": config.get('dataset_name', 'unknown'),
-                    "use_clip_loss": loss_cfg.get('use_clip_loss', False),
+                    "use_clip_loss": config['loss'].get('use_clip_loss', False),
                 },
                 allow_val_change=True,
             )
@@ -86,7 +98,7 @@ class Trainer:
         logger.info(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # 1. Load Weights
+        # Load Weights
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -96,7 +108,7 @@ class Trainer:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             logger.info("GradScaler state loaded from checkpoint.")
         
-        # 2. Load State Info
+        # Load State Info
         if 'best_r1' not in checkpoint or 'epoch' not in checkpoint:
             logger.error(f"Checkpoint file {checkpoint_path} is missing critical keys ('epoch' or 'best_r1').")
             logger.error("Cannot resume training safely. Aborting.")
@@ -448,11 +460,11 @@ class Trainer:
 
         # --- MAIN TRAINING LOOP ---
         for epoch in range(start_epoch, self.config['training']['epochs']):
-            # 1. Train one epoch
+            # Train one epoch
             train_loss = self.train_epoch(epoch)
             logger.info(f"Epoch {epoch+1} Training Loss: {train_loss:.4f}")
 
-            # 2. EVALUATION & BEST MODEL CHECK
+            # Evaluation & Best Model Check
             is_new_best = False
             is_eval_time = ((epoch + 1) % eval_frequency == 0) or (
                 (epoch + 1) == self.config['training']['epochs']
@@ -464,7 +476,7 @@ class Trainer:
                     self.best_r1 = score
                     logger.info(f"New Best R@1: {score:.2f} found at Epoch {epoch+1}!")
 
-            # 3. SAVE CHECKPOINT EVERY EPOCH
+            # Save Checkpoint
             # Always keep last_model.pth up to date for resume; also update best_model.pth when is_new_best=True
             os.makedirs(self.checkpoint_dir, exist_ok=True)
             self.save_checkpoint(epoch + 1, is_best=is_new_best)
