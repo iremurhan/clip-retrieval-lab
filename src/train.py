@@ -211,8 +211,7 @@ class Trainer:
                             txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
                         loss = self.criterion(
                             img_embeds, txt_embeds,
-                            img_aug_embeds, txt_aug_embeds,
-                            neg_txt_embeds
+                            img_aug_embeds, txt_aug_embeds
                         )
                 
                 # Backward with gradient scaling
@@ -243,8 +242,7 @@ class Trainer:
                         txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
                     loss = self.criterion(
                         img_embeds, txt_embeds,
-                        img_aug_embeds, txt_aug_embeds,
-                        neg_txt_embeds
+                        img_aug_embeds, txt_aug_embeds
                     )
                 
                 # Backward
