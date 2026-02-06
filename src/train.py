@@ -78,7 +78,6 @@ class Trainer:
             wandb.define_metric("val/i2t_map10", summary="max")
 
 
-
     def load_checkpoint(self, checkpoint_path):
         """
         Loads full training state from a checkpoint file.
