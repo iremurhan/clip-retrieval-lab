@@ -1,8 +1,17 @@
 #!/bin/bash
-# Training. Prefer: bash ./scripts/start_training.sh flickr_fne_run configs/config_flickr.yaml
-# or bash ./scripts/start_training.sh coco_fne_run configs/config_coco.yaml
-# Direct: sbatch --job-name=NAME scripts/train.slurm NAME [config]
-# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, last_model.pth, best_model.pth, wandb/). W&B: retrieval.
+# =============================================================================
+# SLURM TRAINING SCRIPT
+# =============================================================================
+# Usage:
+#   sbatch scripts/train.slurm <EXPERIMENT_NAME> <CONFIG_PATH>
+#
+# Example:
+#   sbatch scripts/train.slurm my_fne_exp configs/config_flickr.yaml
+#
+# Outputs:
+#   Results are saved to: /output/results/{dataset}/{job_id}/
+#   Includes: slurm.out, training.log, checkpoints, and WandB logs.
+# =============================================================================
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8

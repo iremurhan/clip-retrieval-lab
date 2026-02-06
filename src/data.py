@@ -42,7 +42,7 @@ class CaptionImageDataset(Dataset):
         self.max_length = max_length
         self.split = split
         
-        # 1. Define Transforms (Standard CLIP Preprocessing)
+        # Define Transforms (Standard CLIP Preprocessing)
         if transform is None:
             # CLIP normalization values
             normalize = transforms.Normalize(
@@ -78,7 +78,7 @@ class CaptionImageDataset(Dataset):
             self.transform = transform
             self.transform_aug = transform
 
-        # 2. Load Captions (Karpathy JSON)
+        # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
         with open(captions_path, 'r') as f:
             data = json.load(f)
@@ -125,7 +125,7 @@ class CaptionImageDataset(Dataset):
         image_id = sample['image_id']
         caption = sample['caption']
         
-        # 1. Load Image
+        # Load Image
         filepath = sample.get('filepath', '').strip()
         filename = sample['filename']
         
@@ -143,11 +143,11 @@ class CaptionImageDataset(Dataset):
 
         image = Image.open(image_path).convert('RGB')
 
-        # 2. Transform Image (original and augmented for intra-modal loss)
+        # Transform Image (original and augmented for intra-modal loss)
         img_tensor = self.transform(image)
         img_aug_tensor = self.transform_aug(image)
         
-        # 3. Tokenize Text
+        # Tokenize Text
         tokenized = self.tokenizer(
             caption,
             padding='max_length',

@@ -83,8 +83,8 @@ class SymmetricInfoNCELoss(nn.Module):
         This assumes a 1-to-1 correspondence between embed_a[i] and embed_b[i].
         
         Args:
-            embed_a (torch.Tensor): Tensor of shape (N, D), normalized embeddings.
-            embed_b (torch.Tensor): Tensor of shape (N, D), normalized embeddings.
+            embed_a (Tensor): (N, D) Normalized embeddings
+            embed_b (Tensor): (N, D) Normalized embeddings
             
         Returns:
             torch.Tensor: Scalar loss value (average of a->b and b->a losses).
@@ -122,15 +122,15 @@ class SymmetricInfoNCELoss(nn.Module):
         Returns:
             Tensor: Scalar total loss value
         """
-        # 1. Inter-Modal Loss
+        # Inter-Modal Loss (Image <-> Text)
         loss_inter = self._compute_contrastive(img_embeds, txt_embeds)
 
-        # 2. Intra-Modal Loss (Image-Image)
+        # Intra-Modal Loss (Image <-> Image Aug)
         loss_img = 0.0
         if self.w_img > 0 and img_aug_embeds is not None:
             loss_img = self._compute_contrastive(img_embeds, img_aug_embeds)
             
-        # 3. Intra-Modal Loss (Text-Text)
+        # Intra-Modal Loss (Text <-> Text Aug)
         loss_txt = 0.0
         if self.w_txt > 0 and txt_aug_embeds is not None:
             loss_txt = self._compute_contrastive(txt_embeds, txt_aug_embeds)
