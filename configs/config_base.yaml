@@ -16,7 +16,7 @@ loss:
   # Hard Negative Mining (FNE + neg_txt_embeds) only runs when use_clip_loss is false.
   use_clip_loss: false
   temperature: 0.07
-  intra_img_weight: 0.1
+  intra_img_weight: 0.0
   intra_txt_weight: 0.0
 
 training:
