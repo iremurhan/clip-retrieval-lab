@@ -53,6 +53,7 @@ apptainer exec --nv -B $BINDS --pwd /workspace $SIF_IMAGE python3 -u run.py \
     --config configs/config_coco.yaml \
     --override \
         debug.debug_mode=false \
+        mining.consensus_path="/workspace/datasets/coco/pairwise_similarities/mining_image_consensus_mean.pt" \
         logging.checkpoint_dir="/output/results/${SLURM_JOB_ID}" \
         logging.wandb_project="$WANDB_PROJECT"
 
