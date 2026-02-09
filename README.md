@@ -67,7 +67,7 @@ Resume: `--resume /path/to/checkpoint.pth`
 **HPC (Slurm)**
 
 ```bash
-./scripts/start_training.sh <run_name> [config_path]
+./scripts/ultramarine/start_training.sh <run_name> [config_path]
 ```
 
 Logs & checkpoints: `~/experiments/results/{coco|flickr30k}/{job_id}/`
@@ -87,16 +87,16 @@ python tools/mine_pairwise_sim.py --modality caption --config configs/config_fli
 **HPC (wrapper — recommended)**
 
 ```bash
-# Usage: ./scripts/start_mining.sh [coco | flickr30k]
-./scripts/start_mining.sh coco
-./scripts/start_mining.sh flickr30k
+# Usage: ./scripts/mining/start_mining.sh [coco | flickr30k]
+./scripts/mining/start_mining.sh coco
+./scripts/mining/start_mining.sh flickr30k
 ```
 
 **HPC (manual sbatch)**
 
 ```bash
-sbatch --export=ALL,TARGET_DATASET=coco scripts/mine.slurm
-sbatch --export=ALL,TARGET_DATASET=flickr30k scripts/mine.slurm
+sbatch --export=ALL,TARGET_DATASET=coco scripts/mining/mine.slurm
+sbatch --export=ALL,TARGET_DATASET=flickr30k scripts/mining/mine.slurm
 ```
 
 Logs: `~/experiments/results/{coco|flickr30k}/{job_id}/mining_log.out` (moved there after the job finishes).
@@ -110,7 +110,11 @@ tez_v2_clean/
 ├── configs/          # YAML configs
 ├── src/              # Source (data, model, loss, train)
 ├── tools/            # Utilities (mining, analysis)
-├── scripts/          # Slurm & shell (start_mining.sh, mine.slurm)
+├── scripts/          # Slurm & shell scripts
+│   ├── mining/       # Mining scripts (start_mining.sh, mine.slurm)
+│   ├── truba/        # TRUBA cluster specific scripts (train_truba.slurm, mine_truba.slurm)
+│   ├── ultramarine/  # Ultramarine cluster scripts (start_training.sh, train.slurm)
+│   └── setup/        # Setup scripts (Dockerfile, download scripts)
 ├── run.py            # Training entry point
 └── requirements.txt
 ```
@@ -125,4 +129,4 @@ tez_v2_clean/
   WANDB_API_KEY=your_key_here
   ```
   The Slurm scripts mount this as `/env` and source it so mining/training can log to WandB.
-- **Docker image:** `biremurhan/image-text-contrast:v0.4`. Adjust paths in `train.slurm` / `mine.slurm` for your account if needed.
+- **Docker image:** `biremurhan/image-text-contrast:v0.4`. Adjust paths in `scripts/truba/*.slurm` or other slurm scripts for your account if needed.
