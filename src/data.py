@@ -29,6 +29,7 @@ class CaptionImageDataset(Dataset):
         transform=None,
         mining_indices_path=None,
         mining_values_path=None,
+        consensus_path=None,
         fne_threshold=0.90,
     ):
         """
@@ -41,6 +42,7 @@ class CaptionImageDataset(Dataset):
             transform (callable, optional): Image transforms.
             mining_indices_path (str, optional): Path to .pt file of neighbor indices [N, K].
             mining_values_path (str, optional): Path to .pt file of neighbor similarity scores [N, K].
+            consensus_path (str, optional): Path to consensus .pt file (Image-Image).
             fne_threshold (float): Score above which a neighbor is treated as false negative (default 0.90).
         """
         self.images_root_path = images_root_path
@@ -50,11 +52,34 @@ class CaptionImageDataset(Dataset):
         self.fne_threshold = fne_threshold
         self.mining_indices = None
         self.mining_values = None
+        
+        # Load Text-Text Mining Data
         if mining_indices_path and mining_values_path and os.path.isfile(mining_indices_path) and os.path.isfile(mining_values_path):
             self.mining_indices = torch.load(mining_indices_path, map_location='cpu')
             self.mining_values = torch.load(mining_values_path, map_location='cpu')
             logger.info(f"Mining loaded: indices {mining_indices_path}, values {mining_values_path}, fne_threshold={fne_threshold}")
-        
+
+        # Load Consensus Mining Data (Image-Image)
+        self.consensus_data = None
+        self.img_id_to_consensus_idx = None
+        if consensus_path and os.path.isfile(consensus_path):
+            logger.info(f"Loading Consensus Data from {consensus_path}...")
+            consensus_data = torch.load(consensus_path, map_location='cpu')
+            # Expected format: {'mode': 'id_mapping', 'image_ids': tensor, 'indices': tensor, 'scores': tensor}
+            self.consensus_image_ids = consensus_data['image_ids']
+            self.consensus_indices = consensus_data['indices']
+            self.consensus_scores = consensus_data['scores']
+            
+            # Map image_id -> row index in consensus tensors
+            # Using a dict for O(1) lookup. 
+            self.img_id_to_consensus_idx = {
+                img_id.item(): idx for idx, img_id in enumerate(self.consensus_image_ids)
+            }
+            self.consensus_active = True
+            logger.info(f"Consensus Data Loaded: {len(self.consensus_image_ids)} images.")
+        else:
+            self.consensus_active = False
+
         # 1. Define Transforms (Standard CLIP Preprocessing)
         if transform is None:
             # CLIP normalization values
@@ -186,10 +211,58 @@ class CaptionImageDataset(Dataset):
             if indices.dim() == 0:
                 indices = indices.unsqueeze(0)
                 values = values.unsqueeze(0)
-            # Valid negatives: score <= fne_threshold (exclude FNs) and different image
-            valid_mask = (values <= self.fne_threshold) & (
-                torch.tensor([self.caption_to_img_id[i] for i in indices.tolist()], dtype=torch.long) != image_id
-            )
+            
+            # Determine valid negatives based on FNE strategy
+            valid_mask = torch.ones_like(indices, dtype=torch.bool)
+            
+            # 1. Base check: Must differ by image ID
+            candidate_img_ids = [self.caption_to_img_id[i] for i in indices.tolist()]
+            # This check is always required
+            valid_mask &= (torch.tensor(candidate_img_ids, dtype=torch.long) != image_id)
+
+            if self.consensus_active:
+                # --- CONSENSUS-BASED FNE ---
+                # Check if candidate negative is a "consensus neighbor" of the anchor image
+                
+                # Check anchor presence
+                if image_id not in self.img_id_to_consensus_idx:
+                    raise KeyError(f"Anchor image_id {image_id} not found in Consensus Data!")
+                    
+                anchor_consensus_idx = self.img_id_to_consensus_idx[image_id]
+                
+                # Get anchor's consensus neighbors (indices into consensus_image_ids)
+                # shape: [K_consensus]
+                anchor_neighbor_indices = self.consensus_indices[anchor_consensus_idx] 
+                anchor_neighbor_scores = self.consensus_scores[anchor_consensus_idx]
+                
+                # We need to check if each candidate negative image corresponds to a high-score neighbor
+                for i, cand_img_id in enumerate(candidate_img_ids):
+                    if not valid_mask[i]:
+                        continue # Already invalid
+                        
+                    if cand_img_id not in self.img_id_to_consensus_idx:
+                         raise KeyError(f"Candidate image_id {cand_img_id} not found in Consensus Data!")
+                    
+                    cand_consensus_idx = self.img_id_to_consensus_idx[cand_img_id]
+                    
+                    # Check if cand_consensus_idx is in anchor_neighbor_indices
+                    # Note: We assume consensus_indices[anchor_idx] contains top-k most similar images.
+                    # Find if cand_consensus_idx exists in the neighbor list using torch.where or similar
+                    match = (anchor_neighbor_indices == cand_consensus_idx).nonzero(as_tuple=True)[0]
+                    
+                    if len(match) > 0:
+                        # It is a neighbor. Check score.
+                        score = anchor_neighbor_scores[match[0]]
+                        if score > self.fne_threshold:
+                            # It's a False Negative (too similar) -> Mask it out
+                            valid_mask[i] = False
+                    # If not in top-k neighbors, we verify it's safe (implicitly score < low_threshold of top-k)
+                    
+            else:
+                # --- FACTBACK: TEXT-TEXT FNE ---
+                # Valid negatives: score <= fne_threshold
+                valid_mask &= (values <= self.fne_threshold)
+
             valid_indices = indices[valid_mask].tolist()
 
             if valid_indices:
