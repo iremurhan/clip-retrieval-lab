@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p barbun-cuda                # TRUBA partition
+#SBATCH -p akya-cuda                # TRUBA partition
 #SBATCH -A burhan                     # Account name
 #SBATCH -J training_job
 #SBATCH -o logs/%j.out
