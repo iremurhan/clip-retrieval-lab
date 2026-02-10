@@ -6,7 +6,7 @@
 #SBATCH -e logs/%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=20            # 8-10 is ideal for data loading
+#SBATCH --cpus-per-task=10            # 8-10 is ideal for data loading
 #SBATCH --gres=gpu:1
 #SBATCH --time=48:00:00               # Time limit required
 
