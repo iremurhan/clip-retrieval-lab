@@ -14,10 +14,20 @@
 module purge
 module load centos7.3/app/apptainer/1.1.8   # Load Apptainer module
 
-# WandB API Key (Can also be read from .env if available)
+# --- Parsing Arguments ---
+# Read parameters from the launcher script or command line
+EXP_NAME="${1:-default_run}"           # Arg 1: Experiment Name
+CONFIG_FILE="${2:-configs/config_coco.yaml}" # Arg 2: Config Path
+
+# --- WandB Settings ---
 export WANDB_API_KEY="YOUR_API_KEY_HERE"
 export WANDB_MODE=online
 export WANDB_PROJECT="retrieval"
+export WANDB_NAME="${SLURM_JOB_ID}_${EXP_NAME}" # JobID + ExpName
+
+# Setup WandB directory
+export WANDB_DIR="/arf/scratch/burhan/experiments/results/${SLURM_JOB_ID}"
+mkdir -p "$WANDB_DIR"
 
 # --- 2. Path Settings ---
 # --- UPDATED PATHS ---
@@ -46,11 +56,11 @@ BINDS="$HOST_REPO_DIR:/workspace,$HOST_DATA_DIR:/workspace/datasets,$HOST_RESULT
 cd "$HOST_REPO_DIR"
 
 # --- 3. Execution ---
-echo "Starting..."
+echo "Starting... Job: $SLURM_JOB_ID, Exp: $EXP_NAME, Config: $CONFIG_FILE"
 
 # apptainer exec --nv (Required for Nvidia GPU support)
 apptainer exec --nv -B $BINDS --pwd /workspace $SIF_IMAGE python3 -u run.py \
-    --config configs/config_coco.yaml \
+    --config "$CONFIG_FILE" \
     --override \
         debug.debug_mode=false \
         mining.consensus_path="/workspace/datasets/coco/pairwise_similarities/mining_image_consensus_mean.pt" \
