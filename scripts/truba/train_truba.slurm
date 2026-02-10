@@ -11,60 +11,66 @@
 #SBATCH --time=48:00:00               # Time limit required
 
 # --- 1. Preparation ---
-module purge
-module load centos7.3/app/apptainer/1.1.8   # Load Apptainer module
+# module purge and load lines removed as requested
 
 # --- Parsing Arguments ---
-# Read parameters from the launcher script or command line
 EXP_NAME="${1:-default_run}"           # Arg 1: Experiment Name
 CONFIG_FILE="${2:-configs/config_coco.yaml}" # Arg 2: Config Path
 
-# --- WandB Settings ---
-export WANDB_API_KEY="YOUR_API_KEY_HERE"
-export WANDB_MODE=online
-export WANDB_PROJECT="retrieval"
-export WANDB_NAME="${SLURM_JOB_ID}_${EXP_NAME}" # JobID + ExpName
-
-# Setup WandB directory
-export WANDB_DIR="/arf/scratch/burhan/experiments/results/${SLURM_JOB_ID}"
-mkdir -p "$WANDB_DIR"
-
 # --- 2. Path Settings ---
-# --- UPDATED PATHS ---
 
-# 1. Location of the code (HOME)
+# 1. Location of the code (HOME - Host)
 HOST_REPO_DIR="/arf/home/burhan/clip-retrieval-lab"
 
-# 2. Location of datasets (SCRATCH - Necessary for speed)
+# 2. Location of datasets (SCRATCH - Host)
 HOST_DATA_DIR="/arf/scratch/burhan/experiments/datasets"
 
-# 3. Location for results (SCRATCH - To avoid quota issues)
+# 3. Location for results (SCRATCH - Host)
 HOST_RESULTS_DIR="/arf/scratch/burhan/experiments/results"
 
-# 4. Location of the env folder (HOME)
-HOST_ENV_DIR="/arf/home/burhan/experiments/env"
+# 4. Location of the env folder (HOME - Host)
+HOST_ENV_FILE="/arf/home/burhan/experiments/env/wandb.env"
 
 # Container Image File (Created in scratch)
 SIF_IMAGE="/arf/scratch/burhan/image-text-contrast_v0.4.sif"
 
 # --- BIND MOUNTS ---
-# Left side TRUBA (Host), Right side Container (SAME as Docker)
-# Added /env folder.
-BINDS="$HOST_REPO_DIR:/workspace,$HOST_DATA_DIR:/workspace/datasets,$HOST_RESULTS_DIR:/output/results,$HOST_ENV_DIR:/env"
+# Maps Host paths to Container paths
+# We map the directory containing the env file to /env
+BINDS="$HOST_REPO_DIR:/workspace,$HOST_DATA_DIR:/workspace/datasets,$HOST_RESULTS_DIR:/output/results,$(dirname $HOST_ENV_FILE):/env"
 
-# Change directory to repo root
-cd "$HOST_REPO_DIR"
+# --- WandB Setup ---
+# Source the env file on the HOST to get the API key
+if [ -f "$HOST_ENV_FILE" ]; then
+    set -a
+    source "$HOST_ENV_FILE"
+    set +a
+else
+    echo "WARNING: WandB env file ($HOST_ENV_FILE) not found!"
+fi
+
+export WANDB_PROJECT="retrieval"
+export WANDB_NAME="${SLURM_JOB_ID}_${EXP_NAME}"
+
+# CRITICAL FIX: Use CONTAINER INTERNAL PATH for WANDB_DIR
+CONTAINER_JOB_DIR="/output/results/${SLURM_JOB_ID}"
+# WandB needs a writable directory inside the container
+export WANDB_DIR="${CONTAINER_JOB_DIR}/wandb" 
 
 # --- 3. Execution ---
 echo "Starting... Job: $SLURM_JOB_ID, Exp: $EXP_NAME, Config: $CONFIG_FILE"
 
+# Change directory to repo root (Host side, but Apptainer handles mapping)
+cd "$HOST_REPO_DIR"
+
 # apptainer exec --nv (Required for Nvidia GPU support)
+# --pwd /workspace ensures we start inside the container's mapped workspace
 apptainer exec --nv -B $BINDS --pwd /workspace $SIF_IMAGE python3 -u run.py \
     --config "$CONFIG_FILE" \
     --override \
         debug.debug_mode=false \
         mining.consensus_path="/workspace/datasets/coco/pairwise_similarities/mining_image_consensus_mean.pt" \
-        logging.checkpoint_dir="/output/results/${SLURM_JOB_ID}" \
+        logging.checkpoint_dir="$CONTAINER_JOB_DIR" \
         logging.wandb_project="$WANDB_PROJECT"
 
 echo "Process Completed."

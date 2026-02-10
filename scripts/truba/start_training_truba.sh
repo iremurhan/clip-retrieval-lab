@@ -19,28 +19,19 @@ fi
 
 # TRUBA Results Paths (Scratch)
 RESULTS_ROOT="/arf/scratch/burhan/experiments/results"
-# Log file path (using %j for SLURM Job ID)
-SLURM_OUT="${RESULTS_ROOT}/${DATASET}/%j.out"
 
 # Ensure parent log directory exists (SLURM won't create it)
 mkdir -p "${RESULTS_ROOT}/${DATASET}"
+LOG_FILE="${RESULTS_ROOT}/${DATASET}/%j.out"
 
 echo "------------------------------------------------"
 echo "Experiment: ${EXP_NAME}"
 echo "Config:     ${CONFIG}"
-echo "Log Path:   ${SLURM_OUT}"
+echo "Log:        ${RESULTS_ROOT}/${DATASET}/<JOB_ID>.out"
 echo "------------------------------------------------"
 
 # Submit Job
-# --output overrides the default in the slurm file.
-# The variables ($EXP_NAME $CONFIG) at the end become $1 and $2 inside the slurm script.
-JOB_ID=$(sbatch --job-name="${EXP_NAME}" \
-    --output="${SLURM_OUT}" \
-    --error="${SLURM_OUT}" \
-    /arf/home/burhan/clip-retrieval-lab/scripts/truba/train_truba.slurm "$EXP_NAME" "$CONFIG" | awk '{print $NF}')
-
-# Job ID is known now, create the result directory immediately to prevent wandb errors
-mkdir -p "${RESULTS_ROOT}/${DATASET}/${JOB_ID}"
-
-echo "Job Submitted! ID: ${JOB_ID}"
-echo "To follow logs: tail -f ${RESULTS_ROOT}/${DATASET}/${JOB_ID}.out"
+sbatch --job-name="${EXP_NAME}" \
+       --output="${LOG_FILE}" \
+       --error="${LOG_FILE}" \
+       /arf/home/burhan/clip-retrieval-lab/scripts/truba/train_truba.slurm "$EXP_NAME" "$CONFIG"
