@@ -23,7 +23,7 @@ training:
   num_workers: 8
   max_length: 77
 
-  epochs: 20
+  epochs: 8
   seed: 42
   optimizer: "adamw"
   scheduler: "cosine"
