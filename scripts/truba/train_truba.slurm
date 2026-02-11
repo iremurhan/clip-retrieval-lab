@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH -p akya-cuda                # TRUBA partition
+#SBATCH -p palamut-cuda                # TRUBA partition
 #SBATCH -A burhan                     # Account name
 #SBATCH -J training_job
 #SBATCH -o logs/%j.out
 #SBATCH -e logs/%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=10            # 8-10 is ideal for data loading
+#SBATCH --cpus-per-task=16            # 8-10 is ideal for data loading
 #SBATCH --gres=gpu:1
 #SBATCH --time=48:00:00               # Time limit required
 
