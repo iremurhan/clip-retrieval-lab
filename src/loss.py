@@ -54,6 +54,9 @@ class SymmetricInfoNCELoss(nn.Module):
             - loss.temperature: Temperature scaling parameter τ (controls softmax sharpness)
             - loss.intra_img_weight: Weight for image intra-modal loss (default: 0.0)
             - loss.intra_txt_weight: Weight for text intra-modal loss (default: 0.0)
+            
+    Returns:
+        dict: A dictionary with 'loss_total', 'loss_inter', 'loss_intra_img', 'loss_intra_txt'.
     """
     
     def __init__(self, config):
@@ -120,19 +123,33 @@ class SymmetricInfoNCELoss(nn.Module):
             txt_aug_embeds: [N, D] optional - for intra-modal text loss
         
         Returns:
-            Tensor: Scalar total loss value
+            dict: Dictionary containing total loss and individual components:
+                - "loss_total": Final weighted sum
+                - "loss_inter": Image-Text contrastive loss
+                - "loss_intra_img": Image-Image intra-modal loss
+                - "loss_intra_txt": Text-Text intra-modal loss
         """
         # Inter-Modal Loss (Image <-> Text)
         loss_inter = self._compute_contrastive(img_embeds, txt_embeds)
 
         # Intra-Modal Loss (Image <-> Image Aug)
-        loss_img = 0.0
+        # Use a tensor for 0.0 to ensure device compatibility if needed, though scalar 0.0 usually works.
+        # Keeping it simple as float 0.0 for logic, but if autograd requires tensor for graph connectivity
+        # when weight > 0, the _compute_contrastive returns a tensor.
+        loss_img = torch.tensor(0.0, device=img_embeds.device)
         if self.w_img > 0 and img_aug_embeds is not None:
             loss_img = self._compute_contrastive(img_embeds, img_aug_embeds)
             
         # Intra-Modal Loss (Text <-> Text Aug)
-        loss_txt = 0.0
+        loss_txt = torch.tensor(0.0, device=txt_embeds.device)
         if self.w_txt > 0 and txt_aug_embeds is not None:
             loss_txt = self._compute_contrastive(txt_embeds, txt_aug_embeds)
 
-        return loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
+        total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
+        
+        return {
+            "loss_total": total_loss,
+            "loss_inter": loss_inter,
+            "loss_intra_img": loss_img,
+            "loss_intra_txt": loss_txt
+        }

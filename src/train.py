@@ -68,14 +68,6 @@ class Trainer:
         self.wandb_run = None
         if self.use_wandb and wandb.run is not None:
             self.wandb_run = wandb.run
-            # Log key config knobs for analysis/filtering
-            wandb.config.update(
-                {
-                    "dataset_name": config.get('dataset_name', 'unknown'),
-                    "use_clip_loss": config['loss'].get('use_clip_loss', False),
-                },
-                allow_val_change=True,
-            )
             # Define WandB summary metrics with max tracking for validation results
             # This ensures the dashboard always shows the best scores, even if current epoch is worse
             wandb.define_metric("val/t2i_r1", summary="max")
@@ -203,10 +195,12 @@ class Trainer:
                             img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
                         if intra_txt_weight > 0:
                             txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
-                        loss = self.criterion(
+                        
+                        loss_dict = self.criterion(
                             img_embeds, txt_embeds,
                             img_aug_embeds, txt_aug_embeds
                         )
+                        loss = loss_dict["loss_total"]
                 
                 # Backward with gradient scaling
                 self.optimizer.zero_grad()
@@ -234,10 +228,13 @@ class Trainer:
                         img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
                     if intra_txt_weight > 0:
                         txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
-                    loss = self.criterion(
+                    
+                    # loss is now a dict
+                    loss_dict = self.criterion(
                         img_embeds, txt_embeds,
                         img_aug_embeds, txt_aug_embeds
                     )
+                    loss = loss_dict["loss_total"]
                 
                 # Backward
                 self.optimizer.zero_grad()
@@ -277,7 +274,11 @@ class Trainer:
                 if self.use_wandb:
                     try:
                         log_dict = {
-                            "train/loss": losses.val,
+                            "epoch": epoch,
+                            "train/loss_total": loss_dict["loss_total"].item(),
+                            "train/loss_inter": loss_dict["loss_inter"].item(),
+                            "train/loss_intra_img": loss_dict["loss_intra_img"].item(),
+                            "train/loss_intra_txt": loss_dict["loss_intra_txt"].item(),
                             "train/epoch": fractional_epoch,
                             "train/step": step,
                             "train/grad_norm": grad_norm,
