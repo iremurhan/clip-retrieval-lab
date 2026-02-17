@@ -132,11 +132,22 @@ def setup_tracker(config, debug_mode=False):
         return
 
     wandb_id = config.get("logging", {}).get("wandb_id")
+    
+    # Read group and job_type from config (support usage under 'wandb' key or 'logging')
+    group = config.get("wandb", {}).get("group") or config.get("logging", {}).get("group")
+    job_type = config.get("wandb", {}).get("job_type") or config.get("logging", {}).get("job_type")
+
     init_kwargs = {
         "project": project,
         "config": make_wandb_config(config),
         "name": run_name,
     }
+    
+    if group:
+        init_kwargs["group"] = group
+    if job_type:
+        init_kwargs["job_type"] = job_type
+
     # If a specific WandB run id is provided, force resume onto that run
     if wandb_id:
         init_kwargs["id"] = wandb_id
