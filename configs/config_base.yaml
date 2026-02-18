@@ -17,7 +17,7 @@ loss:
   use_clip_loss: false
   temperature: 0.07
   intra_img_weight: 1
-  intra_txt_weight: 1
+  intra_txt_weight: 0
 
 training:
   # DataLoader-related defaults (will be mirrored into data.* at runtime)
