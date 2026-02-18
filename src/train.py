@@ -24,6 +24,7 @@ import time
 import random
 from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k
 from .utils import compute_grad_norm
+from .grad_cache import GradCache
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,24 @@ class Trainer:
         else:
             self.scaler = None
             logger.info("Mixed Precision Training (AMP) disabled (CPU mode).")
+        
+        # Initialize Gradient Caching (STRICT CONFIG: will raise KeyError if missing)
+        # Check if gradient caching is enabled
+        self.use_grad_cache = config['training'].get('use_grad_cache', False)
+        if self.use_grad_cache:
+            # STRICT: micro_batch_size MUST exist if grad_cache is enabled
+            # GradCache constructor will raise KeyError if missing
+            self.grad_cache = GradCache(
+                model=self.model,
+                criterion=self.criterion,
+                config=self.config,
+                device=self.device,
+                scaler=self.scaler
+            )
+            logger.info(f"Gradient Caching enabled with micro_batch_size={config['training']['micro_batch_size']}")
+        else:
+            self.grad_cache = None
+            logger.info("Gradient Caching disabled (standard training mode).")
         
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -177,10 +196,74 @@ class Trainer:
                 neg_attention_mask = neg_attention_mask.to(self.device)
             
             # ============================================================
-            # Forward Pass with Mixed Precision (AMP)
+            # Forward Pass: Use Gradient Caching if enabled, else standard
             # ============================================================
-            if self.use_amp:
-                with torch.amp.autocast(device_type='cuda'):
+            if self.use_grad_cache:
+                # GRADIENT CACHING MODE
+                # GradCache handles the forward/backward internally
+                # Note: Currently GradCache does NOT support use_clip_loss, neg_txt_embeds, or intra-modal
+                # TODO: Add support for these features if needed
+                if use_clip_loss:
+                    raise NotImplementedError("GradCache does not support use_clip_loss yet. Set loss.use_clip_loss=false.")
+                if neg_input_ids is not None:
+                    logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
+                if intra_img_weight > 0 or intra_txt_weight > 0:
+                    logger.warning("Intra-modal losses not supported with GradCache yet. Ignoring.")
+                
+                # Zero gradients before GradCache forward (which accumulates gradients)
+                self.optimizer.zero_grad()
+                
+                # GradCache performs forward and backward internally
+                loss_dict = self.grad_cache.forward(images, input_ids, attention_mask)
+                loss = loss_dict["loss_total"]
+                
+                # Compute grad norm and step optimizer
+                if self.use_amp:
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = compute_grad_norm(self.model)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    grad_norm = compute_grad_norm(self.model)
+                    self.optimizer.step()
+            
+            else:
+                # STANDARD MODE (Original Implementation)
+                if self.use_amp:
+                    with torch.amp.autocast(device_type='cuda'):
+                        if use_clip_loss:
+                            loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
+                        else:
+                            img_embeds = self.model.encode_image(images)
+                            txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                            neg_txt_embeds = None
+                            if neg_input_ids is not None:
+                                neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
+                            img_aug_embeds = None
+                            txt_aug_embeds = None
+                            if intra_img_weight > 0:
+                                img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                            if intra_txt_weight > 0:
+                                txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                            
+                            loss_dict = self.criterion(
+                                img_embeds, txt_embeds,
+                                img_aug_embeds, txt_aug_embeds
+                            )
+                            loss = loss_dict["loss_total"]
+                    
+                    # Backward with gradient scaling
+                    self.optimizer.zero_grad()
+                    self.scaler.scale(loss).backward()
+                    
+                    # Unscale gradients to compute true grad norm
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = compute_grad_norm(self.model)
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Standard precision training
                     if use_clip_loss:
                         loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                     else:
@@ -196,54 +279,21 @@ class Trainer:
                         if intra_txt_weight > 0:
                             txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
                         
+                        # loss is now a dict
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
                             img_aug_embeds, txt_aug_embeds
                         )
                         loss = loss_dict["loss_total"]
-                
-                # Backward with gradient scaling
-                self.optimizer.zero_grad()
-                self.scaler.scale(loss).backward()
-                
-                # Unscale gradients to compute true grad norm
-                self.scaler.unscale_(self.optimizer)
-                grad_norm = compute_grad_norm(self.model)
-                
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                # Standard precision training
-                if use_clip_loss:
-                    loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
-                else:
-                    img_embeds = self.model.encode_image(images)
-                    txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                    neg_txt_embeds = None
-                    if neg_input_ids is not None:
-                        neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
-                    img_aug_embeds = None
-                    txt_aug_embeds = None
-                    if intra_img_weight > 0:
-                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                    if intra_txt_weight > 0:
-                        txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
                     
-                    # loss is now a dict
-                    loss_dict = self.criterion(
-                        img_embeds, txt_embeds,
-                        img_aug_embeds, txt_aug_embeds
-                    )
-                    loss = loss_dict["loss_total"]
-                
-                # Backward
-                self.optimizer.zero_grad()
-                loss.backward()
-                
-                # Compute grad norm before optimizer step
-                grad_norm = compute_grad_norm(self.model)
-                
-                self.optimizer.step()
+                    # Backward
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    
+                    # Compute grad norm before optimizer step
+                    grad_norm = compute_grad_norm(self.model)
+                    
+                    self.optimizer.step()
             
             self.scheduler.step()
             
