@@ -24,6 +24,7 @@ training:
   batch_size: 128
   num_workers: 8
   max_length: 77
+  image_size: 336
 
   epochs: 20
   seed: 42
@@ -37,6 +38,9 @@ training:
   weight_decay: 0.01
 
 augment:
+  # Number of photometric transforms sampled from the VLM-safe pool per image.
+  # Pool: [ColorJitter, GaussianBlur, RandomGrayscale]. Max k=3.
+  k_photometric_augs: 2
   image:
     enabled: true
 
