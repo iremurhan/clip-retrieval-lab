@@ -1,23 +1,29 @@
 """
 tools/eval.py
 -------------
-ECCV Caption benchmark evaluation for DualEncoder models.
+Unified evaluation script for DualEncoder models.
 
-Computes all retrieval metrics (ECCV, COCO 1K/5K, CxC) via the eccv_caption
-package on the COCO Karpathy test split (5000 images, 25000 captions).
+Two modes:
+  1. Standard (default): R@K + MAP@K via src.metrics on COCO/Flickr30k.
+  2. ECCV (--eccv flag): ECCV Caption protocol via eccv_caption package
+     on COCO Karpathy test split (5000 images, 25000 captions).
 
 Checkpoint handling:
     .pth file   → load_state_dict(strict=False) onto DualEncoder
     HF model ID → zero-shot, no weight loading (DualEncoder uses pretrained)
 
 Usage:
-    # Fine-tuned checkpoint
+    # Standard evaluation
     python tools/eval.py --config configs/config_coco.yaml \\
-        --checkpoint /path/to/best_model.pth
+        --checkpoint /path/to/best_model.pth --split test
 
-    # Zero-shot (HuggingFace model)
+    # ECCV evaluation
     python tools/eval.py --config configs/config_coco.yaml \\
-        --checkpoint openai/clip-vit-large-patch14-336
+        --checkpoint /path/to/best_model.pth --eccv
+
+    # Zero-shot
+    python tools/eval.py --config configs/config_coco.yaml \\
+        --checkpoint openai/clip-vit-large-patch14-336 --split test
 """
 
 import argparse
@@ -31,7 +37,6 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 from transformers import CLIPTokenizer
-from eccv_caption import Metrics as ECCVMetrics
 
 # ---------------------------------------------------------------------------
 # Project imports
@@ -39,7 +44,8 @@ from eccv_caption import Metrics as ECCVMetrics
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.setup import setup_config, setup_seed
 from src.model import DualEncoder
-from src.data import build_eval_transform
+from src.data import build_eval_transform, create_image_text_dataloader
+from src.metrics import compute_recall_at_k, compute_map_at_k
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -381,12 +387,100 @@ def log_to_wandb(scores, config, run_name):
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Standard Evaluation  (R@K, MAP@K via src.metrics)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@torch.no_grad()
+def run_standard_eval(model, config, tokenizer, split, device):
+    """
+    Standard evaluation replicating Trainer.evaluate logic.
+
+    Loads data via create_image_text_dataloader, extracts embeddings with
+    AMP, deduplicates images by image_id, and computes Recall@K + MAP@K.
+    """
+    logger.info(f"Standard evaluation on split='{split}'...")
+
+    loader = create_image_text_dataloader(config, tokenizer, split=split)
+    logger.info(f"DataLoader: {len(loader)} batches, {len(loader.dataset)} samples.")
+
+    img_embeds_list = []
+    txt_embeds_list = []
+    image_ids_list = []
+    use_amp = device.type == "cuda"
+
+    for batch in tqdm(loader, desc=f"Eval [{split}]"):
+        images = batch["image"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            img_emb, txt_emb = model(images, input_ids, attention_mask)
+
+        img_embeds_list.append(img_emb.cpu())
+        txt_embeds_list.append(txt_emb.cpu())
+        image_ids_list.append(batch["image_id"].cpu())
+
+    img_embeds = torch.cat(img_embeds_list, dim=0)
+    txt_embeds = torch.cat(txt_embeds_list, dim=0)
+    image_ids = torch.cat(image_ids_list, dim=0)
+
+    # Deduplicate images (keep first occurrence per image_id)
+    seen = set()
+    first_indices = []
+    unique_ids_list = []
+    for idx in range(len(image_ids)):
+        iid = image_ids[idx].item()
+        if iid not in seen:
+            seen.add(iid)
+            first_indices.append(idx)
+            unique_ids_list.append(iid)
+
+    unique_image_ids = torch.tensor(unique_ids_list, dtype=image_ids.dtype)
+    img_embeds_unique = img_embeds[first_indices]
+
+    logger.info(f"Embeddings: {img_embeds_unique.shape[0]} unique images, {txt_embeds.shape[0]} captions")
+
+    r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
+    map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10])
+
+    metrics = {
+        "t2i_r1": r_t2i[1], "t2i_r5": r_t2i[5], "t2i_r10": r_t2i[10],
+        "i2t_r1": r_i2t[1], "i2t_r5": r_i2t[5], "i2t_r10": r_i2t[10],
+        "t2i_map5": map_t2i[5], "t2i_map10": map_t2i[10],
+        "i2t_map5": map_i2t[5], "i2t_map10": map_i2t[10],
+    }
+
+    logger.info("")
+    logger.info("=" * 72)
+    logger.info(f"  Standard Evaluation — split={split}")
+    logger.info("=" * 72)
+    logger.info(f"  {'Metric':<20s} {'I2T':>10s}   {'T2I':>10s}")
+    logger.info(f"  {'-'*20} {'-'*10}   {'-'*10}")
+    logger.info(f"  {'R@1':<20s} {metrics['i2t_r1']:>10.2f}   {metrics['t2i_r1']:>10.2f}")
+    logger.info(f"  {'R@5':<20s} {metrics['i2t_r5']:>10.2f}   {metrics['t2i_r5']:>10.2f}")
+    logger.info(f"  {'R@10':<20s} {metrics['i2t_r10']:>10.2f}   {metrics['t2i_r10']:>10.2f}")
+    logger.info(f"  {'MAP@5':<20s} {metrics['i2t_map5']:>10.2f}   {metrics['t2i_map5']:>10.2f}")
+    logger.info(f"  {'MAP@10':<20s} {metrics['i2t_map10']:>10.2f}   {metrics['t2i_map10']:>10.2f}")
+    logger.info("=" * 72)
+
+    return metrics
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════
+
 def main():
-    parser = argparse.ArgumentParser(description="ECCV Caption Benchmark Evaluation")
+    parser = argparse.ArgumentParser(description="Unified DualEncoder Evaluation (Standard + ECCV)")
     parser.add_argument("--config", type=str, required=True,
                         help="Config path (e.g. configs/config_coco.yaml)")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help=".pth checkpoint OR HuggingFace model ID for zero-shot")
+    parser.add_argument("--split", type=str, default="test", choices=["val", "test"],
+                        help="Data split for standard evaluation (default: test)")
+    parser.add_argument("--eccv", action="store_true",
+                        help="Enable ECCV Caption protocol instead of standard eval")
     parser.add_argument("--run_name", type=str, default=None,
                         help="WandB run name (optional)")
     parser.add_argument("--batch_size", type=int, default=64,
@@ -413,52 +507,52 @@ def main():
     model_name = config["model"]["image_model_name"]
     tokenizer = CLIPTokenizer.from_pretrained(model_name)
 
-    # ── ECCV caption IDs ──
-    logger.info("Loading ECCV Caption protocol...")
-    eccv_metric = ECCVMetrics()
-    eccv_coco_ids = eccv_metric.coco_ids
-    logger.info(f"ECCV canonical caption IDs: {len(eccv_coco_ids)}")
+    if args.eccv:
+        # ── ECCV Caption Protocol ──
+        from eccv_caption import Metrics as ECCVMetrics
 
-    # ── Data ──
-    images_root = config["data"]["images_path"]
-    captions_path = config["data"]["captions_path"]
-    ordered_images, ordered_captions = load_eccv_test_data(
-        captions_path, images_root, eccv_coco_ids
-    )
+        logger.info("Loading ECCV Caption protocol...")
+        eccv_metric = ECCVMetrics()
+        eccv_coco_ids = eccv_metric.coco_ids
+        logger.info(f"ECCV canonical caption IDs: {len(eccv_coco_ids)}")
 
-    # ── Embeddings ──
-    transform = build_eval_transform(config["data"]["image_size"])
-    img_embeds, txt_embeds, all_iids, all_cids = compute_embeddings(
-        model, tokenizer, ordered_images, ordered_captions,
-        transform, config["data"]["max_length"], device, args.batch_size,
-    )
+        images_root = config["data"]["images_path"]
+        captions_path = config["data"]["captions_path"]
+        ordered_images, ordered_captions = load_eccv_test_data(
+            captions_path, images_root, eccv_coco_ids
+        )
 
-    # ── Similarity matrix → numpy → i2t / t2i ──
-    i2t, t2i = build_sim_and_retrieval_dicts(
-        img_embeds, txt_embeds, all_iids, all_cids, device
-    )
+        transform = build_eval_transform(config["data"]["image_size"])
+        img_embeds, txt_embeds, all_iids, all_cids = compute_embeddings(
+            model, tokenizer, ordered_images, ordered_captions,
+            transform, config["data"]["max_length"], device, args.batch_size,
+        )
 
-    # ── ECCV metrics ──
-    logger.info("Computing eccv_caption metrics...")
-    scores = eccv_metric.compute_all_metrics(
-        i2t, t2i,
-        target_metrics=(
-            "eccv_r1", "eccv_map_at_r", "eccv_rprecision",
-            "coco_1k_recalls", "coco_5k_recalls", "cxc_recalls",
-        ),
-        Ks=(1, 5, 10),
-        verbose=False,
-    )
+        i2t, t2i = build_sim_and_retrieval_dicts(
+            img_embeds, txt_embeds, all_iids, all_cids, device
+        )
 
-    # ── Results ──
-    label = args.checkpoint or model_name
-    print_scores(scores, f"ECCV Benchmark — {label}")
+        logger.info("Computing eccv_caption metrics...")
+        scores = eccv_metric.compute_all_metrics(
+            i2t, t2i,
+            target_metrics=(
+                "eccv_r1", "eccv_map_at_r", "eccv_rprecision",
+                "coco_1k_recalls", "coco_5k_recalls", "cxc_recalls",
+            ),
+            Ks=(1, 5, 10),
+            verbose=False,
+        )
 
-    # ── Optional WandB ──
-    use_wandb = config.get("logging", {}).get("use_wandb", True)
-    debug_mode = config.get("debug", {}).get("debug_mode", False)
-    if use_wandb and not debug_mode:
-        log_to_wandb(scores, config, args.run_name)
+        label = args.checkpoint or model_name
+        print_scores(scores, f"ECCV Benchmark — {label}")
+
+        use_wandb = config.get("logging", {}).get("use_wandb", True)
+        debug_mode = config.get("debug", {}).get("debug_mode", False)
+        if use_wandb and not debug_mode:
+            log_to_wandb(scores, config, args.run_name)
+    else:
+        # ── Standard R@K + MAP@K ──
+        run_standard_eval(model, config, tokenizer, args.split, device)
 
     logger.info("Done.")
 

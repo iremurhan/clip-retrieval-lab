@@ -1,62 +1,31 @@
 #!/bin/bash
-# =============================================================================
-# ECCV BENCHMARK — BATCH TRIGGER
-# =============================================================================
-# Submits one sbatch job per model checkpoint.
-#
-# Usage:
-#   bash scripts/start_eval.sh
-#
-# Models:
-#   1. coco_baseline_256      (fine-tuned)
-#   2. coco_fne_0.99          (FNE custom)
-#   3. mixed_img_aug          (augmentation variant)
-#   4. clip-vit-large-patch14 (zero-shot, HuggingFace)
-# =============================================================================
-
-set -euo pipefail
-
-CONFIG="configs/config_coco.yaml"
-
-MODELS=(
-    "/home/beyza.urhan/experiments/results/coco/models/coco_baseline_256.pth"
-    "/home/beyza.urhan/experiments/results/coco/models/coco_fne_0.99.pth"
-    "/home/beyza.urhan/experiments/results/coco/models/mixed_img_aug.pth"
-    "openai/clip-vit-large-patch14-336"
-)
+set -e
 
 echo "=========================================="
 echo "  ECCV Benchmark — Batch Submission"
 echo "=========================================="
-echo "  Config: $CONFIG"
-echo "  Models: ${#MODELS[@]}"
-echo "=========================================="
-echo ""
+
+CONFIG_FILE="${1:-configs/config_coco.yaml}"
+SPLIT="${2:-test}"
+MODE="${3:-normal}" # 'normal' veya 'eccv'
+
+# DİKKAT: Bu yollar konteynerin İÇİNDEKİ (mounted) yollardır.
+MODELS=(
+    "/output/results/coco/models/coco_baseline_256.pth"
+    "/output/results/coco/models/coco_fne_0.99.pth"
+    "/output/results/coco/models/mixed_img_aug.pth"
+    "openai/clip-vit-large-patch14-336"
+)
 
 for CKPT in "${MODELS[@]}"; do
-    # --- Derive job name from checkpoint basename ---
-    if [[ "$CKPT" == *.pth ]]; then
-        JOB_NAME=$(basename "$CKPT" .pth)
-    else
-        # HuggingFace model: use last component
-        JOB_NAME=$(basename "$CKPT")
-    fi
-
-    # --- Pre-flight: verify .pth checkpoints exist ---
-    if [[ "$CKPT" == *.pth && ! -f "$CKPT" ]]; then
-        echo "SKIP: Checkpoint not found: $CKPT"
-        continue
-    fi
-
-    echo "Submitting: eval_${JOB_NAME}"
+    # Model ismini yoldan çıkar (Loglama için)
+    MODEL_NAME=$(basename "$CKPT" .pth)
+    JOB_NAME="eval_${MODEL_NAME}"
+    
+    echo "Submitting: $JOB_NAME"
     echo "  Checkpoint: $CKPT"
-
-    sbatch \
-        --job-name="eval_${JOB_NAME}" \
-        --export=ALL,EVAL_CONFIG="$CONFIG",EVAL_CHECKPOINT="$CKPT" \
-        scripts/eval.slurm
-
-    echo ""
+    
+    sbatch --job-name="$JOB_NAME" scripts/eval.slurm "$CONFIG_FILE" "$CKPT" "$SPLIT" "$MODE"
 done
 
 echo "All jobs submitted."
