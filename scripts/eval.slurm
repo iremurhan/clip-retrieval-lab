@@ -1,18 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# SLURM EVALUATION SCRIPT — Normal + ECCV Modes
+# SLURM EVALUATION SCRIPT — ECCV Caption Benchmark
 # =============================================================================
-# Dispatched by: scripts/start_eval.sh (recommended)
-# Direct usage:  sbatch scripts/eval.slurm <CONFIG_FILE> <CHECKPOINT_PATH> <SPLIT> <EVAL_MODE>
+# Dispatched by: scripts/start_eval.sh
+# Direct:        sbatch --export=ALL,EVAL_CONFIG=...,EVAL_CHECKPOINT=... scripts/eval.slurm
 #
-# EVAL_MODE:
-#   normal  — Standard R@K / MAP@K via src.metrics
-#   eccv    — ECCV Caption protocol via eccv_caption package
+# Env vars (set by start_eval.sh via sbatch --export):
+#   EVAL_CONFIG      Config file path   (e.g. configs/config_coco.yaml)
+#   EVAL_CHECKPOINT  .pth path or HF model ID  (e.g. openai/clip-vit-large-patch14-336)
 #
-# Output directory: /output/results/{dataset}/eval_{SLURM_JOB_ID}/
-#   ├── slurm.out      (SBATCH stdout/stderr)
-#   ├── eval.log        (Python evaluation log)
-#   └── wandb/          (WandB artifacts, synced then removed)
+# Output: /output/results/{dataset}/eval_{SLURM_JOB_ID}/
 # =============================================================================
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
@@ -31,51 +28,36 @@ set -euo pipefail
 # =============================================================================
 echo "Checking mounts..."
 echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
-echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
+echo "  /output:    $(ls /output    2>/dev/null | head -3 || echo 'NOT MOUNTED')"
 
 if [ ! -d "/workspace" ] || [ ! -d "/output" ]; then
-    echo "FATAL ERROR: Required mounts not found. Check container-mounts."
+    echo "FATAL: Required mounts not found."
     exit 1
 fi
 
 # =============================================================================
-# Arguments
+# Read env vars (set by start_eval.sh via --export)
 # =============================================================================
-CONFIG_FILE="${1:-configs/config_coco.yaml}"
-CHECKPOINT_PATH="${2:-}"
-SPLIT="${3:-test}"
-EVAL_MODE="${4:-normal}"
+CONFIG_FILE="${EVAL_CONFIG:-configs/config_coco.yaml}"
+CHECKPOINT="${EVAL_CHECKPOINT:-}"
 
-# --- Validate config ---
+# --- Validate config inside container ---
 if [ ! -f "/workspace/$CONFIG_FILE" ]; then
-    echo "ERROR: Config file not found: /workspace/$CONFIG_FILE"
+    echo "ERROR: Config not found: /workspace/$CONFIG_FILE"
     exit 1
 fi
 
-# --- Validate checkpoint (if provided) ---
-if [ -n "$CHECKPOINT_PATH" ] && [ ! -f "$CHECKPOINT_PATH" ]; then
-    echo "ERROR: Checkpoint not found: $CHECKPOINT_PATH"
+# --- Validate .pth checkpoint if applicable ---
+if [[ "$CHECKPOINT" == *.pth && ! -f "$CHECKPOINT" ]]; then
+    echo "ERROR: Checkpoint not found: $CHECKPOINT"
     exit 1
 fi
 
-# --- Validate eval mode ---
-if [[ "$EVAL_MODE" != "normal" && "$EVAL_MODE" != "eccv" ]]; then
-    echo "ERROR: EVAL_MODE must be 'normal' or 'eccv'. Got: $EVAL_MODE"
-    exit 1
-fi
-
-# --- Derive dataset name ---
+# --- Derive dataset name for output directory ---
 if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
     DATASET="flickr30k"
 else
     DATASET="coco"
-fi
-
-# --- WandB project: benchmark runs go to 'retrieval-benchmark', not 'retrieval' ---
-if [[ "$EVAL_MODE" == "eccv" ]]; then
-    WANDB_PROJECT_AUTO="retrieval-benchmark"
-else
-    WANDB_PROJECT_AUTO="retrieval-benchmark"
 fi
 
 # --- Job output directory (eval_ prefix prevents overwriting training logs) ---
@@ -86,15 +68,12 @@ mkdir -p "$JOB_DIR"
 # Banner
 # =============================================================================
 echo "=========================================="
-echo "  DualEncoder Evaluation"
+echo "  ECCV Caption Benchmark Evaluation"
 echo "=========================================="
 echo "  Job ID:       ${SLURM_JOB_ID}"
 echo "  Config:       ${CONFIG_FILE}"
-echo "  Checkpoint:   ${CHECKPOINT_PATH:-(zero-shot)}"
-echo "  Split:        ${SPLIT}"
-echo "  Mode:         ${EVAL_MODE}"
+echo "  Checkpoint:   ${CHECKPOINT:-(zero-shot default)}"
 echo "  Dataset:      ${DATASET}"
-echo "  WandB:        ${WANDB_PROJECT_AUTO}"
 echo "  Job dir:      ${JOB_DIR}"
 echo "=========================================="
 
@@ -108,42 +87,35 @@ fi
 
 if [ -n "${WANDB_API_KEY:-}" ]; then
     export WANDB_MODE=online
-    export WANDB_PROJECT="$WANDB_PROJECT_AUTO"
-    export WANDB_NAME="${SLURM_JOB_ID}_${EVAL_MODE}_eval"
-    echo "W&B: online mode, project=$WANDB_PROJECT"
+    export WANDB_PROJECT="retrieval-benchmark"
+    echo "W&B: online, project=retrieval-benchmark"
 else
-    echo "W&B API Key not found. Switching to OFFLINE mode."
+    echo "W&B: offline (no API key)"
     export WANDB_MODE=offline
 fi
 
 # =============================================================================
-# Build and run evaluation command
+# Install eccv_caption inside container
+# =============================================================================
+echo "Installing eccv_caption..."
+pip install eccv_caption
+
+# =============================================================================
+# Run evaluation
 # =============================================================================
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 
-CMD="python3 -u tools/eval.py"
-CMD="$CMD --config $CONFIG_FILE"
-CMD="$CMD --split $SPLIT"
+CMD="python3 -u tools/eval.py --config $CONFIG_FILE"
 
-# Checkpoint (optional — omit for zero-shot)
-if [ -n "$CHECKPOINT_PATH" ]; then
-    CMD="$CMD --checkpoint $CHECKPOINT_PATH"
+if [ -n "$CHECKPOINT" ]; then
+    CMD="$CMD --checkpoint $CHECKPOINT"
 fi
 
-# ECCV flag
-if [[ "$EVAL_MODE" == "eccv" ]]; then
-    CMD="$CMD --eccv"
-fi
-
-# Config overrides
-CMD="$CMD --override"
-CMD="$CMD logging.wandb_project=$WANDB_PROJECT_AUTO"
-CMD="$CMD logging.use_wandb=true"
+CMD="$CMD --override logging.wandb_project=retrieval-benchmark logging.use_wandb=true"
 
 echo "Executing: $CMD"
 eval $CMD > "$JOB_DIR/eval.log" 2>&1
-
 EVAL_EXIT_CODE=$?
 
 # =============================================================================
@@ -154,8 +126,8 @@ echo "=========================================="
 if [ $EVAL_EXIT_CODE -eq 0 ]; then
     echo "Evaluation completed successfully!"
 else
-    echo "Evaluation FAILED with exit code: $EVAL_EXIT_CODE"
-    echo "Check log: $JOB_DIR/eval.log"
+    echo "Evaluation FAILED (exit code: $EVAL_EXIT_CODE)"
+    echo "Check: $JOB_DIR/eval.log"
 fi
 echo "=========================================="
 
@@ -168,10 +140,10 @@ if [ -d "$JOB_DIR/wandb" ]; then
 fi
 
 if [ $SYNC_EXIT -eq 0 ]; then
-    echo "WandB sync successful. Removing local cache."
+    echo "WandB sync OK. Removing local cache."
     rm -rf "$JOB_DIR/wandb" 2>/dev/null || true
 else
-    echo "WARNING: WandB sync failed. Keeping '$JOB_DIR/wandb' for manual recovery."
+    echo "WARNING: WandB sync failed. Keeping local cache at $JOB_DIR/wandb"
 fi
 
 exit $EVAL_EXIT_CODE
