@@ -1,4 +1,27 @@
 #!/bin/bash
+# =============================================================================
+# SLURM EVALUATION SCRIPT — Standard + ECCV Modes
+# =============================================================================
+# Evaluates a DualEncoder model on COCO/Flickr30k (standard R@K/MAP) or
+# runs the ECCV Caption benchmark protocol (eccv_caption package).
+#
+# Dispatched by:  scripts/start_eval.sh (recommended)
+# Direct usage:   sbatch scripts/eval.slurm <CONFIG> <CHECKPOINT> <SPLIT> <MODE>
+#
+# Arguments (positional):
+#   $1  CONFIG       Config file path          (default: configs/config_coco.yaml)
+#   $2  CHECKPOINT   .pth path or HF model ID  (required)
+#   $3  SPLIT        val | test                (default: test)
+#   $4  MODE         normal | eccv             (default: normal)
+#
+# Examples:
+#   sbatch scripts/eval.slurm configs/config_coco.yaml /output/results/coco/models/best.pth test normal
+#   sbatch scripts/eval.slurm configs/config_coco.yaml /output/results/coco/models/best.pth test eccv
+#   sbatch scripts/eval.slurm configs/config_coco.yaml openai/clip-vit-large-patch14-336 test normal
+#
+# Output: /output/results/eval_{SLURM_JOB_ID}/  (eval.log, eval_slurm.out)
+# NOTE:   ECCV mode is only available for COCO. Flickr must use MODE=normal.
+# =============================================================================
 #SBATCH --time=1-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
@@ -16,7 +39,7 @@ CHECKPOINT="${2}"
 SPLIT="${3:-test}"
 MODE="${4:-normal}"
 
-# Çıktı klasörünü ayarla
+# Set output directory
 JOB_DIR="/output/results/eval_${SLURM_JOB_ID}"
 mkdir -p "$JOB_DIR"
 
@@ -30,7 +53,7 @@ echo "=========================================="
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 
-# SADECE ECCV modu seçiliyse kütüphaneyi anında (runtime) kur
+# Install eccv_caption library only if ECCV mode is selected
 if [ "$MODE" == "eccv" ]; then
     echo "ECCV Mode detected. Installing eccv_caption library..."
     pip install eccv_caption
