@@ -70,8 +70,9 @@ def main():
 
     logger.info("Creating DataLoader...")
     # =========================================================
-    # OOM PREVENTION SHIELD: Override batch size to prevent OOM
-    config['training']['batch_size'] = 64
+    # OOM PREVENTION SHIELD: Prevent CPU RAM & VRAM Overflow
+    config['training']['batch_size'] = 32
+    config['data']['num_workers'] = 2
     # =========================================================
     loader = create_image_text_dataloader(config, tokenizer, split=args.split)
 
@@ -108,9 +109,17 @@ def main():
 
     img_embeds_unique = img_embeds[unique_img_indices]
 
-    # W&B initialization with dynamic run name
-    run_name = "eval_" + os.path.basename(args.checkpoint).replace(".pth", "").replace("/", "_")
-    wandb.init(project="retrieval-benchmark", name=run_name, config=vars(args))
+    # WANDB INITIALIZATION
+    job_id = os.environ.get("SLURM_JOB_ID", "local_run")
+    model_name = os.path.basename(args.checkpoint).replace(".pth", "").replace("/", "_")
+
+    wandb.init(
+        project="retrieval-benchmark",
+        id=f"eval_{job_id}",          # Unique Run ID (Slurm Job ID)
+        name=model_name,              # Readable Display Name in UI
+        config=vars(args),
+        resume="allow"
+    )
 
     # ── Standard evaluation mode (R@K, MAP@K) ──
     if not args.eccv:
