@@ -32,6 +32,7 @@ import torch
 import json
 import logging
 import numpy as np
+import wandb
 from tqdm import tqdm
 from transformers import CLIPTokenizer
 
@@ -68,6 +69,10 @@ def main():
     model.eval()
 
     logger.info("Creating DataLoader...")
+    # =========================================================
+    # OOM PREVENTION SHIELD: Override batch size to prevent OOM
+    config['training']['batch_size'] = 64
+    # =========================================================
     loader = create_image_text_dataloader(config, tokenizer, split=args.split)
 
     logger.info("Extracting embeddings. Please wait...")
@@ -103,6 +108,10 @@ def main():
 
     img_embeds_unique = img_embeds[unique_img_indices]
 
+    # W&B initialization with dynamic run name
+    run_name = "eval_" + os.path.basename(args.checkpoint).replace(".pth", "").replace("/", "_")
+    wandb.init(project="retrieval-benchmark", name=run_name, config=vars(args))
+
     # ── Standard evaluation mode (R@K, MAP@K) ──
     if not args.eccv:
         logger.info("Running standard evaluation (R@K, MAP)...")
@@ -110,11 +119,21 @@ def main():
         unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
         r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
         map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10])
+
         logger.info(
             f"\nResults:\n"
             f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f}\n"
             f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f}"
         )
+
+        # W&B logging (standard mode)
+        wandb.log({
+            "val/t2i_r1": r_t2i[1], "val/t2i_r5": r_t2i[5], "val/t2i_r10": r_t2i[10],
+            "val/i2t_r1": r_i2t[1], "val/i2t_r5": r_i2t[5], "val/i2t_r10": r_i2t[10],
+            "val/t2i_map5": map_t2i[5], "val/t2i_map10": map_t2i[10],
+            "val/i2t_map5": map_i2t[5], "val/i2t_map10": map_i2t[10],
+        })
+        wandb.finish()
         return
 
     # ── ECCV evaluation mode (COCO only) ──
@@ -137,6 +156,7 @@ def main():
 
     if len(caption_ids) != len(txt_embeds):
         logger.error(f"Mismatch: Found {len(caption_ids)} captions in JSON but {len(txt_embeds)} embeddings.")
+        wandb.finish()
         return
 
     # Compute cosine similarity matrix
@@ -171,6 +191,18 @@ def main():
     logger.info("====================================")
     logger.info(f"ECCV RESULTS:\n{json.dumps(scores, indent=4)}")
     logger.info("====================================")
+
+    # W&B logging (ECCV mode)
+    flat_scores = {}
+    for m, values in scores.items():
+        if isinstance(values, dict):
+            flat_scores[f"eccv/{m}_i2t"] = values.get('i2t', 0.0)
+            flat_scores[f"eccv/{m}_t2i"] = values.get('t2i', 0.0)
+        else:
+            flat_scores[f"eccv/{m}"] = values
+
+    wandb.log(flat_scores)
+    wandb.finish()
 
 
 if __name__ == "__main__":
