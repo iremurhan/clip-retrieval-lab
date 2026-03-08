@@ -1,0 +1,17 @@
+beyza.urhan@ultramarine:~/clip-retrieval-lab$ bash scripts/start_eval.sh configs/config_coco.yaml test eccv
+==========================================
+  ECCV Benchmark — Batch Submission
+==========================================
+Submitting: eval_coco_baseline_256
+  Checkpoint: /output/results/coco/models/coco_baseline_256.pth
+Submitted batch job 22316
+Submitting: eval_coco_fne_0.99
+  Checkpoint: /output/results/coco/models/coco_fne_0.99.pth
+Submitted batch job 22317
+Submitting: eval_mixed_img_aug
+  Checkpoint: /output/results/coco/models/mixed_img_aug.pth
+Submitted batch job 22318
+Submitting: eval_clip-vit-large-patch14-336
+  Checkpoint: openai/clip-vit-large-patch14-336
+Submitted batch job 22319
+All jobs submitted.
