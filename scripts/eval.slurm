@@ -40,7 +40,7 @@ SPLIT="${3:-test}"
 MODE="${4:-normal}"
 
 # Set output directory
-JOB_DIR="/output/results/eval_${SLURM_JOB_ID}"
+JOB_DIR="/output/results/coco/${SLURM_JOB_ID}"
 mkdir -p "$JOB_DIR"
 
 echo "=========================================="

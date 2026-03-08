@@ -9,552 +9,168 @@ Two modes:
      on COCO Karpathy test split (5000 images, 25000 captions).
 
 Checkpoint handling:
-    .pth file   → load_state_dict(strict=False) onto DualEncoder
-    HF model ID → zero-shot, no weight loading (DualEncoder uses pretrained)
+    .pth file   -> load_state_dict(strict=False) onto DualEncoder
+    HF model ID -> zero-shot, no weight loading (DualEncoder uses pretrained)
 
 Usage:
     # Standard evaluation
-    python tools/eval.py --config configs/config_coco.yaml \\
+    python tools/eval.py --config configs/config_coco.yaml \
         --checkpoint /path/to/best_model.pth --split test
 
-    # ECCV evaluation
-    python tools/eval.py --config configs/config_coco.yaml \\
+    # ECCV evaluation (COCO only)
+    python tools/eval.py --config configs/config_coco.yaml \
         --checkpoint /path/to/best_model.pth --eccv
 
     # Zero-shot
-    python tools/eval.py --config configs/config_coco.yaml \\
+    python tools/eval.py --config configs/config_coco.yaml \
         --checkpoint openai/clip-vit-large-patch14-336 --split test
 """
 
 import argparse
+import os
+import torch
 import json
 import logging
-import os
-import sys
-
 import numpy as np
-import torch
-from PIL import Image
 from tqdm import tqdm
 from transformers import CLIPTokenizer
 
-# ---------------------------------------------------------------------------
-# Project imports
-# ---------------------------------------------------------------------------
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from src.setup import setup_config, setup_seed
+from src.setup import setup_config
+from src.data import create_image_text_dataloader
 from src.model import DualEncoder
-from src.data import build_eval_transform, create_image_text_dataloader
-from src.metrics import compute_recall_at_k, compute_map_at_k
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-    datefmt="%m/%d/%Y %H:%M:%S",
-    level=logging.INFO,
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Model Loading
-# ═══════════════════════════════════════════════════════════════════════════
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate Cross-Modal Retrieval")
+    parser.add_argument("--config", type=str, required=True, help="Path to config")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to .pth or HF model name")
+    parser.add_argument("--split", type=str, default="test", help="Dataset split")
+    parser.add_argument("--eccv", action="store_true", help="Run ECCV evaluation protocol (COCO only)")
+    args = parser.parse_args()
 
-def load_model(config, checkpoint, device):
-    """
-    Build DualEncoder and optionally load fine-tuned weights.
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    config = setup_config(config_path=args.config)
 
-    If *checkpoint* ends with `.pth`, weights are loaded via
-    load_state_dict(strict=False).  Otherwise *checkpoint* is treated as a
-    HuggingFace model identifier (e.g. ``openai/clip-vit-large-patch14-336``)
-    and the config's ``image_model_name`` is overridden so that DualEncoder
-    loads pretrained weights directly — no load_state_dict call is made.
-
-    Args:
-        config: Merged config dict (mutated in-place for zero-shot override).
-        checkpoint: .pth path **or** HuggingFace model ID **or** None.
-        device: torch.device.
-
-    Returns:
-        DualEncoder in eval mode on *device*.
-    """
-    is_checkpoint = checkpoint is not None and checkpoint.endswith(".pth")
-    is_zeroshot_override = checkpoint is not None and not checkpoint.endswith(".pth")
-
-    if is_zeroshot_override:
-        logger.info(f"Zero-shot override: setting model to '{checkpoint}'")
-        config["model"]["image_model_name"] = checkpoint
-
+    logger.info("Loading model and tokenizer...")
+    tokenizer = CLIPTokenizer.from_pretrained(config['model']['image_model_name'])
     model = DualEncoder(config).to(device)
 
-    if is_checkpoint:
-        if not os.path.isfile(checkpoint):
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-        logger.info(f"Loading checkpoint (strict=False): {checkpoint}")
-        ckpt = torch.load(checkpoint, map_location=device)
-        state_dict = ckpt.get("model_state_dict", ckpt)
-        result = model.load_state_dict(state_dict, strict=False)
-        if result.missing_keys:
-            logger.warning(f"Missing keys ({len(result.missing_keys)}): {result.missing_keys[:5]}")
-        if result.unexpected_keys:
-            logger.warning(f"Unexpected keys ({len(result.unexpected_keys)}): {result.unexpected_keys[:5]}")
+    if args.checkpoint.endswith('.pth'):
+        logger.info(f"Loading weights from checkpoint: {args.checkpoint}")
+        ckpt = torch.load(args.checkpoint, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'], strict=False)
     else:
-        logger.info("Using pretrained weights (zero-shot).")
+        logger.info(f"Zero-shot mode (base weights): {args.checkpoint}")
 
     model.eval()
-    return model
 
+    logger.info("Creating DataLoader...")
+    loader = create_image_text_dataloader(config, tokenizer, split=args.split)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Data Loading — COCO Karpathy test filtered by eccv_caption IDs
-# ═══════════════════════════════════════════════════════════════════════════
+    logger.info("Extracting embeddings. Please wait...")
+    img_embeds_list, txt_embeds_list, image_ids_list = [], [], []
 
-def load_eccv_test_data(karpathy_json_path, images_root, eccv_coco_ids):
-    """
-    Extract 5000 images and 25000 captions from Karpathy JSON, ordered by
-    the canonical caption IDs from ``eccv_caption.Metrics().coco_ids``.
+    with torch.no_grad(), torch.amp.autocast(device_type='cuda'):
+        for batch in tqdm(loader, desc="Forward Pass"):
+            images = batch['image'].to(device)
+            input_ids = batch['input_ids'].to(device)
+            attn_mask = batch['attention_mask'].to(device)
 
-    Args:
-        karpathy_json_path: Path to ``dataset_coco.json`` (Karpathy format).
-        images_root: Root directory for COCO images.
-        eccv_coco_ids: Ordered caption IDs from eccv_caption.
+            img_emb, txt_emb = model(images, input_ids, attn_mask)
 
-    Returns:
-        ordered_images:   list[(image_id, image_path)]  — unique, encounter order
-        ordered_captions: list[(caption_id, caption_text)] — eccv_coco_ids order
-    """
-    logger.info(f"Loading Karpathy JSON: {karpathy_json_path}")
-    with open(karpathy_json_path, "r") as f:
-        data = json.load(f)
-
-    # Build sentid → entry lookup (test split only)
-    sentid_lookup = {}
-    for img_entry in data["images"]:
-        if img_entry["split"] != "test":
-            continue
-
-        _cocoid = img_entry.get("cocoid")
-        _imgid = img_entry.get("imgid")
-        _id = img_entry.get("id")
-        if _cocoid is not None:
-            img_id = int(_cocoid)
-        elif _imgid is not None:
-            img_id = int(_imgid)
-        elif _id is not None:
-            img_id = int(_id)
-        else:
-            logger.warning(f"Skipping image entry with no ID: {img_entry.get('filename')}")
-            continue
-        filepath = img_entry.get("filepath", "")
-        filename = img_entry.get("filename", "")
-
-        for sent in img_entry["sentences"]:
-            sentid_lookup[int(sent["sentid"])] = {
-                "image_id": img_id,
-                "caption": sent["raw"],
-                "filepath": filepath,
-                "filename": filename,
-            }
-
-    # Iterate in eccv canonical order
-    eccv_ids = eccv_coco_ids.tolist() if isinstance(eccv_coco_ids, np.ndarray) else list(eccv_coco_ids)
-
-    ordered_captions = []
-    seen_iids = set()
-    ordered_images = []
-    missing = 0
-
-    for cid in eccv_ids:
-        entry = sentid_lookup.get(cid)
-        if entry is None:
-            missing += 1
-            if missing <= 5:
-                logger.error(f"ECCV caption ID {cid} not found in Karpathy test split.")
-            continue
-
-        ordered_captions.append((cid, entry["caption"]))
-
-        iid = entry["image_id"]
-        if iid not in seen_iids:
-            seen_iids.add(iid)
-            fp = entry["filepath"].strip()
-            fn = entry["filename"]
-            img_path = os.path.join(images_root, fp, fn) if fp else os.path.join(images_root, fn)
-            if not os.path.exists(img_path):
-                fallback = os.path.join(images_root, fn)
-                logger.warning(f"Path not found: {img_path} → falling back to {fallback}")
-                img_path = fallback
-            ordered_images.append((iid, img_path))
-
-    logger.info(f"ECCV data: {len(ordered_images)} images, {len(ordered_captions)} captions (missing: {missing})")
-
-    if missing > 0:
-        raise ValueError(
-            f"FATAL: {missing} ECCV caption IDs not found in Karpathy test split. "
-            f"Cannot produce valid 5000×25000 matrix. "
-            f"Verify dataset_coco.json matches the eccv_caption package version."
-        )
-
-    if len(ordered_images) != 5000 or len(ordered_captions) != 25000:
-        raise ValueError(
-            f"DIMENSION MISMATCH: Expected 5000 images / 25000 captions, "
-            f"got {len(ordered_images)} / {len(ordered_captions)}. "
-            f"The 5000×25000 contract is non-negotiable."
-        )
-
-    return ordered_images, ordered_captions
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Embedding Computation
-# ═══════════════════════════════════════════════════════════════════════════
-
-@torch.no_grad()
-def compute_embeddings(model, tokenizer, ordered_images, ordered_captions,
-                       transform, max_length, device, batch_size):
-    """
-    Compute L2-normalized image and text embeddings under no_grad + AMP.
-
-    Returns:
-        img_embeds: np.ndarray [N_images, D]
-        txt_embeds: np.ndarray [N_captions, D]
-        all_iids:   np.ndarray [N_images]
-        all_cids:   np.ndarray [N_captions]
-    """
-    use_amp = device.type == "cuda"
-
-    # --- Image embeddings ---
-    logger.info(f"Encoding {len(ordered_images)} images...")
-    img_embeds_list = []
-    all_iids = []
-
-    for i in tqdm(range(0, len(ordered_images), batch_size), desc="Images"):
-        batch_imgs = []
-        for j in range(i, min(i + batch_size, len(ordered_images))):
-            iid, img_path = ordered_images[j]
-            image = Image.open(img_path).convert("RGB")
-            batch_imgs.append(transform(image))
-            all_iids.append(iid)
-
-        pixel_values = torch.stack(batch_imgs).to(device)
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            emb = model.encode_image(pixel_values)
-        img_embeds_list.append(emb.cpu())
-
-    img_embeds = torch.cat(img_embeds_list, dim=0).numpy()
-
-    # --- Text embeddings ---
-    logger.info(f"Encoding {len(ordered_captions)} captions...")
-    txt_embeds_list = []
-    all_cids = []
-
-    for i in tqdm(range(0, len(ordered_captions), batch_size), desc="Captions"):
-        batch_texts = []
-        for j in range(i, min(i + batch_size, len(ordered_captions))):
-            cid, caption = ordered_captions[j]
-            all_cids.append(cid)
-            batch_texts.append(caption)
-
-        tok = tokenizer(batch_texts, padding="max_length", truncation=True,
-                        max_length=max_length, return_tensors="pt")
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            emb = model.encode_text(tok["input_ids"].to(device),
-                                    tok["attention_mask"].to(device))
-        txt_embeds_list.append(emb.cpu())
-
-    txt_embeds = torch.cat(txt_embeds_list, dim=0).numpy()
-
-    logger.info(f"Embeddings: img={img_embeds.shape}, txt={txt_embeds.shape}")
-    return img_embeds, txt_embeds, np.array(all_iids), np.array(all_cids)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Similarity Matrix + Retrieval Dict Construction
-# ═══════════════════════════════════════════════════════════════════════════
-
-@torch.no_grad()
-def build_sim_and_retrieval_dicts(img_embeds, txt_embeds, all_iids, all_cids,
-                                  device, K=50):
-    """
-    1. Compute cosine similarity matrix on GPU  (5000 × 25000).
-    2. Transfer to CPU as numpy  (.cpu().numpy()).
-    3. Build i2t / t2i dicts via descending argsort on numpy.
-
-    Args:
-        img_embeds: np.ndarray [N_images, D]  (already L2-normalised)
-        txt_embeds: np.ndarray [N_captions, D] (already L2-normalised)
-        all_iids:   np.ndarray of image IDs
-        all_cids:   np.ndarray of caption IDs
-        device:     torch.device
-        K:          Top-K results per query (50 sufficient for ECCV max=48)
-
-    Returns:
-        i2t: {image_id: [sorted caption_ids by descending similarity]}
-        t2i: {caption_id: [sorted image_ids by descending similarity]}
-    """
-    # Matmul on GPU, then immediately move to numpy to free GPU memory
-    img_t = torch.from_numpy(img_embeds).to(device)
-    txt_t = torch.from_numpy(txt_embeds).to(device)
-    sims = (img_t @ txt_t.T).cpu().numpy()  # [N_images, N_captions]
-    del img_t, txt_t
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    logger.info(f"Similarity matrix: {sims.shape} → numpy, building i2t/t2i (K={K})...")
-
-    # --- i2t: for each image, rank captions by descending similarity ---
-    i2t = {}
-    for idx, iid in enumerate(all_iids):
-        sorted_indices = np.argsort(-sims[idx])[:K]  # descending
-        i2t[int(iid)] = [int(all_cids[i]) for i in sorted_indices]
-
-    # --- t2i: for each caption, rank images by descending similarity ---
-    t2i = {}
-    for idx, cid in enumerate(all_cids):
-        sorted_indices = np.argsort(-sims[:, idx])[:K]  # descending
-        t2i[int(cid)] = [int(all_iids[i]) for i in sorted_indices]
-
-    return i2t, t2i
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Result Display
-# ═══════════════════════════════════════════════════════════════════════════
-
-def print_scores(scores, label):
-    """Pretty-print all eccv_caption metrics as an aligned terminal table."""
-    logger.info("")
-    logger.info("=" * 72)
-    logger.info(f"  {label}")
-    logger.info("=" * 72)
-    logger.info(f"  {'Metric':<28s} {'I2T':>12s}   {'T2I':>12s}")
-    logger.info(f"  {'-'*28} {'-'*12}   {'-'*12}")
-
-    for key in sorted(scores.keys()):
-        val = scores[key]
-        if isinstance(val, dict):
-            i2t_s = f"{val.get('i2t', 0):.4f}" if isinstance(val.get("i2t"), float) else "—"
-            t2i_s = f"{val.get('t2i', 0):.4f}" if isinstance(val.get("t2i"), float) else "—"
-            logger.info(f"  {key:<28s} {i2t_s:>12s}   {t2i_s:>12s}")
-
-    logger.info("=" * 72)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# WandB Hook (optional)
-# ═══════════════════════════════════════════════════════════════════════════
-
-def log_to_wandb(scores, config, run_name):
-    """Log scores to WandB retrieval-benchmark project as flat metrics + Table."""
-    import wandb
-
-    project = config.get("logging", {}).get("wandb_project", "retrieval-benchmark")
-    job_id = os.environ.get("SLURM_JOB_ID", "local")
-
-    wandb.init(
-        project=project,
-        name=run_name or f"{job_id}_eccv_eval",
-        config={"evaluation": "eccv_caption"},
-        job_type="benchmark",
-    )
-
-    flat = {}
-    for metric_name, dirs in scores.items():
-        if isinstance(dirs, dict):
-            for d, v in dirs.items():
-                flat[f"{metric_name}/{d}"] = v
-    wandb.log(flat)
-
-    table = wandb.Table(columns=["metric", "i2t", "t2i"])
-    for metric_name, dirs in sorted(scores.items()):
-        if isinstance(dirs, dict):
-            table.add_data(metric_name,
-                           round(dirs.get("i2t", 0), 4),
-                           round(dirs.get("t2i", 0), 4))
-    wandb.log({"eccv_results": table})
-
-    for k, v in flat.items():
-        wandb.run.summary[k] = v
-
-    wandb.finish()
-    logger.info(f"Results logged to WandB project '{project}'.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Standard Evaluation  (R@K, MAP@K via src.metrics)
-# ═══════════════════════════════════════════════════════════════════════════
-
-@torch.no_grad()
-def run_standard_eval(model, config, tokenizer, split, device):
-    """
-    Standard evaluation replicating Trainer.evaluate logic.
-
-    Loads data via create_image_text_dataloader, extracts embeddings with
-    AMP, deduplicates images by image_id, and computes Recall@K + MAP@K.
-    """
-    logger.info(f"Standard evaluation on split='{split}'...")
-
-    loader = create_image_text_dataloader(config, tokenizer, split=split)
-    logger.info(f"DataLoader: {len(loader)} batches, {len(loader.dataset)} samples.")
-
-    img_embeds_list = []
-    txt_embeds_list = []
-    image_ids_list = []
-    use_amp = device.type == "cuda"
-
-    for batch in tqdm(loader, desc=f"Eval [{split}]"):
-        images = batch["image"].to(device)
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-
-        with torch.amp.autocast("cuda", enabled=use_amp):
-            img_emb, txt_emb = model(images, input_ids, attention_mask)
-
-        img_embeds_list.append(img_emb.cpu())
-        txt_embeds_list.append(txt_emb.cpu())
-        image_ids_list.append(batch["image_id"].cpu())
+            img_embeds_list.append(img_emb.cpu())
+            txt_embeds_list.append(txt_emb.cpu())
+            image_ids_list.append(batch['image_id'].cpu())
 
     img_embeds = torch.cat(img_embeds_list, dim=0)
     txt_embeds = torch.cat(txt_embeds_list, dim=0)
     image_ids = torch.cat(image_ids_list, dim=0)
 
     # Deduplicate images (keep first occurrence per image_id)
-    seen = set()
-    first_indices = []
-    unique_ids_list = []
-    for idx in range(len(image_ids)):
-        iid = image_ids[idx].item()
-        if iid not in seen:
-            seen.add(iid)
-            first_indices.append(idx)
-            unique_ids_list.append(iid)
+    seen_image_ids = set()
+    unique_img_indices = []
+    unique_image_ids_list = []
 
-    unique_image_ids = torch.tensor(unique_ids_list, dtype=image_ids.dtype)
-    img_embeds_unique = img_embeds[first_indices]
+    for idx, img_id_tensor in enumerate(image_ids):
+        img_id = img_id_tensor.item()
+        if img_id not in seen_image_ids:
+            seen_image_ids.add(img_id)
+            unique_img_indices.append(idx)
+            unique_image_ids_list.append(img_id)
 
-    logger.info(f"Embeddings: {img_embeds_unique.shape[0]} unique images, {txt_embeds.shape[0]} captions")
+    img_embeds_unique = img_embeds[unique_img_indices]
 
-    r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
-    map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10])
-
-    metrics = {
-        "t2i_r1": r_t2i[1], "t2i_r5": r_t2i[5], "t2i_r10": r_t2i[10],
-        "i2t_r1": r_i2t[1], "i2t_r5": r_i2t[5], "i2t_r10": r_i2t[10],
-        "t2i_map5": map_t2i[5], "t2i_map10": map_t2i[10],
-        "i2t_map5": map_i2t[5], "i2t_map10": map_i2t[10],
-    }
-
-    logger.info("")
-    logger.info("=" * 72)
-    logger.info(f"  Standard Evaluation — split={split}")
-    logger.info("=" * 72)
-    logger.info(f"  {'Metric':<20s} {'I2T':>10s}   {'T2I':>10s}")
-    logger.info(f"  {'-'*20} {'-'*10}   {'-'*10}")
-    logger.info(f"  {'R@1':<20s} {metrics['i2t_r1']:>10.2f}   {metrics['t2i_r1']:>10.2f}")
-    logger.info(f"  {'R@5':<20s} {metrics['i2t_r5']:>10.2f}   {metrics['t2i_r5']:>10.2f}")
-    logger.info(f"  {'R@10':<20s} {metrics['i2t_r10']:>10.2f}   {metrics['t2i_r10']:>10.2f}")
-    logger.info(f"  {'MAP@5':<20s} {metrics['i2t_map5']:>10.2f}   {metrics['t2i_map5']:>10.2f}")
-    logger.info(f"  {'MAP@10':<20s} {metrics['i2t_map10']:>10.2f}   {metrics['t2i_map10']:>10.2f}")
-    logger.info("=" * 72)
-
-    return metrics
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Main
-# ═══════════════════════════════════════════════════════════════════════════
-
-def main():
-    parser = argparse.ArgumentParser(description="Unified DualEncoder Evaluation (Standard + ECCV)")
-    parser.add_argument("--config", type=str, required=True,
-                        help="Config path (e.g. configs/config_coco.yaml)")
-    parser.add_argument("--checkpoint", type=str, default=None,
-                        help=".pth checkpoint OR HuggingFace model ID for zero-shot")
-    parser.add_argument("--split", type=str, default="test", choices=["val", "test"],
-                        help="Data split for standard evaluation (default: test)")
-    parser.add_argument("--eccv", action="store_true",
-                        help="Enable ECCV Caption protocol instead of standard eval")
-    parser.add_argument("--run_name", type=str, default=None,
-                        help="WandB run name (optional)")
-    parser.add_argument("--batch_size", type=int, default=64,
-                        help="Batch size for embedding computation (default: 64)")
-    parser.add_argument("--override", nargs="*", default=[],
-                        help="Config overrides as key=value")
-    args = parser.parse_args()
-
-    # ── Config ──
-    config = setup_config(config_path=args.config, overrides=args.override)
-    config.setdefault("data", {})
-    config["data"].setdefault("max_length", 77)
-    config["data"].setdefault("image_size", 336)
-    setup_seed(config.get("training", {}).get("seed", 42))
-
-    # ── Device ──
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Device: {device}")
-
-    # ── Model ──
-    model = load_model(config, args.checkpoint, device)
-
-    # ── Tokenizer ──
-    model_name = config["model"]["image_model_name"]
-    tokenizer = CLIPTokenizer.from_pretrained(model_name)
-
-    if args.eccv:
-        # ── ECCV Caption Protocol ──
-        from eccv_caption import Metrics as ECCVMetrics
-
-        logger.info("Loading ECCV Caption protocol...")
-        eccv_metric = ECCVMetrics()
-        eccv_coco_ids = eccv_metric.coco_ids
-        logger.info(f"ECCV canonical caption IDs: {len(eccv_coco_ids)}")
-
-        images_root = config["data"]["images_path"]
-        captions_path = config["data"]["captions_path"]
-        ordered_images, ordered_captions = load_eccv_test_data(
-            captions_path, images_root, eccv_coco_ids
+    # ── Standard evaluation mode (R@K, MAP@K) ──
+    if not args.eccv:
+        logger.info("Running standard evaluation (R@K, MAP)...")
+        from src.metrics import compute_recall_at_k, compute_map_at_k
+        unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
+        r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
+        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10])
+        logger.info(
+            f"\nResults:\n"
+            f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f}\n"
+            f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f}"
         )
+        return
 
-        transform = build_eval_transform(config["data"]["image_size"])
-        img_embeds, txt_embeds, all_iids, all_cids = compute_embeddings(
-            model, tokenizer, ordered_images, ordered_captions,
-            transform, config["data"]["max_length"], device, args.batch_size,
-        )
+    # ── ECCV evaluation mode (COCO only) ──
+    logger.info("Starting ECCV evaluation...")
 
-        i2t, t2i = build_sim_and_retrieval_dicts(
-            img_embeds, txt_embeds, all_iids, all_cids, device
-        )
+    # Build caption ID list from Karpathy JSON to map embeddings -> COCO sentids
+    captions_path = config['data']['captions_path']
+    with open(captions_path, 'r') as f:
+        data = json.load(f)
 
-        logger.info("Computing eccv_caption metrics...")
-        scores = eccv_metric.compute_all_metrics(
-            i2t, t2i,
-            target_metrics=(
-                "eccv_r1", "eccv_map_at_r", "eccv_rprecision",
-                "coco_1k_recalls", "coco_5k_recalls", "cxc_recalls",
-            ),
-            Ks=(1, 5, 10),
-            verbose=False,
-        )
+    caption_ids = []
+    for img in data['images']:
+        current_split = img['split']
+        if current_split == 'restval' and args.split == 'train':
+            current_split = 'train'
 
-        label = args.checkpoint or model_name
-        print_scores(scores, f"ECCV Benchmark — {label}")
+        if current_split == args.split:
+            for sent in img['sentences'][:5]:
+                caption_ids.append(sent['sentid'])
 
-        use_wandb = config.get("logging", {}).get("use_wandb", True)
-        debug_mode = config.get("debug", {}).get("debug_mode", False)
-        if use_wandb and not debug_mode:
-            log_to_wandb(scores, config, args.run_name)
-    else:
-        # ── Standard R@K + MAP@K ──
-        run_standard_eval(model, config, tokenizer, args.split, device)
+    if len(caption_ids) != len(txt_embeds):
+        logger.error(f"Mismatch: Found {len(caption_ids)} captions in JSON but {len(txt_embeds)} embeddings.")
+        return
 
-    logger.info("Done.")
+    # Compute cosine similarity matrix
+    logger.info("Computing similarity matrix...")
+    img_embeds_unique = torch.nn.functional.normalize(img_embeds_unique, p=2, dim=-1)
+    txt_embeds = torch.nn.functional.normalize(txt_embeds, p=2, dim=-1)
+    sim_matrix = torch.matmul(img_embeds_unique, txt_embeds.T).numpy()
+
+    # Sort by descending similarity and build ECCV-format retrieval dicts
+    logger.info("Sorting matrix and building ECCV retrieval dicts...")
+    i2t = {}
+    t2i = {}
+
+    for i, img_id in enumerate(tqdm(unique_image_ids_list, desc="I2T Sorting")):
+        sorted_caption_indices = np.argsort(-sim_matrix[i, :])
+        i2t[img_id] = [caption_ids[idx] for idx in sorted_caption_indices]
+
+    for j, cap_id in enumerate(tqdm(caption_ids, desc="T2I Sorting")):
+        sorted_img_indices = np.argsort(-sim_matrix[:, j])
+        t2i[cap_id] = [unique_image_ids_list[idx] for idx in sorted_img_indices]
+
+    # Delegate to eccv_caption package
+    logger.info("Calling eccv_caption library...")
+    from eccv_caption import Metrics
+    metric = Metrics()
+    scores = metric.compute_all_metrics(
+        i2t, t2i,
+        target_metrics=('eccv_r1', 'eccv_map_at_r', 'eccv_rprecision', 'coco_1k_recalls', 'coco_5k_recalls', 'cxc_recalls'),
+        Ks=(1, 5, 10)
+    )
+
+    logger.info("====================================")
+    logger.info(f"ECCV RESULTS:\n{json.dumps(scores, indent=4)}")
+    logger.info("====================================")
 
 
 if __name__ == "__main__":
