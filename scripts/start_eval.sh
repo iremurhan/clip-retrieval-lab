@@ -38,9 +38,9 @@ MODE="${3:-normal}" # 'normal' or 'eccv'
 
 # NOTE: These paths are INSIDE the container (mounted paths).
 MODELS=(
-    "/output/results/coco/models/coco_baseline_256.pth"
-    "/output/results/coco/models/coco_fne_0.99.pth"
-    "/output/results/coco/models/mixed_img_aug.pth"
+    "/output/results/coco/models/2-coco_baseline_256.pth"
+    "/output/results/coco/models/2-coco_fne_0.99.pth"
+    "/output/results/coco/models/2-mixed_img_aug.pth"
     "openai/clip-vit-large-patch14-336"
 )
 
