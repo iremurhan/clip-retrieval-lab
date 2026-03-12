@@ -15,3 +15,6 @@ __pycache__/
 datasets/
 checkpoints
 *.pt
+
+# Weights & Biases
+wandb/
