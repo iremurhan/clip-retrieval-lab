@@ -7,7 +7,7 @@
 #
 # Usage:
 #   bash scripts/start_eval.sh [CONFIG] [SPLIT] [MODE]
-#
+#   bash scripts/start_eval.sh configs/config_coco.yaml test eccv
 # Arguments (positional, all optional):
 #   CONFIG   Config file path   (default: configs/config_coco.yaml)
 #   SPLIT    val | test         (default: test)
