@@ -190,13 +190,6 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         split=split,
     )
 
-    # Debug Truncation
-    if config.get('debug', {}).get('debug_mode', False):
-        debug_limit = config['debug'].get('debug_samples', 100)
-        if len(dataset.samples) > debug_limit:
-            logger.warning(f"DEBUG MODE: Truncating dataset to {debug_limit} samples.")
-            dataset.samples = dataset.samples[:debug_limit]
-
     loader = DataLoader(
         dataset,
         batch_size=config['training']['batch_size'], # Base Config yapısına uygun path

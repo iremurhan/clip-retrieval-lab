@@ -100,10 +100,7 @@ def main():
     setup_seed(config["training"]["seed"])
 
     # 3. WandB
-    debug_mode = config["debug"]["debug_mode"]
-    if debug_mode:
-        log.info("Debug mode: using train set as validation set.")
-    setup_tracker(config, debug_mode=debug_mode)
+    setup_tracker(config)
 
     # 4. Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -113,10 +110,7 @@ def main():
     model_name = config["model"]["image_model_name"]
     tokenizer = CLIPTokenizer.from_pretrained(model_name)
     train_loader = create_image_text_dataloader(config, tokenizer, split="train")
-    if debug_mode:
-        val_loader = train_loader
-    else:
-        val_loader = create_image_text_dataloader(config, tokenizer, split="val")
+    val_loader = create_image_text_dataloader(config, tokenizer, split="val")
 
     # 6. Model, loss, optimizer, scheduler
     model = DualEncoder(config).to(device)

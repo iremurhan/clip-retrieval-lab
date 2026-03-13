@@ -103,7 +103,6 @@ python3 -u run.py \
     --config "$CONFIG_FILE" \
     --resume "$RESUME_PATH" \
     --override \
-        debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
         logging.wandb_project="$WANDB_PROJECT_AUTO" \
         logging.wandb_id="$WANDB_ID" \
