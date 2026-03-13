@@ -84,26 +84,50 @@ def setup_config(base_path=None, config_path=None, overrides=None):
         apply_overrides(config, overrides)
     return config
 
-
 def make_wandb_config(config):
-    """Build a minimal config dict for WandB (scientific params only)."""
-    images_path = config.get("data", {}).get("images_path", "")
-    dataset_name = "flickr30k" if "flickr" in images_path else "coco"
-    return {
-        "dataset": dataset_name,
-        "model": {
-            "name": config.get("model", {}).get("image_model_name"),
-            "unfreeze": config.get("model", {}).get("unfreeze_vision_layers"),
-            "strategy": config.get("model", {}).get("unfreeze_strategy"),
-        },
-        "batch_size": config.get("training", {}).get("batch_size"),
-        "epochs": config.get("training", {}).get("epochs"),
-        "lr": {
-            "head": config.get("training", {}).get("head_lr"),
-            "backbone": config.get("training", {}).get("backbone_lr"),
-            "clip": config.get("training", {}).get("clip_projection_lr"),
-        },
+    """
+    Build a comprehensive config dict for WandB, ordered by importance.
+    System metrics (GPU, VRAM, CPU) are automatically logged by WandB.
+    """
+    training_cfg = config.get("training", {})
+    loss_cfg = config.get("loss", {})
+    model_cfg = config.get("model", {})
+    mining_cfg = config.get("mining", {})
+    data_cfg = config.get("data", {})
+
+    # Calculate effective batch size based on GradCache usage
+    use_grad_cache = training_cfg.get("use_grad_cache", False)
+    effective_bs = training_cfg.get("batch_size", 128)
+    micro_bs = training_cfg.get("micro_batch_size", effective_bs) if use_grad_cache else effective_bs
+
+    # Hierarchical structure for better readability in W&B dashboard
+    wandb_config = {
+        # 1. CRITICAL: Capacity and Architecture
+        "effective_batch_size": effective_bs,
+        "micro_batch_size": micro_bs,
+        "use_grad_cache": use_grad_cache,
+        "model_architecture": model_cfg,
+        
+        # 2. SCIENTIFIC PARAMETERS (Loss & Mining)
+        "loss_function": loss_cfg,
+        "mining_strategy": mining_cfg if mining_cfg.get("enabled", False) else "Disabled",
+        
+        # 3. OPTIMIZATION (LR, Epochs, Scheduler)
+        "epochs": training_cfg.get("epochs"),
+        "learning_rates": {k: v for k, v in training_cfg.items() if "lr" in k or "decay" in k},
+        "optimizer": training_cfg.get("optimizer"),
+        
+        # 4. DATASET SETTINGS
+        "dataset": "flickr30k" if "flickr" in data_cfg.get("images_path", "") else "coco",
+        "data_settings": data_cfg,
     }
+    
+    # Append any remaining parameters at the bottom
+    for key, value in config.items():
+        if key not in ["training", "loss", "model", "mining", "data", "logging", "debug"]:
+            wandb_config[key] = value
+
+    return wandb_config
 
 
 def format_run_name(job_id, dataset_name, exp_name=""):
@@ -156,4 +180,4 @@ def setup_tracker(config):
         # Otherwise allow WandB to create a new run or resume heuristically
         init_kwargs["resume"] = "allow"
 
-    wandb.init(**init_kwargs)
+    wandb.init(**init_kwargs)  # type: ignore
