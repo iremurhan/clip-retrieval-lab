@@ -86,7 +86,6 @@ export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 python3 -u run.py \
     --config "$CONFIG_FILE" \
     --override \
-        debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
         logging.wandb_project="$WANDB_PROJECT_AUTO" \
     > "$JOB_DIR/training.log" 2>&1
