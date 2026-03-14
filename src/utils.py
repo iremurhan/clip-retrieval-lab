@@ -58,8 +58,8 @@ def visualize_text_guided_attention(image, attn_probs, caption):
     if isinstance(image, torch.Tensor):
         # Assuming normalized image in [3, H, W] format
         # Denormalize using CLIP statistics
-        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(3, 1, 1)
-        std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(3, 1, 1)
+        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(3, 1, 1).to(image.device)
+        std = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(3, 1, 1).to(image.device)
         image = (image * std + mean).clamp(0, 1)
         image = (image * 255).byte().permute(1, 2, 0).cpu().numpy()
         image = Image.fromarray(image)
