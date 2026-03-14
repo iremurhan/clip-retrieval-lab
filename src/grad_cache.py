@@ -106,12 +106,12 @@ class GradCache:
             for img_chunk, txt_input_chunk, txt_mask_chunk in zip(img_chunks, txt_input_chunks, txt_mask_chunks):
                 if self.use_amp:
                     with torch.amp.autocast(device_type='cuda'):
-                        img_emb = self.model.encode_image(img_chunk)
+                        img_emb, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                         txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
                 else:
-                    img_emb = self.model.encode_image(img_chunk)
+                    img_emb, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                     txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
-                
+
                 cached_img_embeds.append(img_emb.detach())
                 cached_txt_embeds.append(txt_emb.detach())
         
@@ -138,10 +138,10 @@ class GradCache:
             # Re-compute embeddings WITH gradients for current micro-batch
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):
-                    img_emb_grad = self.model.encode_image(img_chunk)
+                    img_emb_grad, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                     txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
             else:
-                img_emb_grad = self.model.encode_image(img_chunk)
+                img_emb_grad, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                 txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
             
             # Build full-batch embeddings: Current chunk has gradients, others are cached (detached)
@@ -198,7 +198,7 @@ class GradCache:
         """Standard forward pass when gradient caching is not needed."""
         if self.use_amp:
             with torch.amp.autocast(device_type='cuda'):
-                img_embeds = self.model.encode_image(images)
+                img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
                 txt_embeds = self.model.encode_text(input_ids, attention_mask)
                 loss_dict = self.criterion(
                     img_embeds, txt_embeds,
@@ -206,12 +206,12 @@ class GradCache:
                     txt_aug_embeds=None
                 )
         else:
-            img_embeds = self.model.encode_image(images)
+            img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
             txt_embeds = self.model.encode_text(input_ids, attention_mask)
             loss_dict = self.criterion(
                 img_embeds, txt_embeds,
                 img_aug_embeds=None,
                 txt_aug_embeds=None
             )
-        
+
         return loss_dict
