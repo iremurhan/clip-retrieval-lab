@@ -22,8 +22,9 @@ import wandb
 import os
 import time
 import random
+import io
 from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k
-from .utils import compute_grad_norm
+from .utils import compute_grad_norm, visualize_text_guided_attention
 from .grad_cache import GradCache
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ class Trainer:
         # Initialize Mixed Precision Training (AMP)
         self.use_amp = torch.cuda.is_available()
         if self.use_amp:
-            self.scaler = torch.cuda.amp.GradScaler()
+            self.scaler = torch.amp.GradScaler('cuda')
             logger.info("Mixed Precision Training (AMP) enabled.")
         else:
             self.scaler = None
@@ -182,6 +183,7 @@ class Trainer:
 
         # Initialize grad_norm for logging
         grad_norm = 0.0
+        loss_dict = None  # Only set when use_clip_loss=False
         end_time = time.time()
         
         for step, batch in enumerate(self.train_loader):
@@ -234,7 +236,7 @@ class Trainer:
                         if use_clip_loss:
                             loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                         else:
-                            img_embeds = self.model.encode_image(images)
+                            img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
                             txt_embeds = self.model.encode_text(input_ids, attention_mask)
                             neg_txt_embeds = None
                             if neg_input_ids is not None:
@@ -242,24 +244,24 @@ class Trainer:
                             img_aug_embeds = None
                             txt_aug_embeds = None
                             if intra_img_weight > 0:
-                                img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                                img_aug_embeds, _ = self.model.encode_image(batch['image_aug'].to(self.device), input_ids, attention_mask)
                             if intra_txt_weight > 0:
                                 txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
-                            
+
                             loss_dict = self.criterion(
                                 img_embeds, txt_embeds,
                                 img_aug_embeds, txt_aug_embeds
                             )
                             loss = loss_dict["loss_total"]
-                    
+
                     # Backward with gradient scaling
                     self.optimizer.zero_grad()
                     self.scaler.scale(loss).backward()
-                    
+
                     # Unscale gradients to compute true grad norm
                     self.scaler.unscale_(self.optimizer)
                     grad_norm = compute_grad_norm(self.model)
-                    
+
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
@@ -267,7 +269,7 @@ class Trainer:
                     if use_clip_loss:
                         loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                     else:
-                        img_embeds = self.model.encode_image(images)
+                        img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         neg_txt_embeds = None
                         if neg_input_ids is not None:
@@ -275,24 +277,24 @@ class Trainer:
                         img_aug_embeds = None
                         txt_aug_embeds = None
                         if intra_img_weight > 0:
-                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                            img_aug_embeds, _ = self.model.encode_image(batch['image_aug'].to(self.device), input_ids, attention_mask)
                         if intra_txt_weight > 0:
                             txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
-                        
+
                         # loss is now a dict
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
                             img_aug_embeds, txt_aug_embeds
                         )
                         loss = loss_dict["loss_total"]
-                    
+
                     # Backward
                     self.optimizer.zero_grad()
                     loss.backward()
-                    
+
                     # Compute grad norm before optimizer step
                     grad_norm = compute_grad_norm(self.model)
-                    
+
                     self.optimizer.step()
             
             self.scheduler.step()
@@ -325,16 +327,19 @@ class Trainer:
                     try:
                         log_dict = {
                             "epoch": epoch,
-                            "train/loss_total": loss_dict["loss_total"].item(),
-                            "train/loss_inter": loss_dict["loss_inter"].item(),
-                            "train/loss_intra_img": loss_dict["loss_intra_img"].item(),
-                            "train/loss_intra_txt": loss_dict["loss_intra_txt"].item(),
+                            "train/loss_total": loss.item(),
                             "train/epoch": fractional_epoch,
                             "train/step": step,
                             "train/grad_norm": grad_norm,
                             "train/samples_per_sec": samples_per_sec,
                             "train/batch_time": batch_time.val,
                         }
+                        # Component losses only available when loss_dict is defined
+                        # (not set on the use_clip_loss path)
+                        if loss_dict is not None:
+                            log_dict["train/loss_inter"] = loss_dict["loss_inter"].item()
+                            log_dict["train/loss_intra_img"] = loss_dict["loss_intra_img"].item()
+                            log_dict["train/loss_intra_txt"] = loss_dict["loss_intra_txt"].item()
                         log_dict.update(lr_dict)
                         wandb.log(log_dict)
                     except Exception as e:
@@ -443,6 +448,12 @@ class Trainer:
                     self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
                 except Exception as e:
                     logger.warning(f"Qualitative table logging failed: {e}")
+
+            if self.use_wandb:
+                try:
+                    self._log_attention_maps(epoch)
+                except Exception as e:
+                    logger.warning(f"Attention map logging failed: {e}")
             
         return r_t2i[1]
 
@@ -497,6 +508,68 @@ class Trainer:
             table.add_data(caption, gt_image, *retrieved_images)
 
         wandb.log({"val/qualitative_results": table}, commit=False)
+
+    def _log_attention_maps(self, epoch):
+        """
+        Log text-guided attention maps for the first 15 validation samples.
+
+        This function extracts attention probabilities from the CrossAttentionFusion module
+        for a fixed set of 15 samples (indices 0-14) and visualizes them using matplotlib.
+        The visualizations are uploaded to Weights & Biases for monitoring attention patterns.
+        """
+        import matplotlib.pyplot as plt
+
+        dataset = self.val_loader.dataset
+        num_samples_to_log = min(15, len(dataset))
+
+        # Extract first 15 samples
+        indices = list(range(num_samples_to_log))
+        logger.info(f"Logging attention maps for first {num_samples_to_log} validation samples...")
+
+        attention_images = []
+
+        for sample_idx in indices:
+            try:
+                # Load sample
+                sample = dataset[sample_idx]
+                image = sample['image'].unsqueeze(0).to(self.device)  # [1, 3, H, W]
+                input_ids = sample['input_ids'].unsqueeze(0).to(self.device)  # [1, L]
+                attention_mask = sample['attention_mask'].unsqueeze(0).to(self.device)  # [1, L]
+                caption = dataset.samples[sample_idx]['caption']
+
+                # Forward pass to get attention probs
+                with torch.no_grad():
+                    self.model.eval()
+                    _, attn_probs = self.model.encode_image(image, input_ids, attention_mask)
+
+                # Visualize
+                if attn_probs is not None:
+                    fig = visualize_text_guided_attention(image.squeeze(0), attn_probs.squeeze(0), caption)
+
+                    # Convert figure to wandb.Image
+                    # Save figure to buffer
+                    buf = io.BytesIO()
+                    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+                    buf.seek(0)
+
+                    # Create wandb.Image
+                    wandb_img = wandb.Image(buf, caption=f"Sample {sample_idx}: {caption[:50]}")
+                    attention_images.append(wandb_img)
+
+                    # Close figure to prevent memory leak
+                    plt.close(fig)
+
+            except Exception as e:
+                logger.warning(f"Failed to log attention map for sample {sample_idx}: {e}")
+                continue
+
+        # Log all images together
+        if attention_images:
+            wandb.log(
+                {"val/attention_maps": attention_images},
+                commit=False
+            )
+            logger.info(f"Logged {len(attention_images)} attention maps to W&B.")
 
     def fit(self, start_epoch=0):
         eval_frequency = self.config['logging']['eval_freq']
