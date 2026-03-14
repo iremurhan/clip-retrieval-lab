@@ -74,9 +74,14 @@ def create_clip_optimizer(model, config):
 
 def create_lr_scheduler(optimizer, config, num_training_steps):
     """Create learning rate scheduler (cosine with warmup)."""
+    import warnings
     warmup = int(config["training"].get("warmup_epochs", 2))
     warmup_steps = min(warmup * (num_training_steps // config["training"]["epochs"]), num_training_steps)
-    return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
+    # Suppress the spurious PyTorch "lr_scheduler.step() before optimizer.step()" warning
+    # triggered by HuggingFace's LambdaLR calling step() internally during __init__.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
 
 
 def main():
