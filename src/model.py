@@ -69,6 +69,7 @@ class CrossAttentionFusion(nn.Module):
         Returns:
             fused_image: [B, vision_hidden_dim] - Fused image representation (squeezed)
             attn_probs: [B, 1, N] - Attention probability matrix for patches only (excluding [CLS])
+            Q: [B, 1, vision_hidden_dim] - Text query projection before attention (un-squeezed)
         """
         batch_size, num_tokens, vision_dim = image_patches.shape
         num_patches = num_tokens - 1  # Exclude [CLS] token (assumed to be at index 0)
@@ -101,7 +102,7 @@ class CrossAttentionFusion(nn.Module):
         # Note: For 336px input with 24x24 patch grid, reshape [B, 1, 576] to [B, 24, 24] during visualization
         attn_probs = attn_probs_full[:, :, 1:]  # [B, 1, N]
 
-        return fused_squeezed, attn_probs
+        return fused_squeezed, attn_probs, Q  # Q: [B, 1, vision_hidden_dim]
 
 
 class DualEncoder(nn.Module):
@@ -301,26 +302,39 @@ class DualEncoder(nn.Module):
                         if m.bias is not None:
                             nn.init.constant_(m.bias, 0)
 
-    def forward(self, images, input_ids, attention_mask):
+    def forward(self, images, input_ids, attention_mask, images_aug=None):
         """
-        Forward pass returning L2-normalized embeddings with text-guided image fusion.
+        Forward pass returning all branch embeddings as a dict.
 
         Args:
-            images: [Batch, 3, 336, 336] - Pixel values (336px for CLIP ViT-L/14-336)
-            input_ids: [Batch, SeqLen] - Tokenized text
-            attention_mask: [Batch, SeqLen] - Attention mask
+            images: [B, 3, 336, 336] - Pixel values
+            input_ids: [B, L] - Tokenized text
+            attention_mask: [B, L] - Attention mask
+            images_aug: [B, 3, 336, 336] optional - Augmented pixel values for L_i2i
 
         Returns:
-            img_embeds: [Batch, embed_dim] - L2 normalized image embeddings (text-guided)
-            txt_embeds: [Batch, embed_dim] - L2 normalized text embeddings
+            dict:
+                F_vit: [B, D] - Branch A image (ViT CLS, L2-normalized)
+                F_image_norm: [B, D] - Branch B image (cross-attn pooled orig, L2-normalized)
+                F_image_norm_aug: [B, D] or None - Branch B aug image (cross-attn pooled aug)
+                F_text_proj_norm: [B, D] - Branch C text (q_proj projected, L2-normalized)
+                F_text: [B, D] - Branch A text (encode_text, L2-normalized)
         """
-        # Image encoding with text-guided cross-attention fusion
-        img_embeds, _ = self.encode_image(images, input_ids, attention_mask)
+        F_vit, F_image_norm, F_text_proj_norm, _ = self.encode_image(images, input_ids, attention_mask)
 
-        # Text encoding
-        txt_embeds = self.encode_text(input_ids, attention_mask)
+        F_image_norm_aug = None
+        if images_aug is not None:
+            # Only F_image_norm_aug needed; discard F_vit_aug, F_text_proj_norm_aug, attn
+            _, F_image_norm_aug, _, _ = self.encode_image(images_aug, input_ids, attention_mask)
 
-        return img_embeds, txt_embeds
+        F_text = self.encode_text(input_ids, attention_mask)
+        return {
+            "F_vit": F_vit,                         # [B, D]
+            "F_image_norm": F_image_norm,           # [B, D]
+            "F_image_norm_aug": F_image_norm_aug,   # [B, D] or None
+            "F_text_proj_norm": F_text_proj_norm,   # [B, D]
+            "F_text": F_text,                       # [B, D]
+        }
 
     def encode_image(self, images, input_ids=None, attention_mask=None):
         """
@@ -335,8 +349,14 @@ class DualEncoder(nn.Module):
             attention_mask: [B, L] optional - Text attention mask
 
         Returns:
-            image_embeds: [B, embed_dim] - L2 normalized image embeddings
-            attn_probs: [B, 1, N] optional - Attention probabilities if text provided, else None
+            When text is provided (4-tuple):
+                F_vit: [B, clip_embed_dim] - Branch A: ViT CLS, L2-normalized
+                F_image_norm: [B, clip_embed_dim] - Branch B: cross-attn pooled, L2-normalized
+                F_text_proj_norm: [B, clip_embed_dim] - Branch C: q_proj text, L2-normalized
+                attn_probs: [B, 1, N] - Attention probabilities for patches only
+            When text is not provided (2-tuple):
+                image_embeds: [B, embed_dim] - L2 normalized image embeddings
+                None
         """
         # Get raw image features from CLIP vision model
         # Note: This returns the full vision_model outputs which include patch embeddings
@@ -356,23 +376,34 @@ class DualEncoder(nn.Module):
 
             # Apply cross-attention fusion
             # Use all image patches (including [CLS]) as K, V for maximum information flow
-            # Returns: pooled embedding [B, vision_hidden_dim] and attention probs for patches only [B, 1, N]
-            # Attention computed over all tokens for full context, but [CLS] excluded from returned probs for visualization
-            fused_image_embeds, attn_probs = self.cross_attn_fusion(text_embeds, image_patches_with_cls)  # [B, vision_hidden_dim], [B, 1, N]
+            # Returns: pooled embedding [B, vision_hidden_dim], attn probs [B, 1, N], text query Q [B, 1, vision_hidden_dim]
+            fused_image_embeds, attn_probs, Q = self.cross_attn_fusion(text_embeds, image_patches_with_cls)
 
-            # Project from vision_hidden_dim to clip_embed_dim if difference exists
-            # Then apply optional projection to target embed_dim
+            # Branch A: ViT CLS token -> visual_projection -> L2-normalize
+            vit_cls = image_patches_with_cls[:, 0, :]  # [B, N+1, D] -> [B, D]
+            F_vit = self.clip.visual_projection(vit_cls)  # [B, vision_hidden_dim] -> [B, clip_embed_dim]
+            if self.image_proj is not None:
+                F_vit = self.image_proj(F_vit)
+            F_vit = F.normalize(F_vit, p=2, dim=1)  # [B, clip_embed_dim]
+
+            # Branch B: cross-attn pooled image -> visual_projection -> L2-normalize
             if self.vision_hidden_dim != self.clip_embed_dim:
-                # Use CLIP's visual projection layer to go from vision_hidden_dim to clip_embed_dim
-                fused_image_embeds = self.clip.visual_projection(fused_image_embeds)
-
+                fused_image_embeds = self.clip.visual_projection(fused_image_embeds)  # [B, vision_hidden_dim] -> [B, clip_embed_dim]
             if self.image_proj is not None:
                 fused_image_embeds = self.image_proj(fused_image_embeds)
+            F_image_norm = F.normalize(fused_image_embeds, p=2, dim=1)  # [B, clip_embed_dim]
 
-            # Normalize and return with attention probs for W&B visualization
-            # Note: attn_probs shape is [B, 1, N] where N=576 for 336px input
-            # Reshape to [B, 24, 24] during visualization for 2D heatmap overlay
-            return F.normalize(fused_image_embeds, p=2, dim=1), attn_probs
+            # Branch C: W_text projected text CLS -> visual_projection -> L2-normalize
+            Q_squeezed = Q.squeeze(1)  # [B, 1, vision_hidden_dim] -> [B, vision_hidden_dim]
+            if self.vision_hidden_dim != self.clip_embed_dim:
+                F_text_proj = self.clip.visual_projection(Q_squeezed)  # [B, vision_hidden_dim] -> [B, clip_embed_dim]
+            else:
+                F_text_proj = Q_squeezed
+            if self.image_proj is not None:
+                F_text_proj = self.image_proj(F_text_proj)
+            F_text_proj_norm = F.normalize(F_text_proj, p=2, dim=1)  # [B, clip_embed_dim]
+
+            return F_vit, F_image_norm, F_text_proj_norm, attn_probs
 
         # Standard CLIP pooling case (no text guidance)
         else:
