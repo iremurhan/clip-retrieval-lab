@@ -61,95 +61,67 @@ class SymmetricInfoNCELoss(nn.Module):
     
     def __init__(self, config):
         super().__init__()
-        # Temperature scaling parameter (controls the sharpness of the softmax)
-        # Lower temperature → sharper distribution → harder negatives
-        # Higher temperature → smoother distribution → softer negatives
-        # Typical values: 0.07 (CLIP default) to 0.1 for fine-tuning
+        # Learnable temperature for L_i2t (cross-modal loss); mirrors CLIP's logit_scale usage
         self.temperature = config['loss']['temperature']
-        
-        # Separate weights for Intra-Modal Image and Text consistency
-        # Set to 0.0 to disable intra-modal regularization
+        # Weights for intra-modal losses; set to 0.0 to disable
         self.w_img = config['loss'].get('intra_img_weight', 0.0)
         self.w_txt = config['loss'].get('intra_txt_weight', 0.0)
-        
+        # Fixed temperature for intra-modal losses (τ=0.07, not updated by optimizer)
+        self.register_buffer("tau_intra", torch.tensor(0.07))
         self.criterion = nn.CrossEntropyLoss()
 
-    def _compute_contrastive(self, embed_a, embed_b):
+    def _compute_contrastive(self, embed_a, embed_b, temperature):
         """
-        Computes the Symmetric InfoNCE (Information Noise Contrastive Estimation) loss
-        between two sets of embeddings a and b.
+        Computes the Symmetric InfoNCE loss between two sets of embeddings a and b.
 
-        The loss is computed symmetrically:
-        1.  Loss(a->b): For each element in 'a', find the matching element in 'b'.
-        2.  Loss(b->a): For each element in 'b', find the matching element in 'a'.
-        
-        This assumes a 1-to-1 correspondence between embed_a[i] and embed_b[i].
-        
         Args:
             embed_a (Tensor): (N, D) Normalized embeddings
             embed_b (Tensor): (N, D) Normalized embeddings
-            
+            temperature: scalar float or 0-dim Tensor — controls softmax sharpness
+
         Returns:
             torch.Tensor: Scalar loss value (average of a->b and b->a losses).
         """
-        # Similarity Matrix: [Batch_Size, Batch_Size]
-        # Entry [i, j] = cosine similarity between embed_a[i] and embed_b[j]
-        logits = torch.matmul(embed_a, embed_b.t()) / self.temperature
-        
-        # Ground Truth Labels: Diagonal indices [0, 1, 2, ..., N-1]
-        # Since inputs are aligned (embed_a[i] matches embed_b[i]),
-        # the correct match for embed_a[i] is embed_b[i] (index i)
+        # Similarity Matrix: [N, N]; entry [i,j] = cosine similarity embed_a[i] · embed_b[j] / τ
+        logits = torch.matmul(embed_a, embed_b.t()) / temperature
         batch_size = embed_a.shape[0]
         labels = torch.arange(batch_size, device=embed_a.device)
-        
-        # Symmetric Loss Computation
-        # Direction 1: A→B (Row-wise softmax) → "Which embed_b matches embed_a[i]?"
-        loss_a2b = self.criterion(logits, labels)
-        
-        # Direction 2: B→A (Column-wise softmax) → "Which embed_a matches embed_b[j]?"
-        loss_b2a = self.criterion(logits.t(), labels)
-        
-        # Return average of both directions
+        loss_a2b = self.criterion(logits, labels)    # A→B
+        loss_b2a = self.criterion(logits.t(), labels)  # B→A
         return (loss_a2b + loss_b2a) / 2
 
-    def forward(self, img_embeds, txt_embeds, img_aug_embeds=None, txt_aug_embeds=None):
+    def forward(self, F_vit, F_text, F_image_norm, F_text_proj_norm, F_image_norm_aug=None):
         """
-        Computes the complete retrieval loss with optional intra-modal regularization.
-        
+        Tri-loss topological routing.
+
         Args:
-            img_embeds: [N, D] - L2 normalized image embeddings
-            txt_embeds: [N, D] - L2 normalized text embeddings (positives)
-            img_aug_embeds: [N, D] optional - for intra-modal image loss
-            txt_aug_embeds: [N, D] optional - for intra-modal text loss
-        
+            F_vit: [N, D] - Branch A image (ViT CLS, L2-normalized)
+            F_text: [N, D] - Branch A text (encode_text, L2-normalized)
+            F_image_norm: [N, D] - Branch B image (cross-attn pooled orig, L2-normalized)
+            F_text_proj_norm: [N, D] - Branch C text (q_proj projected, L2-normalized)
+            F_image_norm_aug: [N, D] optional - Branch B aug image for L_i2i
+
         Returns:
-            dict: Dictionary containing total loss and individual components:
-                - "loss_total": Final weighted sum
-                - "loss_inter": Image-Text contrastive loss
-                - "loss_intra_img": Image-Image intra-modal loss
-                - "loss_intra_txt": Text-Text intra-modal loss
+            dict: {loss_total, loss_i2t, loss_i2i, loss_t2t}
         """
-        # Inter-Modal Loss (Image <-> Text)
-        loss_inter = self._compute_contrastive(img_embeds, txt_embeds)
+        # L_i2t: ViT CLS image vs standard text — cross-modal (learnable τ)
+        loss_i2t = self._compute_contrastive(F_vit, F_text, self.temperature)
 
-        # Intra-Modal Loss (Image <-> Image Aug)
-        # Use a tensor for 0.0 to ensure device compatibility if needed, though scalar 0.0 usually works.
-        # Keeping it simple as float 0.0 for logic, but if autograd requires tensor for graph connectivity
-        # when weight > 0, the _compute_contrastive returns a tensor.
-        loss_img = torch.tensor(0.0, device=img_embeds.device)
-        if self.w_img > 0 and img_aug_embeds is not None:
-            loss_img = self._compute_contrastive(img_embeds, img_aug_embeds)
-            
-        # Intra-Modal Loss (Text <-> Text Aug)
-        loss_txt = torch.tensor(0.0, device=txt_embeds.device)
-        if self.w_txt > 0 and txt_aug_embeds is not None:
-            loss_txt = self._compute_contrastive(txt_embeds, txt_aug_embeds)
+        # L_i2i: cross-attn pooled orig vs cross-attn pooled aug — image intra-modal (fixed τ)
+        loss_i2i = torch.tensor(0.0, device=F_vit.device)
+        if self.w_img > 0 and F_image_norm_aug is not None:
+            loss_i2i = self._compute_contrastive(F_image_norm, F_image_norm_aug, self.tau_intra)
 
-        total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
-        
+        # L_t2t: standard text vs W_text projected text CLS — text intra-modal (fixed τ)
+        loss_t2t = torch.tensor(0.0, device=F_vit.device)
+        if self.w_txt > 0:
+            loss_t2t = self._compute_contrastive(F_text, F_text_proj_norm, self.tau_intra)
+
+        loss_total = loss_i2t + (self.w_img * loss_i2i) + (self.w_txt * loss_t2t)
+
         return {
-            "loss_total": total_loss,
-            "loss_inter": loss_inter,
-            "loss_intra_img": loss_img,
-            "loss_intra_txt": loss_txt
+            "loss_total": loss_total,
+            "loss_i2t": loss_i2t,
+            "loss_i2i": loss_i2i,
+            "loss_t2t": loss_t2t,
         }

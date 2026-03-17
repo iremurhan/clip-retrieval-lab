@@ -99,24 +99,30 @@ class GradCache:
         txt_input_chunks = self._split_into_chunks(input_ids, self.micro_batch_size)
         txt_mask_chunks = self._split_into_chunks(attention_mask, self.micro_batch_size)
         
-        cached_img_embeds = []
+        cached_F_vit = []
+        cached_F_image_norm = []
+        cached_F_text_proj_norm = []
         cached_txt_embeds = []
-        
+
         with torch.no_grad():
             for img_chunk, txt_input_chunk, txt_mask_chunk in zip(img_chunks, txt_input_chunks, txt_mask_chunks):
                 if self.use_amp:
                     with torch.amp.autocast(device_type='cuda'):
-                        img_emb, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
+                        F_vit, F_image_norm, F_text_proj_norm, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                         txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
                 else:
-                    img_emb, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
+                    F_vit, F_image_norm, F_text_proj_norm, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                     txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
 
-                cached_img_embeds.append(img_emb.detach())
+                cached_F_vit.append(F_vit.detach())
+                cached_F_image_norm.append(F_image_norm.detach())
+                cached_F_text_proj_norm.append(F_text_proj_norm.detach())
                 cached_txt_embeds.append(txt_emb.detach())
-        
+
         # Concatenate all cached embeddings
-        cached_img_embeds = torch.cat(cached_img_embeds, dim=0)
+        cached_F_vit = torch.cat(cached_F_vit, dim=0)
+        cached_F_image_norm = torch.cat(cached_F_image_norm, dim=0)
+        cached_F_text_proj_norm = torch.cat(cached_F_text_proj_norm, dim=0)
         cached_txt_embeds = torch.cat(cached_txt_embeds, dim=0)
         
         # ============================================================
@@ -125,9 +131,9 @@ class GradCache:
         total_loss = 0.0
         loss_dict_accumulator = {
             "loss_total": 0.0,
-            "loss_inter": 0.0,
-            "loss_intra_img": 0.0,
-            "loss_intra_txt": 0.0
+            "loss_i2t": 0.0,
+            "loss_i2i": 0.0,
+            "loss_t2t": 0.0,
         }
         
         num_chunks = len(img_chunks)
@@ -138,38 +144,40 @@ class GradCache:
             # Re-compute embeddings WITH gradients for current micro-batch
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):
-                    img_emb_grad, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
+                    F_vit_grad, F_image_norm_grad, F_text_proj_norm_grad, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                     txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
             else:
-                img_emb_grad, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
+                F_vit_grad, F_image_norm_grad, F_text_proj_norm_grad, _ = self.model.encode_image(img_chunk, txt_input_chunk, txt_mask_chunk)
                 txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
-            
-            # Build full-batch embeddings: Current chunk has gradients, others are cached (detached)
+
+            # Build full-batch embeddings: current chunk has gradients, others are cached (detached)
             chunk_start = chunk_idx * self.micro_batch_size
             chunk_end = chunk_start + img_chunk.size(0)
-            
-            # Clone cached embeddings and insert gradient-enabled chunk
-            img_embeds_full = cached_img_embeds.clone()
+
+            F_vit_full = cached_F_vit.clone()
+            F_image_norm_full = cached_F_image_norm.clone()
+            F_text_proj_norm_full = cached_F_text_proj_norm.clone()
             txt_embeds_full = cached_txt_embeds.clone()
-            
-            img_embeds_full[chunk_start:chunk_end] = img_emb_grad
+
+            F_vit_full[chunk_start:chunk_end] = F_vit_grad
+            F_image_norm_full[chunk_start:chunk_end] = F_image_norm_grad
+            F_text_proj_norm_full[chunk_start:chunk_end] = F_text_proj_norm_grad
             txt_embeds_full[chunk_start:chunk_end] = txt_emb_grad
-            
-            # Compute loss on full batch (but only current chunk has gradients)
+
+            # Compute loss on full batch (only current chunk has gradients)
+            # F_image_norm_aug=None: L_i2i not supported in GradCache (no aug chunking)
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):
                     loss_dict = self.criterion(
-                        img_embeds_full, 
-                        txt_embeds_full,
-                        img_aug_embeds=None,  # Intra-modal not supported yet in grad cache
-                        txt_aug_embeds=None
+                        F_vit_full, txt_embeds_full,
+                        F_image_norm_full, F_text_proj_norm_full,
+                        F_image_norm_aug=None
                     )
             else:
                 loss_dict = self.criterion(
-                    img_embeds_full, 
-                    txt_embeds_full,
-                    img_aug_embeds=None,
-                    txt_aug_embeds=None
+                    F_vit_full, txt_embeds_full,
+                    F_image_norm_full, F_text_proj_norm_full,
+                    F_image_norm_aug=None
                 )
             
             # NOTE: We do NOT scale the loss here. The full batch loss is computed,
@@ -198,20 +206,12 @@ class GradCache:
         """Standard forward pass when gradient caching is not needed."""
         if self.use_amp:
             with torch.amp.autocast(device_type='cuda'):
-                img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
+                F_vit, F_image_norm, F_text_proj_norm, _ = self.model.encode_image(images, input_ids, attention_mask)
                 txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                loss_dict = self.criterion(
-                    img_embeds, txt_embeds,
-                    img_aug_embeds=None,
-                    txt_aug_embeds=None
-                )
+                loss_dict = self.criterion(F_vit, txt_embeds, F_image_norm, F_text_proj_norm, F_image_norm_aug=None)
         else:
-            img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
+            F_vit, F_image_norm, F_text_proj_norm, _ = self.model.encode_image(images, input_ids, attention_mask)
             txt_embeds = self.model.encode_text(input_ids, attention_mask)
-            loss_dict = self.criterion(
-                img_embeds, txt_embeds,
-                img_aug_embeds=None,
-                txt_aug_embeds=None
-            )
+            loss_dict = self.criterion(F_vit, txt_embeds, F_image_norm, F_text_proj_norm, F_image_norm_aug=None)
 
         return loss_dict

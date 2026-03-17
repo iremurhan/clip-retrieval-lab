@@ -209,8 +209,8 @@ class Trainer:
                     raise NotImplementedError("GradCache does not support use_clip_loss yet. Set loss.use_clip_loss=false.")
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
-                if intra_img_weight > 0 or intra_txt_weight > 0:
-                    logger.warning("Intra-modal losses not supported with GradCache yet. Ignoring.")
+                if intra_img_weight > 0:
+                    logger.warning("L_i2i (image intra-modal) not supported with GradCache: images_aug cannot be chunked. Ignoring.")
                 
                 # Zero gradients before GradCache forward (which accumulates gradients)
                 self.optimizer.zero_grad()
@@ -236,21 +236,16 @@ class Trainer:
                         if use_clip_loss:
                             loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                         else:
-                            img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
+                            F_vit, F_image_norm, F_text_proj_norm, _ = self.model.encode_image(images, input_ids, attention_mask)
                             txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                            neg_txt_embeds = None
-                            if neg_input_ids is not None:
-                                neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
-                            img_aug_embeds = None
-                            txt_aug_embeds = None
+                            F_image_norm_aug = None
                             if intra_img_weight > 0:
-                                img_aug_embeds, _ = self.model.encode_image(batch['image_aug'].to(self.device), input_ids, attention_mask)
-                            if intra_txt_weight > 0:
-                                txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                                _, F_image_norm_aug, _, _ = self.model.encode_image(batch['image_aug'].to(self.device), input_ids, attention_mask)
 
                             loss_dict = self.criterion(
-                                img_embeds, txt_embeds,
-                                img_aug_embeds, txt_aug_embeds
+                                F_vit, txt_embeds,
+                                F_image_norm, F_text_proj_norm,
+                                F_image_norm_aug
                             )
                             loss = loss_dict["loss_total"]
 
@@ -269,22 +264,16 @@ class Trainer:
                     if use_clip_loss:
                         loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                     else:
-                        img_embeds, _ = self.model.encode_image(images, input_ids, attention_mask)
+                        F_vit, F_image_norm, F_text_proj_norm, _ = self.model.encode_image(images, input_ids, attention_mask)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                        neg_txt_embeds = None
-                        if neg_input_ids is not None:
-                            neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
-                        img_aug_embeds = None
-                        txt_aug_embeds = None
+                        F_image_norm_aug = None
                         if intra_img_weight > 0:
-                            img_aug_embeds, _ = self.model.encode_image(batch['image_aug'].to(self.device), input_ids, attention_mask)
-                        if intra_txt_weight > 0:
-                            txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                            _, F_image_norm_aug, _, _ = self.model.encode_image(batch['image_aug'].to(self.device), input_ids, attention_mask)
 
-                        # loss is now a dict
                         loss_dict = self.criterion(
-                            img_embeds, txt_embeds,
-                            img_aug_embeds, txt_aug_embeds
+                            F_vit, txt_embeds,
+                            F_image_norm, F_text_proj_norm,
+                            F_image_norm_aug
                         )
                         loss = loss_dict["loss_total"]
 
@@ -337,9 +326,9 @@ class Trainer:
                         # Component losses only available when loss_dict is defined
                         # (not set on the use_clip_loss path)
                         if loss_dict is not None:
-                            log_dict["train/loss_inter"] = loss_dict["loss_inter"].item()
-                            log_dict["train/loss_intra_img"] = loss_dict["loss_intra_img"].item()
-                            log_dict["train/loss_intra_txt"] = loss_dict["loss_intra_txt"].item()
+                            log_dict["train/loss_i2t"] = loss_dict["loss_i2t"].item()
+                            log_dict["train/loss_i2i"] = loss_dict["loss_i2i"].item()
+                            log_dict["train/loss_t2t"] = loss_dict["loss_t2t"].item()
                         log_dict.update(lr_dict)
                         wandb.log(log_dict)
                     except Exception as e:
@@ -363,7 +352,9 @@ class Trainer:
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
             
-            img_emb, txt_emb = self.model(images, input_ids, attention_mask)
+            output = self.model(images, input_ids, attention_mask)
+            img_emb = output["F_vit"]   # [B, D] Branch A image for retrieval
+            txt_emb = output["F_text"]  # [B, D] Branch A text for retrieval
             img_embeds_list.append(img_emb.cpu())
             txt_embeds_list.append(txt_emb.cpu())
             
@@ -540,7 +531,7 @@ class Trainer:
                 # Forward pass to get attention probs
                 with torch.no_grad():
                     self.model.eval()
-                    _, attn_probs = self.model.encode_image(image, input_ids, attention_mask)
+                    _, _, _, attn_probs = self.model.encode_image(image, input_ids, attention_mask)
 
                 # Visualize
                 if attn_probs is not None:
