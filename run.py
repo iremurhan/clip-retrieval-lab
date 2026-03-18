@@ -136,6 +136,7 @@ def main():
         scheduler=scheduler,
         config=config,
         device=device,
+        clip_tokenizer=tokenizer,
     )
 
     # 8. Resume
