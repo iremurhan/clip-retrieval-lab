@@ -93,6 +93,7 @@ def main():
     config["data"].setdefault("max_length", 77)
     config["data"].setdefault("num_workers", 8)
     config["data"].setdefault("batch_size", 256)
+    config["data"].setdefault("image_size", 336)
 
     # 2. Logging and seed
     setup_logging()
