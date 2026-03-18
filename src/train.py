@@ -2,7 +2,17 @@
 src/train.py
 ------------
 Training engine for Cross-Modal Retrieval.
-Implements the Trainer class that handles training loops, evaluation, checkpointing, and WandB logging.
+
+Usage:
+    This module is typically invoked via `run.py` or the Slurm script `scripts/train.slurm`.
+    
+    python run.py --config configs/config_val.yaml
+    
+    The Trainer class manages:
+    - Training loop with Mixed Precision (AMP)
+    - Evaluation (R@K, MAP@K)
+    - Checkpointing (best_model.pth, last_model.pth)
+    - Logging (WandB, Tensorboard-style metrics)
 """
 
 import torch
@@ -14,6 +24,7 @@ import time
 import random
 from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k
 from .utils import compute_grad_norm
+from .grad_cache import GradCache
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +62,24 @@ class Trainer:
             self.scaler = None
             logger.info("Mixed Precision Training (AMP) disabled (CPU mode).")
         
+        # Initialize Gradient Caching (STRICT CONFIG: will raise KeyError if missing)
+        # Check if gradient caching is enabled
+        self.use_grad_cache = config['training'].get('use_grad_cache', False)
+        if self.use_grad_cache:
+            # STRICT: micro_batch_size MUST exist if grad_cache is enabled
+            # GradCache constructor will raise KeyError if missing
+            self.grad_cache = GradCache(
+                model=self.model,
+                criterion=self.criterion,
+                config=self.config,
+                device=self.device,
+                scaler=self.scaler
+            )
+            logger.info(f"Gradient Caching enabled with micro_batch_size={config['training']['micro_batch_size']}")
+        else:
+            self.grad_cache = None
+            logger.info("Gradient Caching disabled (standard training mode).")
+        
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         
@@ -58,20 +87,6 @@ class Trainer:
         self.wandb_run = None
         if self.use_wandb and wandb.run is not None:
             self.wandb_run = wandb.run
-            # Log key config knobs for analysis/filtering
-            mining_cfg = config.get('mining', {})
-            loss_cfg = config.get('loss', {})
-            wandb.config.update(
-                {
-                    "dataset_name": config.get('dataset_name', 'unknown'),
-                    "mining_enabled": mining_cfg.get('enabled', False),
-                    "mining_fne_threshold": mining_cfg.get('fne_threshold', None),
-                    "mining_indices_path": mining_cfg.get('indices_path', None),
-                    "mining_values_path": mining_cfg.get('values_path', None),
-                    "use_clip_loss": loss_cfg.get('use_clip_loss', False),
-                },
-                allow_val_change=True,
-            )
             # Define WandB summary metrics with max tracking for validation results
             # This ensures the dashboard always shows the best scores, even if current epoch is worse
             wandb.define_metric("val/t2i_r1", summary="max")
@@ -85,12 +100,6 @@ class Trainer:
             wandb.define_metric("val/i2t_map5", summary="max")
             wandb.define_metric("val/i2t_map10", summary="max")
 
-        # Hard Negative Mining only runs when use_clip_loss is false
-        if config.get('mining', {}).get('enabled', False) and config.get('loss', {}).get('use_clip_loss', False):
-            logger.warning(
-                "mining.enabled=true but loss.use_clip_loss=true: Hard negatives will be IGNORED. "
-                "Set loss.use_clip_loss: false in config for Hard Negative Mining."
-            )
 
     def load_checkpoint(self, checkpoint_path):
         """
@@ -100,7 +109,7 @@ class Trainer:
         logger.info(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # 1. Load Weights
+        # Load Weights
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -110,7 +119,7 @@ class Trainer:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             logger.info("GradScaler state loaded from checkpoint.")
         
-        # 2. Load State Info
+        # Load State Info
         if 'best_r1' not in checkpoint or 'epoch' not in checkpoint:
             logger.error(f"Checkpoint file {checkpoint_path} is missing critical keys ('epoch' or 'best_r1').")
             logger.error("Cannot resume training safely. Aborting.")
@@ -167,17 +176,13 @@ class Trainer:
         
         num_batches = len(self.train_loader)
         batch_size = self.config['data']['batch_size']
-        
-        # Check if we should use CLIP's native loss (with learnable temperature)
         use_clip_loss = self.config['loss'].get('use_clip_loss', False)
-        
+        intra_img_weight = self.config['loss'].get('intra_img_weight', 0.0)
+        intra_txt_weight = self.config['loss'].get('intra_txt_weight', 0.0)
+
         # Initialize grad_norm for logging
         grad_norm = 0.0
         end_time = time.time()
-        
-        # Dynamic threshold for sweeps: update dataset FNE threshold from config if present
-        if hasattr(self.train_loader.dataset, 'fne_threshold'):
-            self.train_loader.dataset.fne_threshold = self.config.get('mining', {}).get('fne_threshold', self.train_loader.dataset.fne_threshold)
         
         for step, batch in enumerate(self.train_loader):
             images = batch['image'].to(self.device)
@@ -191,10 +196,74 @@ class Trainer:
                 neg_attention_mask = neg_attention_mask.to(self.device)
             
             # ============================================================
-            # Forward Pass with Mixed Precision (AMP)
+            # Forward Pass: Use Gradient Caching if enabled, else standard
             # ============================================================
-            if self.use_amp:
-                with torch.amp.autocast(device_type='cuda'):
+            if self.use_grad_cache:
+                # GRADIENT CACHING MODE
+                # GradCache handles the forward/backward internally
+                # Note: Currently GradCache does NOT support use_clip_loss, neg_txt_embeds, or intra-modal
+                # TODO: Add support for these features if needed
+                if use_clip_loss:
+                    raise NotImplementedError("GradCache does not support use_clip_loss yet. Set loss.use_clip_loss=false.")
+                if neg_input_ids is not None:
+                    logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
+                if intra_img_weight > 0 or intra_txt_weight > 0:
+                    logger.warning("Intra-modal losses not supported with GradCache yet. Ignoring.")
+                
+                # Zero gradients before GradCache forward (which accumulates gradients)
+                self.optimizer.zero_grad()
+                
+                # GradCache performs forward and backward internally
+                loss_dict = self.grad_cache.forward(images, input_ids, attention_mask)
+                loss = loss_dict["loss_total"]
+                
+                # Compute grad norm and step optimizer
+                if self.use_amp:
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = compute_grad_norm(self.model)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    grad_norm = compute_grad_norm(self.model)
+                    self.optimizer.step()
+            
+            else:
+                # STANDARD MODE (Original Implementation)
+                if self.use_amp:
+                    with torch.amp.autocast(device_type='cuda'):
+                        if use_clip_loss:
+                            loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
+                        else:
+                            img_embeds = self.model.encode_image(images)
+                            txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                            neg_txt_embeds = None
+                            if neg_input_ids is not None:
+                                neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
+                            img_aug_embeds = None
+                            txt_aug_embeds = None
+                            if intra_img_weight > 0:
+                                img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                            if intra_txt_weight > 0:
+                                txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                            
+                            loss_dict = self.criterion(
+                                img_embeds, txt_embeds,
+                                img_aug_embeds, txt_aug_embeds
+                            )
+                            loss = loss_dict["loss_total"]
+                    
+                    # Backward with gradient scaling
+                    self.optimizer.zero_grad()
+                    self.scaler.scale(loss).backward()
+                    
+                    # Unscale gradients to compute true grad norm
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = compute_grad_norm(self.model)
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Standard precision training
                     if use_clip_loss:
                         loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
                     else:
@@ -205,56 +274,26 @@ class Trainer:
                             neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
-                        if self.config['loss'].get('intra_img_weight', 0.0) > 0:
+                        if intra_img_weight > 0:
                             img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                        if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
+                        if intra_txt_weight > 0:
                             txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
-                        loss = self.criterion(
+                        
+                        # loss is now a dict
+                        loss_dict = self.criterion(
                             img_embeds, txt_embeds,
-                            img_aug_embeds, txt_aug_embeds,
-                            neg_txt_embeds
+                            img_aug_embeds, txt_aug_embeds
                         )
-                
-                # Backward with gradient scaling
-                self.optimizer.zero_grad()
-                self.scaler.scale(loss).backward()
-                
-                # Unscale gradients to compute true grad norm
-                self.scaler.unscale_(self.optimizer)
-                grad_norm = compute_grad_norm(self.model)
-                
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                # Standard precision training
-                if use_clip_loss:
-                    loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
-                else:
-                    img_embeds = self.model.encode_image(images)
-                    txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                    neg_txt_embeds = None
-                    if neg_input_ids is not None:
-                        neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
-                    img_aug_embeds = None
-                    txt_aug_embeds = None
-                    if self.config['loss'].get('intra_img_weight', 0.0) > 0:
-                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                    if self.config['loss'].get('intra_txt_weight', 0.0) > 0:
-                        txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
-                    loss = self.criterion(
-                        img_embeds, txt_embeds,
-                        img_aug_embeds, txt_aug_embeds,
-                        neg_txt_embeds
-                    )
-                
-                # Backward
-                self.optimizer.zero_grad()
-                loss.backward()
-                
-                # Compute grad norm before optimizer step
-                grad_norm = compute_grad_norm(self.model)
-                
-                self.optimizer.step()
+                        loss = loss_dict["loss_total"]
+                    
+                    # Backward
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    
+                    # Compute grad norm before optimizer step
+                    grad_norm = compute_grad_norm(self.model)
+                    
+                    self.optimizer.step()
             
             self.scheduler.step()
             
@@ -285,7 +324,11 @@ class Trainer:
                 if self.use_wandb:
                     try:
                         log_dict = {
-                            "train/loss": losses.val,
+                            "epoch": epoch,
+                            "train/loss_total": loss_dict["loss_total"].item(),
+                            "train/loss_inter": loss_dict["loss_inter"].item(),
+                            "train/loss_intra_img": loss_dict["loss_intra_img"].item(),
+                            "train/loss_intra_txt": loss_dict["loss_intra_txt"].item(),
                             "train/epoch": fractional_epoch,
                             "train/step": step,
                             "train/grad_norm": grad_norm,
@@ -468,11 +511,11 @@ class Trainer:
 
         # --- MAIN TRAINING LOOP ---
         for epoch in range(start_epoch, self.config['training']['epochs']):
-            # 1. Train one epoch
+            # Train one epoch
             train_loss = self.train_epoch(epoch)
             logger.info(f"Epoch {epoch+1} Training Loss: {train_loss:.4f}")
 
-            # 2. EVALUATION & BEST MODEL CHECK
+            # Evaluation & Best Model Check
             is_new_best = False
             is_eval_time = ((epoch + 1) % eval_frequency == 0) or (
                 (epoch + 1) == self.config['training']['epochs']
@@ -484,7 +527,7 @@ class Trainer:
                     self.best_r1 = score
                     logger.info(f"New Best R@1: {score:.2f} found at Epoch {epoch+1}!")
 
-            # 3. SAVE CHECKPOINT EVERY EPOCH
+            # Save Checkpoint
             # Always keep last_model.pth up to date for resume; also update best_model.pth when is_new_best=True
             os.makedirs(self.checkpoint_dir, exist_ok=True)
             self.save_checkpoint(epoch + 1, is_best=is_new_best)

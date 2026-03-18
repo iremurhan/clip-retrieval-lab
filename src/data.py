@@ -2,7 +2,18 @@
 src/data.py
 -----------
 Data loading and preprocessing for Cross-Modal Retrieval.
-Handles dataset loading for Flickr30k and COCO using standard CLIP transforms.
+Handles dataset loading for Flickr30k and COCO.
+
+Implements a Bipartite Augmentation Architecture for intra-modal contrastive views:
+    Phase 1 (Spatial):      Deterministic foundation - RandomResizedCrop + RandomHorizontalFlip
+    Phase 2 (Photometric):  Stochastic k-selection pool with VLM-safe magnitudes
+    Phase 3 (Normalization): ToTensor → CLIP exact normalization stats
+
+Design Rationale:
+    Unlike SimCLR, CLIP-based retrieval maps images to text. Aggressive spatial crops
+    (scale < 0.4) or extreme photometric distortions destroy the visual semantics needed
+    to match the text prompt, creating false negatives in the contrastive objective.
+    All augmentation magnitudes are therefore bounded to VLM-safe ranges.
 """
 
 import torch
@@ -18,6 +29,158 @@ from torchvision.transforms import InterpolationMode
 # Configure logger
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# CLIP Normalization Constants (from OpenAI CLIP)
+# ============================================================================
+CLIP_MEAN = [0.48145466, 0.4578275, 0.40821073]
+CLIP_STD = [0.26862954, 0.26130258, 0.27577711]
+
+
+# ============================================================================
+# Bipartite Augmentation Architecture
+# ============================================================================
+
+class StochasticPhotometricPool:
+    """
+    Phase 2 of the Bipartite Augmentation Pipeline.
+
+    A pool of VLM-safe photometric transforms from which exactly k are
+    randomly selected (without replacement) and applied sequentially.
+
+    All magnitudes are hardcoded to VLM-safe bounds:
+        - ColorJitter: brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1
+        - GaussianBlur: sigma=(0.1, 1.0)
+        - Grayscale: p=1.0 (applied only when selected)
+
+    Args:
+        k (int): Number of transforms to sample from the pool per call.
+                 Must satisfy 0 <= k <= pool_size (currently 3).
+
+    Raises:
+        ValueError: If k > pool_size or k < 0 at construction time.
+    """
+
+    def __init__(self, k):
+        # ---- VLM-Safe Hardcoded Magnitudes (DO NOT use SimCLR defaults) ----
+        self._pool = [
+            transforms.ColorJitter(
+                brightness=0.4,
+                contrast=0.4,
+                saturation=0.4,
+                hue=0.1
+            ),
+            transforms.GaussianBlur(
+                kernel_size=23,
+                sigma=(0.1, 1.0)
+            ),
+            transforms.RandomGrayscale(p=1.0),
+        ]
+
+        if not isinstance(k, int) or k < 0:
+            raise ValueError(f"k must be a non-negative integer, got {k}")
+        if k > len(self._pool):
+            raise ValueError(
+                f"k={k} exceeds photometric pool size={len(self._pool)}. "
+                f"Available transforms: {[type(t).__name__ for t in self._pool]}"
+            )
+        self._k = k
+
+    def __call__(self, img):
+        """
+        Apply k randomly selected photometric transforms to img.
+
+        Args:
+            img (PIL.Image): Input image (post-spatial, pre-normalization).
+
+        Returns:
+            PIL.Image: Photometrically augmented image.
+        """
+        if self._k == 0:
+            return img
+        selected = random.sample(self._pool, self._k)
+        for t in selected:
+            img = t(img)
+        return img
+
+    def __repr__(self):
+        return (
+            f"StochasticPhotometricPool(k={self._k}, "
+            f"pool=[ColorJitter, GaussianBlur, RandomGrayscale])"
+        )
+
+
+def build_anchor_transform(image_size):
+    """
+    Build the deterministic anchor transform for training.
+    Spatial: Mild RandomResizedCrop + flip, then normalization.
+    NO photometric augmentation on the anchor.
+
+    Args:
+        image_size (int): Target spatial resolution.
+
+    Returns:
+        transforms.Compose
+    """
+    return transforms.Compose([
+        # Phase 1 (Spatial) — Mild crop preserving semantic content
+        transforms.RandomResizedCrop(image_size, scale=(0.9, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        # Phase 3 (Normalization)
+        transforms.ToTensor(),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
+
+def build_augmented_transform(image_size, k):
+    """
+    Build the Bipartite Augmentation transform for the contrastive view.
+
+    Phase 1 (Spatial):      RandomResizedCrop(scale=(0.4, 1.0)) + RandomHorizontalFlip
+    Phase 2 (Photometric):  StochasticPhotometricPool with k-selection
+    Phase 3 (Normalization): ToTensor → CLIP normalization
+
+    Args:
+        image_size (int): Target spatial resolution.
+        k (int): Number of photometric transforms to sample per image.
+
+    Returns:
+        transforms.Compose
+    """
+    return transforms.Compose([
+        # Phase 1 (Spatial) — VLM-safe lower bound at 0.4 to preserve semantics
+        transforms.RandomResizedCrop(image_size, scale=(0.4, 1.0)),
+        transforms.RandomHorizontalFlip(),
+        # Phase 2 (Photometric) — k-selection from VLM-safe pool
+        StochasticPhotometricPool(k),
+        # Phase 3 (Normalization) — Exact CLIP stats
+        transforms.ToTensor(),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
+
+def build_eval_transform(image_size):
+    """
+    Build the deterministic evaluation transform.
+    Resize → CenterCrop → ToTensor → CLIP Normalize.
+
+    Args:
+        image_size (int): Target spatial resolution.
+
+    Returns:
+        transforms.Compose
+    """
+    return transforms.Compose([
+        transforms.Resize(image_size, interpolation=InterpolationMode.BICUBIC),
+        transforms.CenterCrop(image_size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
+    ])
+
+
+# ============================================================================
+# Dataset
+# ============================================================================
+
 class CaptionImageDataset(Dataset):
     def __init__(
         self,
@@ -27,9 +190,7 @@ class CaptionImageDataset(Dataset):
         max_length=77,
         split='train',
         transform=None,
-        mining_indices_path=None,
-        mining_values_path=None,
-        fne_threshold=0.90,
+        transform_aug=None,
     ):
         """
         Args:
@@ -38,66 +199,23 @@ class CaptionImageDataset(Dataset):
             tokenizer: HuggingFace tokenizer.
             max_length (int): Token sequence length (Default: 77).
             split (str): 'train', 'val', or 'test'.
-            transform (callable, optional): Image transforms.
-            mining_indices_path (str, optional): Path to .pt file of neighbor indices [N, K].
-            mining_values_path (str, optional): Path to .pt file of neighbor similarity scores [N, K].
-            fne_threshold (float): Score above which a neighbor is treated as false negative (default 0.90).
+            transform (callable, optional): Anchor image transform.
+            transform_aug (callable, optional): Augmented view transform (intra-modal).
         """
         self.images_root_path = images_root_path
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.split = split
-        self.fne_threshold = fne_threshold
-        self.mining_indices = None
-        self.mining_values = None
-        if mining_indices_path and mining_values_path and os.path.isfile(mining_indices_path) and os.path.isfile(mining_values_path):
-            self.mining_indices = torch.load(mining_indices_path, map_location='cpu')
-            self.mining_values = torch.load(mining_values_path, map_location='cpu')
-            logger.info(f"Mining loaded: indices {mining_indices_path}, values {mining_values_path}, fne_threshold={fne_threshold}")
-        
-        # 1. Define Transforms (Standard CLIP Preprocessing)
-        if transform is None:
-            # CLIP normalization values
-            normalize = transforms.Normalize(
-                mean=[0.48145466, 0.4578275, 0.40821073],
-                std=[0.26862954, 0.26130258, 0.27577711]
-            )
-            
-            if split == 'train':
-                # Standard training transform (RandomResizedCrop is standard for training stability)
-                self.transform = transforms.Compose([
-                    transforms.RandomResizedCrop(336, scale=(0.9, 1.0)), # Mild augmentation
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    normalize,
-                ])
-                # Separate augmentation transform for intra-modal consistency
-                self.transform_aug = transforms.Compose([
-                    transforms.RandomResizedCrop(336, scale=(0.9, 1.0)),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    normalize,
-                ])
-            else:
-                # Validation/Test: Deterministic CenterCrop
-                self.transform = transforms.Compose([
-                    transforms.Resize(336, interpolation=InterpolationMode.BICUBIC),
-                    transforms.CenterCrop(336),
-                    transforms.ToTensor(),
-                    normalize,
-                ])
-                self.transform_aug = self.transform  # Same for val/test
-        else:
-            self.transform = transform
-            self.transform_aug = transform
+        self.transform = transform
+        self.transform_aug = transform_aug
 
-        # 2. Load Captions (Karpathy JSON)
+        # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
         with open(captions_path, 'r') as f:
             data = json.load(f)
-        
+
         self.samples = []
-        
+
         # Karpathy JSON parsing logic
         for img in data['images']:
             current_split = img['split']
@@ -116,7 +234,7 @@ class CaptionImageDataset(Dataset):
                     raise ValueError(
                         f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
                     )
-                
+
                 # Take exactly 5 captions
                 sentences = img['sentences'][:5]
                 for sent in sentences:
@@ -126,10 +244,8 @@ class CaptionImageDataset(Dataset):
                         'filepath': img.get('filepath', ''),
                         'filename': img.get('filename', '')
                     })
-                    
+
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
-        # Map sample index -> image_id for FNE (exclude same-image negatives)
-        self.caption_to_img_id = [s['image_id'] for s in self.samples]
 
     def __len__(self):
         return len(self.samples)
@@ -138,30 +254,29 @@ class CaptionImageDataset(Dataset):
         sample = self.samples[idx]
         image_id = sample['image_id']
         caption = sample['caption']
-        
-        # 1. Load Image
+
+        # Load Image
         filepath = sample.get('filepath', '').strip()
         filename = sample['filename']
-        
+
         if filepath:
             image_path = os.path.join(self.images_root_path, filepath, filename)
             if not os.path.exists(image_path):
                 image_path = os.path.join(self.images_root_path, filename)
         else:
             image_path = os.path.join(self.images_root_path, filename)
-        
-        # Safety check for missing images
+
+        # Fail fast on missing images
         if not os.path.exists(image_path):
-            # Fallback strategy? Or raise error? For now, let's error out to notice data issues.
             raise FileNotFoundError(f"Image not found: {image_path}")
 
         image = Image.open(image_path).convert('RGB')
 
-        # 2. Transform Image (original and augmented for intra-modal loss)
+        # Transform Image (original anchor and augmented contrastive view)
         img_tensor = self.transform(image)
         img_aug_tensor = self.transform_aug(image)
-        
-        # 3. Tokenize Text
+
+        # Tokenize Text
         tokenized = self.tokenizer(
             caption,
             padding='max_length',
@@ -169,8 +284,8 @@ class CaptionImageDataset(Dataset):
             max_length=self.max_length,
             return_tensors='pt'
         )
-        
-        out = {
+
+        return {
             'image': img_tensor,
             'image_aug': img_aug_tensor,
             'input_ids': tokenized['input_ids'].squeeze(0),
@@ -178,84 +293,55 @@ class CaptionImageDataset(Dataset):
             'image_id': image_id
         }
 
-        # 4. False Negative Elimination (FNE): optional hard negative from mining
-        if self.mining_indices is not None and self.mining_values is not None:
-            # Neighbors for this index: shape [K] or [1]
-            indices = self.mining_indices[idx]
-            values = self.mining_values[idx]
-            if indices.dim() == 0:
-                indices = indices.unsqueeze(0)
-                values = values.unsqueeze(0)
-            # Valid negatives: score <= fne_threshold (exclude FNs) and different image
-            valid_mask = (values <= self.fne_threshold) & (
-                torch.tensor([self.caption_to_img_id[i] for i in indices.tolist()], dtype=torch.long) != image_id
-            )
-            valid_indices = indices[valid_mask].tolist()
 
-            if valid_indices:
-                # Hard negative from mined neighbors (different image, below FNE threshold)
-                neg_idx = random.choice(valid_indices)
-                neg_caption = self.samples[neg_idx]['caption']
-            else:
-                # No valid hard negative from mining → sample an easy negative:
-                # randomly choose another caption from a DIFFERENT image.
-                max_tries = 100
-                neg_idx = None
-                for _ in range(max_tries):
-                    candidate_idx = random.randrange(len(self.samples))
-                    if self.caption_to_img_id[candidate_idx] != image_id:
-                        neg_idx = candidate_idx
-                        break
-
-                if neg_idx is None:
-                    # Dataset is likely degenerate (single image); surface the issue explicitly.
-                    raise RuntimeError(
-                        f"Failed to sample an easy negative for index {idx}: "
-                        "could not find a caption from a different image_id."
-                    )
-
-                neg_caption = self.samples[neg_idx]['caption']
-            neg_tokenized = self.tokenizer(
-                neg_caption,
-                padding='max_length',
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors='pt'
-            )
-            out['negative_input_ids'] = neg_tokenized['input_ids'].squeeze(0)
-            out['negative_attention_mask'] = neg_tokenized['attention_mask'].squeeze(0)
-
-        return out
-
+# ============================================================================
+# DataLoader Factory
+# ============================================================================
 
 def create_image_text_dataloader(config, tokenizer, split='train'):
     """
     Factory function to create DataLoader for image-text retrieval datasets.
-    
+
     Creates a DataLoader for Flickr30k or COCO datasets with appropriate
     transforms, shuffling, and batch size based on the split.
-    When split is 'train' and config['mining'] exists, passes mining paths and fne_threshold for FNE.
+
+    STRICT CONFIG:
+        - config['data']['images_path']
+        - config['data']['captions_path']
+        - config['training']['batch_size']
+        - config['augment']['k_photometric_augs']  (REQUIRED, raises KeyError if missing)
     """
     shuffle = (split == 'train')
     images_root = config['data']['images_path']
     captions_path = config['data']['captions_path']
 
-    mining_kwargs = {}
-    if split == 'train' and config.get('mining') is not None and config['mining'].get('enabled', False):
-        mining_cfg = config['mining']
-        mining_kwargs = {
-            'mining_indices_path': mining_cfg.get('indices_path'),
-            'mining_values_path': mining_cfg.get('values_path'),
-            'fne_threshold': mining_cfg.get('fne_threshold', 0.90),
-        }
+    # Resolve image size from model config (336 for CLIP ViT-L/14@336px)
+    image_size = config['data']['image_size']
+
+    if split == 'train':
+        # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
+        k = config['augment']['k_photometric_augs']
+
+        transform = build_anchor_transform(image_size)
+        transform_aug = build_augmented_transform(image_size, k)
+
+        logger.info(
+            f"Train transforms built: anchor=(crop+flip), "
+            f"augmented=(bipartite, k={k} photometric from pool)"
+        )
+    else:
+        # Validation/Test: deterministic, no augmentation
+        transform = build_eval_transform(image_size)
+        transform_aug = transform
 
     dataset = CaptionImageDataset(
         images_root_path=images_root,
         captions_path=captions_path,
         tokenizer=tokenizer,
-        max_length=config['data'].get('max_length', 77),
+        max_length=config['data']['max_length'],
         split=split,
-        **mining_kwargs
+        transform=transform,
+        transform_aug=transform_aug,
     )
 
     # Debug Truncation
@@ -267,11 +353,11 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
 
     loader = DataLoader(
         dataset,
-        batch_size=config['training']['batch_size'], # Base Config yapısına uygun path
+        batch_size=config['training']['batch_size'],
         shuffle=shuffle,
-        num_workers=config['data'].get('num_workers', 4),
+        num_workers=config['data']['num_workers'],
         pin_memory=True,
         drop_last=(split == 'train')
     )
-    
+
     return loader

@@ -54,6 +54,9 @@ class SymmetricInfoNCELoss(nn.Module):
             - loss.temperature: Temperature scaling parameter τ (controls softmax sharpness)
             - loss.intra_img_weight: Weight for image intra-modal loss (default: 0.0)
             - loss.intra_txt_weight: Weight for text intra-modal loss (default: 0.0)
+            
+    Returns:
+        dict: A dictionary with 'loss_total', 'loss_inter', 'loss_intra_img', 'loss_intra_txt'.
     """
     
     def __init__(self, config):
@@ -71,24 +74,23 @@ class SymmetricInfoNCELoss(nn.Module):
         
         self.criterion = nn.CrossEntropyLoss()
 
-    def compute_symmetric_infonce_loss(self, embed_a, embed_b):
+    def _compute_contrastive(self, embed_a, embed_b):
         """
-        Computes Symmetric InfoNCE loss between two sets of embeddings.
+        Computes the Symmetric InfoNCE (Information Noise Contrastive Estimation) loss
+        between two sets of embeddings a and b.
+
+        The loss is computed symmetrically:
+        1.  Loss(a->b): For each element in 'a', find the matching element in 'b'.
+        2.  Loss(b->a): For each element in 'b', find the matching element in 'a'.
         
-        For a batch of size N, this function:
-        1. Computes similarity matrix S[i,j] = cos(embed_a[i], embed_b[j]) / τ
-        2. Applies Cross-Entropy loss in both directions:
-           - Direction A→B: For each embed_a[i], predict correct embed_b[i]
-           - Direction B→A: For each embed_b[j], predict correct embed_a[j]
-        3. Returns the average of both directions
+        This assumes a 1-to-1 correspondence between embed_a[i] and embed_b[i].
         
         Args:
-            embed_a (Tensor): [Batch_Size, Embed_Dim] - L2 normalized embeddings
-            embed_b (Tensor): [Batch_Size, Embed_Dim] - L2 normalized embeddings
-                              (aligned: embed_a[i] matches embed_b[i])
-        
+            embed_a (Tensor): (N, D) Normalized embeddings
+            embed_b (Tensor): (N, D) Normalized embeddings
+            
         Returns:
-            Tensor: Scalar symmetric contrastive loss value
+            torch.Tensor: Scalar loss value (average of a->b and b->a losses).
         """
         # Similarity Matrix: [Batch_Size, Batch_Size]
         # Entry [i, j] = cosine similarity between embed_a[i] and embed_b[j]
@@ -110,41 +112,44 @@ class SymmetricInfoNCELoss(nn.Module):
         # Return average of both directions
         return (loss_a2b + loss_b2a) / 2
 
-    def forward(self, img_embeds, txt_embeds, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
+    def forward(self, img_embeds, txt_embeds, img_aug_embeds=None, txt_aug_embeds=None):
         """
-        Computes the complete retrieval loss with optional intra-modal regularization and hard negatives.
+        Computes the complete retrieval loss with optional intra-modal regularization.
         
         Args:
             img_embeds: [N, D] - L2 normalized image embeddings
             txt_embeds: [N, D] - L2 normalized text embeddings (positives)
             img_aug_embeds: [N, D] optional - for intra-modal image loss
             txt_aug_embeds: [N, D] optional - for intra-modal text loss
-            neg_txt_embeds: [N, D] optional - hard negative text embeddings (one per sample)
         
         Returns:
-            Tensor: Scalar total loss value
+            dict: Dictionary containing total loss and individual components:
+                - "loss_total": Final weighted sum
+                - "loss_inter": Image-Text contrastive loss
+                - "loss_intra_img": Image-Image intra-modal loss
+                - "loss_intra_txt": Text-Text intra-modal loss
         """
-        # 1. Inter-Modal Loss
-        if neg_txt_embeds is not None:
-            # Image -> (positive + negative) texts: all_texts = [txt_embeds; neg_txt_embeds] -> [2N, D]
-            all_texts = torch.cat([txt_embeds, neg_txt_embeds], dim=0)
-            logits_per_image = torch.matmul(img_embeds, all_texts.t()) / self.temperature
-            batch_size = img_embeds.shape[0]
-            labels = torch.arange(batch_size, device=img_embeds.device)
-            loss_i2t = self.criterion(logits_per_image, labels)
-            # Text -> Image: standard symmetric
-            logits_per_text = torch.matmul(txt_embeds, img_embeds.t()) / self.temperature
-            loss_t2i = self.criterion(logits_per_text, labels)
-            loss_inter = (loss_i2t + loss_t2i) / 2
-        else:
-            loss_inter = self.compute_symmetric_infonce_loss(img_embeds, txt_embeds)
+        # Inter-Modal Loss (Image <-> Text)
+        loss_inter = self._compute_contrastive(img_embeds, txt_embeds)
 
-        # 2. Intra-Modal Loss (unchanged)
-        loss_img = 0.0
+        # Intra-Modal Loss (Image <-> Image Aug)
+        # Use a tensor for 0.0 to ensure device compatibility if needed, though scalar 0.0 usually works.
+        # Keeping it simple as float 0.0 for logic, but if autograd requires tensor for graph connectivity
+        # when weight > 0, the _compute_contrastive returns a tensor.
+        loss_img = torch.tensor(0.0, device=img_embeds.device)
         if self.w_img > 0 and img_aug_embeds is not None:
-            loss_img = self.compute_symmetric_infonce_loss(img_embeds, img_aug_embeds)
-        loss_txt = 0.0
+            loss_img = self._compute_contrastive(img_embeds, img_aug_embeds)
+            
+        # Intra-Modal Loss (Text <-> Text Aug)
+        loss_txt = torch.tensor(0.0, device=txt_embeds.device)
         if self.w_txt > 0 and txt_aug_embeds is not None:
-            loss_txt = self.compute_symmetric_infonce_loss(txt_embeds, txt_aug_embeds)
+            loss_txt = self._compute_contrastive(txt_embeds, txt_aug_embeds)
 
-        return loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
+        total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
+        
+        return {
+            "loss_total": total_loss,
+            "loss_inter": loss_inter,
+            "loss_intra_img": loss_img,
+            "loss_intra_txt": loss_txt
+        }

@@ -1,13 +1,22 @@
 #!/bin/bash
-# Training. Prefer: bash ./scripts/start_training.sh flickr_fne_run configs/config_flickr.yaml
-# or bash ./scripts/start_training.sh coco_fne_run configs/config_coco.yaml
-# Direct: sbatch --job-name=NAME scripts/train.slurm NAME [config]
-# Logs: results/{coco|flickr30k}/{job_id}/ (slurm.out, training.log, last_model.pth, best_model.pth, wandb/). W&B: retrieval.
+# =============================================================================
+# SLURM TRAINING SCRIPT
+# =============================================================================
+# Usage:
+#   sbatch scripts/train.slurm <EXPERIMENT_NAME> <CONFIG_PATH>
+#
+# Example:
+#   sbatch scripts/train.slurm my_fne_exp configs/config_flickr.yaml
+#
+# Outputs:
+#   Results are saved to: /output/results/{dataset}/{job_id}/
+#   Includes: slurm.out, training.log, checkpoints, and WandB logs.
+# =============================================================================
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
-#SBATCH --mem-per-gpu=40G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.5
+#SBATCH --mem-per-gpu=48G
+#SBATCH --container-image=biremurhan/image-text-contrast:v0.4
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
