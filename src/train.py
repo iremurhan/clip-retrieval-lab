@@ -393,11 +393,14 @@ class Trainer:
         unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
         img_embeds_unique = img_embeds[first_occurrence_indices]
         
+        # Precompute similarity matrix once: [N_images, N_captions]
+        sims = torch.matmul(img_embeds_unique, txt_embeds.t())  # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
+
         # Compute Recall@K metrics
-        r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
-        
+        r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims=sims)
+
         # Compute MAP@K metrics
-        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10])
+        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10], sims=sims)
         
         # Log results to console
         logger.info(
