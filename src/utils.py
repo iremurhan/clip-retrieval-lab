@@ -11,15 +11,6 @@ import numpy as np
 import torch
 
 
-def setup_seed(seed=42):
-    """Fix random seeds for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-
-
 def compute_grad_norm(model):
     """
     Compute the total L2 gradient norm across all parameters.

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device, use_wandb=True):
+    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -40,7 +40,7 @@ class Trainer:
         self.config = config
         self.device = device
         
-        self.use_wandb = use_wandb
+        self.use_wandb = wandb.run is not None
         self.log_freq = config['logging']['log_freq']
         self.checkpoint_dir = config['logging']['checkpoint_dir']
         
