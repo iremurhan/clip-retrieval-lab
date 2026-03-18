@@ -1,4 +1,4 @@
-# CLIP-based Cross-Modal Retreival Enhancement
+# CLIP-based Cross-Modal Retrieval Enhancement
 
 CLIP-based image–text retrieval. Supports **Flickr30k** and **MS-COCO**. Optional pairwise similarity mining (caption, visual, consensus).
 
