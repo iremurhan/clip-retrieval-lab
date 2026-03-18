@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device, use_wandb=True):
+    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device, use_wandb=True, clip_tokenizer=None):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -80,6 +80,18 @@ class Trainer:
             self.grad_cache = None
             logger.info("Gradient Caching disabled (standard training mode).")
         
+        # Initialize on-the-fly paraphraser for L_text_text (replaces SimCSE dual-forward)
+        self.paraphraser = None
+        if config['loss'].get('intra_txt_weight', 0.0) > 0:
+            para_cfg = config.get('paraphraser')
+            if para_cfg is None:
+                raise ValueError(
+                    "intra_txt_weight > 0 requires a 'paraphraser' section in config."
+                )
+            from .paraphraser import OnTheFlyParaphraser
+            self.paraphraser = OnTheFlyParaphraser(para_cfg, clip_tokenizer, device)
+            logger.info("OnTheFlyParaphraser (Mistral-7B) initialized.")
+
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         
@@ -207,14 +219,25 @@ class Trainer:
                     raise NotImplementedError("GradCache does not support use_clip_loss yet. Set loss.use_clip_loss=false.")
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
-                if intra_img_weight > 0 or intra_txt_weight > 0:
-                    logger.warning("Intra-modal losses not supported with GradCache yet. Ignoring.")
-                
+                if intra_img_weight > 0:
+                    logger.warning("L_i2i (image intra-modal) not supported with GradCache yet. Ignoring.")
+
+                # Generate paraphrases for full batch before GradCache phases
+                para_input_ids, para_attention_mask = None, None
+                if intra_txt_weight > 0 and self.paraphraser is not None:
+                    captions = batch['caption']  # list[str], len=N
+                    para_input_ids, para_attention_mask = self.paraphraser.generate(captions)
+                    # para_input_ids: [N, 77], para_attention_mask: [N, 77]
+
                 # Zero gradients before GradCache forward (which accumulates gradients)
                 self.optimizer.zero_grad()
-                
+
                 # GradCache performs forward and backward internally
-                loss_dict = self.grad_cache.forward(images, input_ids, attention_mask)
+                loss_dict = self.grad_cache.forward(
+                    images, input_ids, attention_mask,
+                    para_input_ids=para_input_ids,
+                    para_attention_mask=para_attention_mask,
+                )
                 loss = loss_dict["loss_total"]
                 
                 # Compute grad norm and step optimizer
@@ -243,8 +266,10 @@ class Trainer:
                             txt_aug_embeds = None
                             if intra_img_weight > 0:
                                 img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                            if intra_txt_weight > 0:
-                                txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                            if intra_txt_weight > 0 and self.paraphraser is not None:
+                                para_ids, para_mask = self.paraphraser.generate(batch['caption'])
+                                txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+                                # txt_aug_embeds: [N, D] — L2-normalized paraphrase embeddings
                             
                             loss_dict = self.criterion(
                                 img_embeds, txt_embeds,
@@ -276,8 +301,10 @@ class Trainer:
                         txt_aug_embeds = None
                         if intra_img_weight > 0:
                             img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                        if intra_txt_weight > 0:
-                            txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                        if intra_txt_weight > 0 and self.paraphraser is not None:
+                            para_ids, para_mask = self.paraphraser.generate(batch['caption'])
+                            txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+                            # txt_aug_embeds: [N, D] — L2-normalized paraphrase embeddings
                         
                         # loss is now a dict
                         loss_dict = self.criterion(
