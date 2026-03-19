@@ -202,7 +202,7 @@ class CaptionImageDataset(Dataset):
             transform (callable, optional): Anchor image transform.
             transform_aug (callable, optional): Augmented view transform (intra-modal).
         """
-        self.images_root_path = images_root_path
+        self.images_root_path = os.path.abspath(images_root_path)
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.split = split
@@ -261,8 +261,6 @@ class CaptionImageDataset(Dataset):
 
         if filepath:
             image_path = os.path.join(self.images_root_path, filepath, filename)
-            if not os.path.exists(image_path):
-                image_path = os.path.join(self.images_root_path, filename)
         else:
             image_path = os.path.join(self.images_root_path, filename)
 
