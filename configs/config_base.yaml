@@ -3,7 +3,7 @@
 # Dataset-specific files (e.g. config_coco.yaml, config_flickr.yaml) only define:
 # - data paths (images_path, captions_path)
 #
-# W&B: single project "retrieval" for training; dataset is in run name and config.
+# W&B: single project "clip-retrieval" for all runs; dataset is in run name and config.
 
 model:
   image_model_name: "openai/clip-vit-large-patch14-336"
@@ -13,27 +13,25 @@ model:
   unfreeze_strategy: "full"
 
 loss:
-  # Hard Negative Mining (FNE + neg_txt_embeds) only runs when use_clip_loss is false.
-  use_clip_loss: false
-  temperature: 0.07
   intra_img_weight: 1
   intra_txt_weight: 0
 
 training:
   # DataLoader-related defaults (will be mirrored into data.* at runtime)
-  batch_size: 128
+  batch_size: 512
   num_workers: 8
   max_length: 77
   image_size: 336
 
-  epochs: 20
+  epochs: 10
   seed: 42
+  use_grad_cache: true
+  micro_batch_size: 128
   optimizer: "adamw"
   scheduler: "cosine"
   warmup_epochs: 2
 
   clip_projection_lr: 0.00005
-  head_lr: 0.0005
   backbone_lr: 0.000002
   weight_decay: 0.01
 
@@ -41,8 +39,6 @@ augment:
   # Number of photometric transforms sampled from the VLM-safe pool per image.
   # Pool: [ColorJitter, GaussianBlur, RandomGrayscale]. Max k=3.
   k_photometric_augs: 2
-  image:
-    enabled: true
 
 debug:
   debug_mode: false
@@ -50,7 +46,11 @@ debug:
 
 logging:
   use_wandb: true
+  wandb_project: "clip-retrieval"
   log_freq: 500
   eval_freq: 1
+  eval_epoch_zero: false
+  eval_eccv: false
   save_freq: 3
   checkpoint_dir: "checkpoints"
+  run_id: "unnamed"

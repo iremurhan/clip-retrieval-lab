@@ -159,15 +159,17 @@ class GradCache:
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):
                     loss_dict = self.criterion(
-                        img_embeds_full, 
+                        img_embeds_full,
                         txt_embeds_full,
+                        self.model.clip.logit_scale,
                         img_aug_embeds=None,  # Intra-modal not supported yet in grad cache
                         txt_aug_embeds=None
                     )
             else:
                 loss_dict = self.criterion(
-                    img_embeds_full, 
+                    img_embeds_full,
                     txt_embeds_full,
+                    self.model.clip.logit_scale,
                     img_aug_embeds=None,
                     txt_aug_embeds=None
                 )
@@ -202,6 +204,7 @@ class GradCache:
                 txt_embeds = self.model.encode_text(input_ids, attention_mask)
                 loss_dict = self.criterion(
                     img_embeds, txt_embeds,
+                    self.model.clip.logit_scale,
                     img_aug_embeds=None,
                     txt_aug_embeds=None
                 )
@@ -210,6 +213,7 @@ class GradCache:
             txt_embeds = self.model.encode_text(input_ids, attention_mask)
             loss_dict = self.criterion(
                 img_embeds, txt_embeds,
+                self.model.clip.logit_scale,
                 img_aug_embeds=None,
                 txt_aug_embeds=None
             )

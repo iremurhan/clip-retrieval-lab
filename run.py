@@ -13,7 +13,7 @@ import torch
 import wandb
 from transformers import CLIPTokenizer, get_cosine_schedule_with_warmup
 
-from src.setup import setup_config, setup_seed, setup_tracker
+from src.setup import setup_config, setup_seed, setup_tracker, load_registry_overrides
 from src.data import create_image_text_dataloader
 from src.model import DualEncoder
 from src.loss import SymmetricInfoNCELoss
@@ -41,7 +41,6 @@ def create_clip_optimizer(model, config):
     opt_name = config["training"]["optimizer"].lower()
     wd = float(config["training"]["weight_decay"])
     lr_clip_proj = float(config["training"].get("clip_projection_lr", 1e-5))
-    lr_head = float(config["training"].get("head_lr", 1e-3))
     lr_backbone = float(config["training"].get("backbone_lr", 1e-6))
 
     trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
@@ -61,7 +60,11 @@ def create_clip_optimizer(model, config):
     if clip_proj_params:
         param_groups.append({"name": "clip_proj", "params": clip_proj_params, "lr": lr_clip_proj})
     if custom_head_params:
-        param_groups.append({"name": "head", "params": custom_head_params, "lr": lr_head})
+        raise RuntimeError(
+            "custom_head_params is non-empty but embed_dim is expected to be null. "
+            "This indicates image_proj/text_proj layers exist unexpectedly. "
+            "Check config['model']['embed_dim']."
+        )
     if backbone_params:
         param_groups.append({"name": "backbone", "params": backbone_params, "lr": lr_backbone})
 
@@ -84,10 +87,36 @@ def main():
     parser.add_argument("--config", type=str, required=True, help="Path to dataset config (e.g. configs/config_coco.yaml)")
     parser.add_argument("--override", nargs="*", default=[], help="Overrides as key=value (e.g. logging.checkpoint_dir=/path)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--run", type=str, default=None, help="Run ID from configs/registry.yaml (e.g. B0, FULL)")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed override (sets training.seed)")
     args = parser.parse_args()
 
-    # 1. Load config (base + dataset + overrides)
-    config = setup_config(config_path=args.config, overrides=args.override)
+    # 1. Load config (base + dataset + registry overrides + CLI overrides)
+    # Order: base < dataset config < registry overrides < --override (highest priority)
+    registry_overrides = []
+    if args.run:
+        registry_overrides = load_registry_overrides(args.run)
+    all_overrides = registry_overrides + (args.override or [])
+    config = setup_config(config_path=args.config, overrides=all_overrides)
+
+    # Set logging.run_id from --run if provided
+    if args.run:
+        config.setdefault("logging", {})["run_id"] = args.run
+
+    # Apply --seed override (after registry so it takes highest priority)
+    if args.seed is not None:
+        config.setdefault("training", {})["seed"] = args.seed
+
+    # Build checkpoint dir: checkpoints/{SLURM_JOB_ID}_{run_id}_{dataset}_s{seed}/
+    # Only when checkpoint_dir has not already been set via --override
+    if not any("logging.checkpoint_dir" in o for o in (args.override or [])):
+        from src.setup import _infer_dataset_name
+        job_id = os.environ.get("SLURM_JOB_ID", "local")
+        run_id = config.get("logging", {}).get("run_id", "unnamed")
+        dataset = _infer_dataset_name(config)
+        seed = config.get("training", {}).get("seed", 42)
+        config["logging"]["checkpoint_dir"] = f"checkpoints/{job_id}_{run_id}_{dataset}_s{seed}"
+
     # Ensure data has required keys; use literal defaults only (no config-as-fallback)
     config.setdefault("data", {})
     config["data"].setdefault("max_length", 77)

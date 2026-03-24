@@ -4,3 +4,6 @@ PyYAML
 tqdm
 transformers
 wandb
+eccv-caption
+Pillow
+spacy
