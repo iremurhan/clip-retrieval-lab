@@ -83,17 +83,29 @@ class Trainer:
             self.grad_cache = None
             logger.info("Gradient Caching disabled (standard training mode).")
         
-        # Initialize on-the-fly paraphraser for L_text_text (replaces SimCSE dual-forward)
+        # Initialize paraphraser for L_text_text = InfoNCE(T_orig, T_paraphrased)
         self.paraphraser = None
-        if config['loss'].get('intra_txt_weight', 0.0) > 0:
-            para_cfg = config.get('paraphraser')
-            if para_cfg is None:
-                raise ValueError(
-                    "intra_txt_weight > 0 requires a 'paraphraser' section in config."
+        para_cfg = config.get('paraphraser', {})
+        paraphrase_path = para_cfg.get('precomputed_path')
+        intra_txt_weight = config['loss'].get('intra_txt_weight', 0.0)
+        if intra_txt_weight > 0:
+            if paraphrase_path and os.path.exists(paraphrase_path):
+                from .paraphraser import PrecomputedParaphraser
+                self.paraphraser = PrecomputedParaphraser(
+                    clip_tokenizer, device,
+                    max_length=config['training']['max_length'],
                 )
-            from .paraphraser import OnTheFlyParaphraser
-            self.paraphraser = OnTheFlyParaphraser(para_cfg, clip_tokenizer, device)
-            logger.info("OnTheFlyParaphraser (Mistral-7B) initialized.")
+                logger.info("Using pre-computed paraphraser.")
+            else:
+                from .paraphraser import NLTKParaphraser
+                self.paraphraser = NLTKParaphraser(
+                    clip_tokenizer, device,
+                    max_length=config['training']['max_length'],
+                    seed=config['training']['seed'],
+                )
+                logger.info("Using NLTK synonym replacement paraphraser.")
+        else:
+            logger.info("Paraphraser disabled (intra_txt_weight=0).")
 
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
