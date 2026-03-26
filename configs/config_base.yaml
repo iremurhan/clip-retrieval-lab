@@ -18,14 +18,14 @@ loss:
 
 training:
   # DataLoader-related defaults (will be mirrored into data.* at runtime)
-  batch_size: 512
+  batch_size: 128
   num_workers: 8
   max_length: 77
   image_size: 336
 
   epochs: 10
   seed: 42
-  use_grad_cache: true
+  use_grad_cache: false
   micro_batch_size: 128
   optimizer: "adamw"
   scheduler: "cosine"
@@ -48,9 +48,8 @@ logging:
   use_wandb: true
   wandb_project: "clip-retrieval"
   log_freq: 500
-  eval_freq: 1
+  eval_freq: 2
   eval_epoch_zero: false
-  eval_eccv: false
   save_freq: 3
   checkpoint_dir: "checkpoints"
   run_id: "unnamed"

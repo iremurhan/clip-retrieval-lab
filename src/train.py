@@ -17,6 +17,7 @@ Usage:
 
 import torch
 import logging
+import warnings
 import wandb
 import os
 import time
@@ -64,6 +65,23 @@ class Trainer:
         # Initialize Gradient Caching (STRICT CONFIG: will raise KeyError if missing)
         # Check if gradient caching is enabled
         self.use_grad_cache = config['training'].get('use_grad_cache', False)
+        if self.use_grad_cache:
+            loss_type = config.get('loss', {}).get('type', 'infonce').lower()
+            if loss_type == 'siglip':
+                raise NotImplementedError(
+                    "SigLIPLoss is not compatible with GradCache. "
+                    "GradCache calls criterion with positional img_aug_embeds/txt_aug_embeds args "
+                    "but SigLIPLoss.bias gradient must flow through the full-batch logits. "
+                    "Disable GradCache or use InfoNCE when use_grad_cache: true."
+                )
+            intra_img = config['loss'].get('intra_img_weight', 0.0)
+            intra_txt = config['loss'].get('intra_txt_weight', 0.0)
+            if intra_img > 0 or intra_txt > 0:
+                raise ValueError(
+                    "Intra-modal losses are not compatible with GradCache. "
+                    "Set intra_img_weight: 0 and intra_txt_weight: 0 when use_grad_cache: true, "
+                    "or disable GradCache."
+                )
         if self.use_grad_cache:
             # STRICT: micro_batch_size MUST exist if grad_cache is enabled
             # GradCache constructor will raise KeyError if missing
@@ -233,11 +251,9 @@ class Trainer:
                 # TODO: Add support for these features if needed
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
-                if intra_img_weight > 0 or intra_txt_weight > 0:
-                    logger.warning("Intra-modal losses not supported with GradCache yet. Ignoring.")
                 
                 # Zero gradients before GradCache forward (which accumulates gradients)
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 
                 # GradCache performs forward and backward internally
                 loss_dict = self.grad_cache.forward(images, input_ids, attention_mask)
@@ -256,16 +272,18 @@ class Trainer:
             else:
                 # STANDARD MODE (Original Implementation)
                 if self.use_amp:
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type='cuda'):
                         img_embeds = self.model.encode_image(images)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
                         if intra_img_weight > 0:
-                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                            with torch.no_grad():
+                                img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
                         if intra_txt_weight > 0:
-                            txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                            with torch.no_grad():
+                                txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
 
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
@@ -290,10 +308,10 @@ class Trainer:
                                         f"Max deviation: {(txt_norms - 1).abs().max().item():.6f}"
                                     )
                                 # Sanity: intra-modal loss is exactly 0 when weight is 0
-                                if self.criterion.w_img == 0.0:
+                                if getattr(self.criterion, 'w_img', 0.0) == 0.0:
                                     assert loss_dict["loss_intra_img"].item() == 0.0, \
                                         "loss_intra_img is non-zero but intra_img_weight=0"
-                                if self.criterion.w_txt == 0.0:
+                                if getattr(self.criterion, 'w_txt', 0.0) == 0.0:
                                     assert loss_dict["loss_intra_txt"].item() == 0.0, \
                                         "loss_intra_txt is non-zero but intra_txt_weight=0"
 
@@ -308,15 +326,17 @@ class Trainer:
                     self.scaler.update()
                 else:
                     # Standard precision training
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
                     img_embeds = self.model.encode_image(images)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
                     if intra_img_weight > 0:
-                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                        with torch.no_grad():
+                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
                     if intra_txt_weight > 0:
-                        txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                        with torch.no_grad():
+                            txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
 
                     # loss is now a dict
                     loss_dict = self.criterion(
@@ -342,10 +362,10 @@ class Trainer:
                                     f"Max deviation: {(txt_norms - 1).abs().max().item():.6f}"
                                 )
                             # Sanity: intra-modal loss is exactly 0 when weight is 0
-                            if self.criterion.w_img == 0.0:
+                            if getattr(self.criterion, 'w_img', 0.0) == 0.0:
                                 assert loss_dict["loss_intra_img"].item() == 0.0, \
                                     "loss_intra_img is non-zero but intra_img_weight=0"
-                            if self.criterion.w_txt == 0.0:
+                            if getattr(self.criterion, 'w_txt', 0.0) == 0.0:
                                 assert loss_dict["loss_intra_txt"].item() == 0.0, \
                                     "loss_intra_txt is non-zero but intra_txt_weight=0"
 
@@ -390,7 +410,7 @@ class Trainer:
 
                 with torch.no_grad():
                     scale_val = self.model.clip.logit_scale.exp().item()
-                    if scale_val >= 99.9:
+                    if scale_val >= 99.0:
                         logger.warning(
                             f"logit_scale.exp()={scale_val:.2f} has hit the clamp ceiling (100). "
                             "This indicates temperature instability."
@@ -413,7 +433,7 @@ class Trainer:
                         log_dict.update(lr_dict)
                         wandb.log(log_dict)
                     except Exception as e:
-                        logger.warning(f"Failed to log to W&B: {e}")
+                        logger.warning(f"Failed to log to W&B: {e}", exc_info=True)
         
         return losses.avg
 
@@ -458,24 +478,78 @@ class Trainer:
         unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
         img_embeds_unique = img_embeds[first_occurrence_indices]  # [N_images, D]
 
-        eval_eccv = self.config.get('logging', {}).get('eval_eccv', False)
+        images_path = self.config.get('data', {}).get('images_path', '')
+        is_coco = 'coco' in images_path.lower()
+        is_flickr = 'flickr' in images_path.lower()
+
+        if not is_coco and not is_flickr:
+            raise ValueError(
+                f"Cannot determine dataset from images_path='{images_path}'. "
+                "Path must contain 'coco' or 'flickr'."
+            )
 
         # ------------------------------------------------------------------
-        # COCO path: use eccv_caption library
+        # Standard retrieval metrics run on all datasets/splits.
+        # COCO test additionally logs eccv_caption metrics.
         # ------------------------------------------------------------------
-        if eval_eccv:
-            # sim_matrix: [N_captions, N_images]
-            sim_matrix = torch.matmul(txt_embeds, img_embeds_unique.t()).numpy()
+        current_split = self.val_loader.dataset.split
+        dataset_label = "Flickr" if is_flickr else ("COCO Test" if current_split == 'test' else "COCO (Val)")
+
+        r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
+
+        # Build ground-truth dicts for mAP@R / R-Precision
+        # Keys are sentids (stable Karpathy IDs); ranked list values are also sentids / image_ids.
+        # gt_i2t: image_id -> set of sentids belonging to that image (R=5)
+        # gt_t2i: sentid -> set of image_ids for that caption (R=1)
+        caption_ids_rank = [sid.item() for sid in sentids]
+        image_ids_rank = [uid.item() for uid in unique_image_ids]
+
+        gt_i2t = {}
+        for uid in unique_image_ids:
+            uid_val = uid.item()
+            gt_i2t[uid_val] = set(
+                caption_ids_rank[cap_idx]
+                for cap_idx in range(len(image_ids))
+                if image_ids[cap_idx].item() == uid_val
+            )
+
+        gt_t2i = {}
+        for cap_idx, sid in enumerate(caption_ids_rank):
+            img_id = image_ids[cap_idx].item()
+            gt_t2i[sid] = {img_id}
+
+        sim_matrix = torch.matmul(txt_embeds, img_embeds_unique.t()).numpy()  # [N_captions, N_images]
+        i2t_ranked, t2i_ranked = build_ranked_dicts(sim_matrix, image_ids_rank, caption_ids_rank)
+        mapr_scores = compute_mapr_rprecision(i2t_ranked, t2i_ranked, gt_i2t, gt_t2i)
+
+        log_data = {
+            "val/t2i_r1":         r_t2i[1],
+            "val/t2i_r5":         r_t2i[5],
+            "val/t2i_r10":        r_t2i[10],
+            "val/i2t_r1":         r_i2t[1],
+            "val/i2t_r5":         r_i2t[5],
+            "val/i2t_r10":        r_i2t[10],
+            "val/t2i_mapr":       mapr_scores['mapr_t2i'],
+            "val/i2t_mapr":       mapr_scores['mapr_i2t'],
+            "val/t2i_rprecision": mapr_scores['rprecision_t2i'],
+            "val/i2t_rprecision": mapr_scores['rprecision_i2t'],
+        }
+
+        logger.info(
+            f"Epoch {epoch_log} {dataset_label} Results:\n"
+            f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f} | "
+            f"mAP@R: {mapr_scores['mapr_t2i']:.2f} | R-Prec: {mapr_scores['rprecision_t2i']:.2f}\n"
+            f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f} | "
+            f"mAP@R: {mapr_scores['mapr_i2t']:.2f} | R-Prec: {mapr_scores['rprecision_i2t']:.2f}"
+        )
+
+        eccv_scores = {}
+        if is_coco and current_split == 'test':
             caption_ids_eccv = [sid.item() for sid in sentids]
             image_ids_eccv = [uid.item() for uid in unique_image_ids]
-
             eccv_scores = compute_eccv_metrics(sim_matrix, image_ids_eccv, caption_ids_eccv)
 
-            if not eccv_scores:
-                logger.warning("eccv_caption returned empty scores; falling back to standard R@K.")
-                eval_eccv = False
-
-        if eval_eccv:
+        if is_coco and eccv_scores:
             # eccv_caption output structure:
             #   coco_5k_recalls / coco_1k_recalls: {direction: {K: value}}   (0-1 scale)
             #   eccv_r1 / eccv_map_at_r / eccv_rprecision: {direction: value} (0-1 scale)
@@ -493,7 +567,7 @@ class Trainer:
             def _scalar(d, direction):
                 return d.get(direction, 0.0) * 100.0
 
-            log_data = {
+            log_data.update({
                 # COCO-5K recalls
                 "val/coco_5k_r1_i2t":  _recall(coco5k, 'i2t', 1),
                 "val/coco_5k_r1_t2i":  _recall(coco5k, 't2i', 1),
@@ -518,10 +592,10 @@ class Trainer:
                 # CxC recalls (R@1 only for brevity; full set available via eccv_scores)
                 "val/cxc_r1_i2t": _recall(cxc, 'i2t', 1),
                 "val/cxc_r1_t2i": _recall(cxc, 't2i', 1),
-            }
+            })
 
             logger.info(
-                f"Epoch {epoch_log} COCO Results:\n"
+                f"Epoch {epoch_log} COCO ECCV Test Results:\n"
                 f"  COCO-5K  R@1: i2t={log_data['val/coco_5k_r1_i2t']:.2f} | t2i={log_data['val/coco_5k_r1_t2i']:.2f} | "
                 f"R@5: i2t={log_data['val/coco_5k_r5_i2t']:.2f} | t2i={log_data['val/coco_5k_r5_t2i']:.2f} | "
                 f"R@10: i2t={log_data['val/coco_5k_r10_i2t']:.2f} | t2i={log_data['val/coco_5k_r10_t2i']:.2f}\n"
@@ -533,60 +607,7 @@ class Trainer:
 
             current_metrics = {k.split('val/')[1]: v for k, v in log_data.items()}
             primary_score = log_data["val/coco_5k_r1_i2t"]
-
-        # ------------------------------------------------------------------
-        # Flickr path: existing R@K + manual mAP@R / R-Precision
-        # ------------------------------------------------------------------
-        if not eval_eccv:
-            r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
-
-            # Build ground-truth dicts for mAP@R / R-Precision
-            # Keys are sentids (stable Karpathy IDs); ranked list values are also sentids / image_ids.
-            # gt_i2t: image_id -> set of sentids belonging to that image (R=5)
-            # gt_t2i: sentid -> set of image_ids for that caption (R=1)
-            caption_ids_flickr = [sid.item() for sid in sentids]
-            image_ids_list_flickr = [uid.item() for uid in unique_image_ids]
-
-            gt_i2t = {}
-            for i, uid in enumerate(unique_image_ids):
-                uid_val = uid.item()
-                gt_i2t[uid_val] = set(
-                    caption_ids_flickr[cap_idx]
-                    for cap_idx in range(len(image_ids))
-                    if image_ids[cap_idx].item() == uid_val
-                )
-            gt_t2i = {}
-            for cap_idx, sid in enumerate(caption_ids_flickr):
-                img_id = image_ids[cap_idx].item()
-                gt_t2i[sid] = {img_id}
-
-            # sim_matrix: [N_captions, N_images]
-            sim_matrix = torch.matmul(txt_embeds, img_embeds_unique.t()).numpy()
-            i2t_ranked, t2i_ranked = build_ranked_dicts(sim_matrix, image_ids_list_flickr, caption_ids_flickr)
-
-            mapr_scores = compute_mapr_rprecision(i2t_ranked, t2i_ranked, gt_i2t, gt_t2i)
-
-            logger.info(
-                f"Epoch {epoch_log} Flickr Results:\n"
-                f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f} | "
-                f"mAP@R: {mapr_scores['mapr_t2i']:.2f} | R-Prec: {mapr_scores['rprecision_t2i']:.2f}\n"
-                f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f} | "
-                f"mAP@R: {mapr_scores['mapr_i2t']:.2f} | R-Prec: {mapr_scores['rprecision_i2t']:.2f}"
-            )
-
-            log_data = {
-                "val/t2i_r1":         r_t2i[1],
-                "val/t2i_r5":         r_t2i[5],
-                "val/t2i_r10":        r_t2i[10],
-                "val/i2t_r1":         r_i2t[1],
-                "val/i2t_r5":         r_i2t[5],
-                "val/i2t_r10":        r_i2t[10],
-                "val/t2i_mapr":       mapr_scores['mapr_t2i'],
-                "val/i2t_mapr":       mapr_scores['mapr_i2t'],
-                "val/t2i_rprecision": mapr_scores['rprecision_t2i'],
-                "val/i2t_rprecision": mapr_scores['rprecision_i2t'],
-            }
-
+        else:
             current_metrics = {k.split('val/')[1]: v for k, v in log_data.items()}
             primary_score = r_t2i[1]
 
@@ -608,31 +629,41 @@ class Trainer:
                         wandb.run.summary[f"best_val_{metric_name}"] = current_value
 
             except Exception as e:
-                logger.warning(f"Failed to log to W&B: {e}")
+                logger.warning(f"Failed to log to W&B: {e}", exc_info=True)
 
-            try:
-                self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
-            except Exception as e:
-                logger.warning(f"Qualitative table logging failed: {e}")
+            if epoch == "TEST_FINAL":
+                try:
+                    self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
+                except Exception as e:
+                    logger.warning(f"Qualitative table logging failed: {e}", exc_info=True)
 
         return primary_score
 
     def _log_qualitative_table(self, epoch, txt_embeds, img_embeds_unique, first_occurrence_indices):
         """
-        Logs a WandB Table visualizing Text-to-Image retrieval.
-        Columns: Caption | Ground Truth | Rank 1 | Rank 2 | Rank 3
-        """
-        num_samples = len(txt_embeds)
-        sample_count = min(5, num_samples)
-        indices = random.sample(range(num_samples), sample_count)
+        Logs a WandB Table visualizing Text-to-Image retrieval on the test set.
+        Only called during TEST_FINAL so results reflect the best checkpoint, not val epochs.
+        Columns: image_id | sentid | Caption | Ground Truth | Rank 1 | Rank 2 | Rank 3
 
-        columns = ["Caption", "Ground Truth", "Rank 1", "Rank 2", "Rank 3"]
-        table = wandb.Table(columns=columns)
+        Samples are selected deterministically: the 50 samples with the lowest sentid,
+        so the same images are shown across all runs and seeds.
+        Images are resized to 224px before upload to reduce W&B payload (~55% smaller).
+        """
+        from PIL import Image as PILImage
         dataset = self.val_loader.dataset
+
+        # Deterministic sample selection: 50 lowest sentids
+        indexed = sorted(enumerate(dataset.samples), key=lambda x: x[1]['sentid'])
+        indices = [i for i, _ in indexed[:50]]
+
+        columns = ["image_id", "sentid", "Caption", "Ground Truth", "Rank 1", "Rank 2", "Rank 3"]
+        table = wandb.Table(columns=columns)
 
         for idx in indices:
             sample = dataset.samples[idx]
             caption = sample["caption"]
+            image_id = sample["image_id"]
+            sentid = sample["sentid"]
             filename = sample["filename"]
             filepath = sample.get("filepath", "")
             if filepath:
@@ -641,8 +672,11 @@ class Trainer:
                 img_path = os.path.join(dataset.images_root_path, filename)
 
             try:
-                gt_image = wandb.Image(img_path)
-            except Exception:
+                pil_gt = PILImage.open(img_path).convert("RGB")
+                pil_gt.thumbnail((224, 224), PILImage.LANCZOS)
+                gt_image = wandb.Image(pil_gt)
+            except Exception as e:
+                logger.warning(f"Failed to load ground-truth image: {img_path} — {e}")
                 gt_image = wandb.Image(torch.zeros(3, 224, 224), caption="Img Not Found")
 
             query_emb = txt_embeds[idx].to(self.device)
@@ -659,15 +693,18 @@ class Trainer:
                     ret_path = os.path.join(dataset.images_root_path, ret_filepath, ret_filename)
                 else:
                     ret_path = os.path.join(dataset.images_root_path, ret_filename)
-                score_str = f"Score: {topk_scores[rank].item():.2f}"
+                score_str = f"#{rank+1} img_id={ret_sample['image_id']} score={topk_scores[rank].item():.2f}"
                 try:
-                    retrieved_images.append(wandb.Image(ret_path, caption=score_str))
-                except Exception:
+                    pil_ret = PILImage.open(ret_path).convert("RGB")
+                    pil_ret.thumbnail((224, 224), PILImage.LANCZOS)
+                    retrieved_images.append(wandb.Image(pil_ret, caption=score_str))
+                except Exception as e:
+                    logger.warning(f"Failed to load retrieved image: {ret_path} — {e}")
                     retrieved_images.append(wandb.Image(torch.zeros(3, 224, 224), caption="Err"))
 
-            table.add_data(caption, gt_image, *retrieved_images)
+            table.add_data(image_id, sentid, caption, gt_image, *retrieved_images)
 
-        wandb.log({"val/qualitative_results": table}, commit=False)
+        wandb.log({"test/qualitative_results": table}, commit=False)
 
     def fit(self, start_epoch=0):
         eval_frequency = self.config['logging']['eval_freq']

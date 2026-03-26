@@ -1,6 +1,3 @@
 data:
   images_path: "datasets/coco"
   captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
-
-logging:
-  eval_eccv: true

@@ -233,3 +233,5 @@ def setup_tracker(config, debug_mode=False):
         init_kwargs["resume"] = "allow"
 
     wandb.init(**init_kwargs)
+    slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
+    wandb.config.update({'slurm_job_id': slurm_job_id}, allow_val_change=True)
