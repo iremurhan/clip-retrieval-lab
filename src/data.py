@@ -241,6 +241,7 @@ class CaptionImageDataset(Dataset):
                     self.samples.append({
                         'image_id': img_id,
                         'caption': sent['raw'],
+                        'sentid': int(sent['sentid']),
                         'filepath': img.get('filepath', ''),
                         'filename': img.get('filename', '')
                     })
@@ -286,10 +287,11 @@ class CaptionImageDataset(Dataset):
         return {
             'image': img_tensor,
             'image_aug': img_aug_tensor,
+            'caption': caption,
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
             'image_id': image_id,
-            'caption': caption,
+            'sentid': sample['sentid'],
         }
 
 
@@ -314,7 +316,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     images_root = config['data']['images_path']
     captions_path = config['data']['captions_path']
 
-    # Resolve image size from model config (336 for CLIP ViT-L/14@336px)
+    # Resolve image size from data config (defined in config_base.yaml)
     image_size = config['data']['image_size']
 
     if split == 'train':
@@ -337,26 +339,31 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         images_root_path=images_root,
         captions_path=captions_path,
         tokenizer=tokenizer,
-        max_length=config['data']['max_length'],
+        max_length=config['data']['max_length'],  # defined in config_base.yaml
         split=split,
         transform=transform,
         transform_aug=transform_aug,
     )
 
-    # Debug Truncation
-    if config.get('debug', {}).get('debug_mode', False):
-        debug_limit = config['debug'].get('debug_samples', 100)
-        if len(dataset.samples) > debug_limit:
-            logger.warning(f"DEBUG MODE: Truncating dataset to {debug_limit} samples.")
-            dataset.samples = dataset.samples[:debug_limit]
+    seed = config['training']['seed']
+
+    def _worker_init_fn(worker_id):
+        worker_seed = seed + worker_id
+        import numpy as np
+        import random
+        import torch as _torch
+        _torch.manual_seed(worker_seed)
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
 
     loader = DataLoader(
         dataset,
-        batch_size=config['training']['batch_size'],
+        batch_size=config['training']['batch_size'],  # defined in config_base.yaml
         shuffle=shuffle,
-        num_workers=config['data']['num_workers'],
+        num_workers=config['data']['num_workers'],  # defined in config_base.yaml
         pin_memory=True,
-        drop_last=(split == 'train')
+        drop_last=(split == 'train'),
+        worker_init_fn=_worker_init_fn,
     )
 
     return loader

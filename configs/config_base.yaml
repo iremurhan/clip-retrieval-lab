@@ -13,11 +13,9 @@ model:
   unfreeze_strategy: "full"
 
 loss:
-  # Hard Negative Mining (FNE + neg_txt_embeds) only runs when use_clip_loss is false.
-  use_clip_loss: false
   temperature: 0.07
   intra_img_weight: 1
-  intra_txt_weight: 0
+  intra_txt_weight: 1
 
 # On-the-fly paraphrasing config for L_text_text = InfoNCE(T_orig, T_paraphrased).
 # Only loaded when loss.intra_txt_weight > 0. Safe to leave here with weight=0.
@@ -30,11 +28,7 @@ paraphraser:
   bnb_4bit_use_double_quant: true
 
 training:
-  # DataLoader-related defaults (will be mirrored into data.* at runtime)
   batch_size: 128
-  num_workers: 8
-  max_length: 77
-  image_size: 336
 
   epochs: 20
   seed: 42
@@ -47,6 +41,11 @@ training:
   backbone_lr: 0.000002
   weight_decay: 0.01
 
+data:
+  max_length: 77
+  num_workers: 8
+  image_size: 336
+
 augment:
   # Number of photometric transforms sampled from the VLM-safe pool per image.
   # Pool: [ColorJitter, GaussianBlur, RandomGrayscale]. Max k=3.
@@ -54,13 +53,11 @@ augment:
   image:
     enabled: true
 
-debug:
-  debug_mode: false
-  debug_samples: 100
-
 logging:
   use_wandb: true
+  wandb_project: "clip-retrieval"
   log_freq: 500
   eval_freq: 1
+  eval_epoch_zero: false
   save_freq: 3
   checkpoint_dir: "checkpoints"

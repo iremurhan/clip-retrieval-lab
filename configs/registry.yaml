@@ -1,0 +1,37 @@
+runs:
+  B0:
+    description: "Minimal FT — InfoNCE, projection layers only, no aug"
+    overrides:
+      logging.eval_epoch_zero: true
+      loss.intra_img_weight: 0
+      loss.intra_txt_weight: 0
+      augment.k_photometric_augs: 0
+      model.unfreeze_vision_layers: 0
+
+  B0plus:
+    description: "Full baseline — mix aug for img + paraphrase for txt + intra-modal + 4-layer unfreeze"
+    overrides: {}  # current defaults, no changes needed
+
+  B1:
+    description: "B0+ + SigLIP loss"
+    overrides:
+      loss.type: siglip
+
+  B2:
+    description: "B0+ + syntactic hard negatives"
+    overrides:
+      loss.hard_negatives: true
+
+  B3:
+    description: "B0+ + LoRA rank 8 replacing 4-layer unfreeze"
+    overrides:
+      model.lora_rank: 8
+      model.unfreeze_vision_layers: 0
+
+  FULL:
+    description: "B0+ + SigLIP + hard negatives + LoRA"
+    overrides:
+      loss.type: siglip
+      loss.hard_negatives: true
+      model.lora_rank: 8
+      model.unfreeze_vision_layers: 0

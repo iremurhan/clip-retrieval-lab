@@ -1,32 +1,22 @@
 #!/bin/bash
 # =============================================================================
-# SLURM TRAINING SCRIPT
+# SLURM TRAINING SCRIPT — Ablation launcher variant
 # =============================================================================
-# Positional args:
-#   $1  EXPERIMENT_NAME   Human-readable label shown in logs (e.g. "B0_coco_s42")
-#   $2  CONFIG_PATH       Path to dataset config, relative to /workspace
-#                         (e.g. "configs/config_coco.yaml")
-#   $3+ EXTRA_ARGS        Any additional flags forwarded verbatim to run.py
-#                         (e.g. --run B0 --seed 42)
+# Accepts run_id, seed, and config as positional arguments.
+# Called by scripts/launch_ablation.sh — do not invoke directly.
 #
-# Usage (direct sbatch):
-#   sbatch scripts/train.slurm <EXP_NAME> <CONFIG_PATH> [run.py flags...]
+# Usage (via sbatch):
+#   sbatch scripts/ablation_train.slurm <RUN_ID> <SEED> <CONFIG>
+# Example:
+#   sbatch scripts/ablation_train.slurm B0plus 42 configs/config_flickr30k.yaml
 #
-# Examples:
-#   # Single run with registry overrides and seed
-#   sbatch scripts/train.slurm B0_coco_s42 configs/config_coco.yaml \
-#       --run B0 --seed 42
+# Arguments:
+#   $1  RUN_ID   Registry run ID (e.g. B0, FULL)
+#   $2  SEED     Random seed (e.g. 42)
+#   $3  CONFIG   Dataset config path (e.g. configs/config_coco.yaml)
 #
-#   # Debug run (no W&B, fast)
-#   sbatch scripts/train.slurm debug_run configs/config_coco.yaml \
-#       --run B0 --seed 42 --override debug.debug_mode=true
-#
-# Note: Prefer launch_run.sh for batch submission across datasets and seeds.
-#
-# Outputs:
-#   /output/results/{dataset}/{job_id}/slurm.out       SLURM stdout+stderr
-#   /output/results/{dataset}/{job_id}/training.log    Python stdout
-#   /output/results/{dataset}/{job_id}/best_model.pth  Best checkpoint
+# Checkpoint is written to:
+#   /output/results/{dataset}/{SLURM_JOB_ID}/  (best_model.pth, last_model.pth)
 # =============================================================================
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
@@ -40,24 +30,9 @@
 
 set -euo pipefail
 
-echo "Checking mounts..."
-echo "  /workspace: $(ls /workspace 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
-echo "  /output: $(ls /output 2>/dev/null | head -3 || echo 'NOT MOUNTED')"
-
-if [ ! -d "/workspace" ] || [ ! -d "/output" ]; then
-    echo "FATAL ERROR: Required mounts not found. Check container-mounts."
-    exit 1
-fi
-
-EXP_NAME="${1:-}"
-CONFIG_FILE="${2:-configs/config_coco.yaml}"
-shift 2
-EXTRA_ARGS=("$@")
-
-if [ ! -f "/workspace/$CONFIG_FILE" ]; then
-    echo "ERROR: Config file not found: $CONFIG_FILE"
-    exit 1
-fi
+RUN_ID="${1}"
+SEED="${2}"
+CONFIG_FILE="${3:-configs/config_coco.yaml}"
 
 DATASET=$(python3 -c "
 import sys, yaml
@@ -69,17 +44,19 @@ if not d:
     sys.exit('ERROR: data.dataset not set in config')
 print(d)
 ") || exit 1
-WANDB_PROJECT_AUTO="clip-retrieval"
 
+WANDB_PROJECT_AUTO="clip-retrieval"
 JOB_DIR="/output/results/${DATASET}/${SLURM_JOB_ID}"
 CKPT_DIR="$JOB_DIR"
 mkdir -p "$JOB_DIR"
 
 echo "=========================================="
-echo "Job ID:        ${SLURM_JOB_ID}"
-echo "Experiment:    ${EXP_NAME:- (Unnamed)}"
-echo "Dataset:       ${DATASET}"
-echo "Job dir:       ${JOB_DIR} (slurm.out, training.log, last_model.pth, best_model.pth, wandb/)"
+echo "Job ID:     ${SLURM_JOB_ID}"
+echo "Run ID:     ${RUN_ID}"
+echo "Seed:       ${SEED}"
+echo "Dataset:    ${DATASET}"
+echo "Config:     ${CONFIG_FILE}"
+echo "Job dir:    ${JOB_DIR}"
 echo "=========================================="
 
 export WANDB_DIR="$JOB_DIR"
@@ -103,10 +80,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python3 -u run.py \
     --config "$CONFIG_FILE" \
+    --run "$RUN_ID" \
+    --seed "$SEED" \
     --override \
-        debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
-    "${EXTRA_ARGS[@]}" \
     > "$JOB_DIR/training.log" 2>&1
 
 TRAIN_EXIT_CODE=$?
@@ -130,21 +107,20 @@ if [ -d "$JOB_DIR/wandb" ]; then
 fi
 
 if [ $SYNC_EXIT -eq 0 ]; then
-    echo "WandB sync successful. Local cache can be safely removed."
-    # If training succeeded, remove last_model.pth (keep only best_model.pth to save disk)
+    echo "WandB sync successful."
     if [ $TRAIN_EXIT_CODE -eq 0 ]; then
         if [ -f "$JOB_DIR/last_model.pth" ]; then
             rm -f "$JOB_DIR/last_model.pth"
         fi
     fi
-    # Remove local WandB cache
     if [ -d "$JOB_DIR/wandb" ]; then
         rm -rf "$JOB_DIR/wandb"
     fi
 else
-    echo "WARNING: WandB sync failed or was not run. Keeping '$JOB_DIR/wandb' and 'last_model.pth' for manual recovery."
+    echo "WARNING: WandB sync failed. Keeping '$JOB_DIR/wandb' and 'last_model.pth' for manual recovery."
 fi
 
+# Move slurm log into the dataset/job directory now that JOB_DIR is known.
 SLURM_LOG="/users/beyza.urhan/experiments/results/slurm_${SLURM_JOB_ID}.out"
 if [ -f "$SLURM_LOG" ]; then
     mv "$SLURM_LOG" "$JOB_DIR/slurm.out"

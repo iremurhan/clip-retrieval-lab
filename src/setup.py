@@ -24,6 +24,7 @@ def setup_seed(seed=42):
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def deep_merge_dicts(base, override):
@@ -64,6 +65,23 @@ def apply_overrides(config, overrides):
         current[keys[-1]] = raw
 
 
+def load_registry_overrides(run_id, registry_path="configs/registry.yaml"):
+    """
+    Load the overrides list for a named run from the registry.
+    Returns a list of 'key=value' strings compatible with apply_overrides().
+    Raises KeyError if run_id is not found in the registry.
+    """
+    if not os.path.isfile(registry_path):
+        raise FileNotFoundError(f"Registry not found: {registry_path}")
+    with open(registry_path, "r") as f:
+        registry = yaml.safe_load(f)
+    runs = registry.get("runs", {})
+    if run_id not in runs:
+        raise KeyError(f"Run '{run_id}' not found in registry. Available: {list(runs.keys())}")
+    overrides_dict = runs[run_id].get("overrides") or {}
+    return [f"{k}={v}" for k, v in overrides_dict.items()]
+
+
 def setup_config(base_path=None, config_path=None, overrides=None):
     """
     Load base config, optionally merge dataset-specific config, apply CLI overrides.
@@ -87,66 +105,66 @@ def setup_config(base_path=None, config_path=None, overrides=None):
 
 def make_wandb_config(config):
     """Build a minimal config dict for WandB (scientific params only)."""
-    images_path = config.get("data", {}).get("images_path", "")
-    dataset_name = "flickr30k" if "flickr" in images_path else "coco"
     return {
-        "dataset": dataset_name,
-        "model": {
-            "name": config.get("model", {}).get("image_model_name"),
-            "unfreeze": config.get("model", {}).get("unfreeze_vision_layers"),
-            "strategy": config.get("model", {}).get("unfreeze_strategy"),
-        },
-        "batch_size": config.get("training", {}).get("batch_size"),
-        "epochs": config.get("training", {}).get("epochs"),
-        "lr": {
-            "head": config.get("training", {}).get("head_lr"),
-            "backbone": config.get("training", {}).get("backbone_lr"),
-            "clip": config.get("training", {}).get("clip_projection_lr"),
-        },
+        "run_id":              config['logging']['run_id'],
+        "dataset":             config['data']['dataset'],
+        "seed":                config['training']['seed'],
+        "model":               config.get('model', {}).get('image_model_name'),
+        "loss_type":           config.get('loss', {}).get('type', 'infonce'),
+        "hard_negatives":      config.get('loss', {}).get('hard_negatives', False),
+        "lora_rank":           config.get('model', {}).get('lora_rank', 0),
+        "unfreeze_layers":     config.get('model', {}).get('unfreeze_vision_layers', 0),
+        "intra_img_weight":    config.get('loss', {}).get('intra_img_weight', 0),
+        "intra_txt_weight":    config.get('loss', {}).get('intra_txt_weight', 0),
+        "k_photometric_augs":  config.get('augment', {}).get('k_photometric_augs', 0),
+        "batch_size":          config.get('training', {}).get('batch_size'),
+        "epochs":              config.get('training', {}).get('epochs'),
+        "use_grad_cache":      config.get('training', {}).get('use_grad_cache', False),
     }
 
 
-def format_run_name(job_id, dataset_name, exp_name=""):
-    """Generate WandB run name: {job_id}_{dataset_name}_{exp_name} or {job_id}_{dataset_name}."""
-    parts = [str(job_id), dataset_name]
-    if exp_name:
-        parts.append(exp_name)
+def format_run_name(run_id, dataset_name, seed=None):
+    """Generate WandB run name: {run_id}_{dataset}_{seed}"""
+    parts = [str(run_id), dataset_name]
+    if seed is not None:
+        parts.append(f"s{seed}")
     return "_".join(parts)
 
 
-def setup_tracker(config, debug_mode=False):
+def setup_tracker(config):
     """
     Initialize WandB with clean config and run name.
-    job_id from SLURM_JOB_ID or 'local'; dataset from config; exp_name optional (e.g. from config).
+    run_id from config['logging']['run_id']; dataset and seed from config.
     """
-    if not config.get("logging", {}).get("use_wandb", True) or debug_mode:
+    if not config.get("logging", {}).get("use_wandb", True):
         return
-    job_id = os.environ.get("SLURM_JOB_ID", "local")
-    images_path = config.get("data", {}).get("images_path", "")
-    dataset_name = "flickr30k" if "flickr" in images_path else "coco"
-    exp_name = config.get("logging", {}).get("run_name", "") or ""
-    run_name = format_run_name(job_id, dataset_name, exp_name)
     project = config.get("logging", {}).get("wandb_project")
     if not project:
         logger.warning("wandb_project not set; skipping WandB init.")
         return
 
+    run_id = config['logging']['run_id']
+    seed = config['training']['seed']
+    dataset_name = config['data']['dataset']
+
+    run_name = format_run_name(run_id, dataset_name, seed=seed)
+    group = run_id
+
+    tags = [
+        f"run_id:{run_id}",
+        f"dataset:{dataset_name}",
+        f"seed:{seed}",
+    ]
+
     wandb_id = config.get("logging", {}).get("wandb_id")
-    
-    # Read group and job_type from config (support usage under 'wandb' key or 'logging')
-    group = config.get("wandb", {}).get("group") or config.get("logging", {}).get("group")
-    job_type = config.get("wandb", {}).get("job_type") or config.get("logging", {}).get("job_type")
 
     init_kwargs = {
         "project": project,
         "config": make_wandb_config(config),
         "name": run_name,
+        "group": group,
+        "tags": tags,
     }
-    
-    if group:
-        init_kwargs["group"] = group
-    if job_type:
-        init_kwargs["job_type"] = job_type
 
     # If a specific WandB run id is provided, force resume onto that run
     if wandb_id:
@@ -157,3 +175,10 @@ def setup_tracker(config, debug_mode=False):
         init_kwargs["resume"] = "allow"
 
     wandb.init(**init_kwargs)
+
+    slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
+    wandb.config.update(
+        {'slurm_job_id': slurm_job_id},
+        allow_val_change=True
+    )
+    logger.info(f"WandB run: {run_name} | group: {group} | slurm_job_id: {slurm_job_id}")

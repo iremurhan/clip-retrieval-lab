@@ -60,6 +60,7 @@ class GradCache:
         self.config = config
         self.device = device
         self.scaler = scaler
+        self.amp_dtype = torch.bfloat16 if (scaler is not None and self.device.type == 'cuda') else None
         
         # STRICT CONFIG: No fallback, must crash if missing
         self.micro_batch_size = config['training']['micro_batch_size']
@@ -106,7 +107,9 @@ class GradCache:
         txt_mask_chunks = self._split_into_chunks(attention_mask, self.micro_batch_size)
 
         # Para chunks: split if provided, else fill with None placeholders
-        has_para = (para_input_ids is not None) and (self.criterion.w_txt > 0)
+        # SigLIPLoss has no w_txt attribute (no intra-modal term); default to 0
+        w_txt = getattr(self.criterion, 'w_txt', 0)
+        has_para = (para_input_ids is not None) and (w_txt > 0)
         para_input_chunks = (
             self._split_into_chunks(para_input_ids, self.micro_batch_size)
             if has_para else [None] * len(img_chunks)
@@ -125,7 +128,7 @@ class GradCache:
                 img_chunks, txt_input_chunks, txt_mask_chunks, para_input_chunks, para_mask_chunks
             ):
                 if self.use_amp:
-                    with torch.amp.autocast(device_type='cuda'):
+                    with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                         img_emb = self.model.encode_image(img_chunk)
                         txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
                         if has_para:
@@ -168,7 +171,7 @@ class GradCache:
         ):
             # Re-compute embeddings WITH gradients for current micro-batch
             if self.use_amp:
-                with torch.amp.autocast(device_type='cuda'):
+                with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                     img_emb_grad = self.model.encode_image(img_chunk)
                     txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
                     if has_para:
@@ -181,36 +184,35 @@ class GradCache:
                     para_emb_grad = self.model.encode_text(para_in_chunk, para_mask_chunk)
                     # para_emb_grad: [micro_B, D] — gradient-enabled
 
-            # Build full-batch embeddings: Current chunk has gradients, others are cached (detached)
+            # Build full-batch embeddings: current chunk has gradients, others are cached (detached)
             chunk_start = chunk_idx * self.micro_batch_size
             chunk_end = chunk_start + img_chunk.size(0)
 
-            # Clone cached embeddings and insert gradient-enabled chunk
-            img_embeds_full = cached_img_embeds.clone()
-            txt_embeds_full = cached_txt_embeds.clone()
-
-            img_embeds_full[chunk_start:chunk_end] = img_emb_grad  # [N, D]
-            txt_embeds_full[chunk_start:chunk_end] = txt_emb_grad  # [N, D]
-
-            # Build full para tensor: substitute current chunk with gradient version
+            img_embeds_full = torch.cat([cached_img_embeds[:chunk_start], img_emb_grad, cached_img_embeds[chunk_end:]], dim=0)
+            txt_embeds_full = torch.cat([cached_txt_embeds[:chunk_start], txt_emb_grad, cached_txt_embeds[chunk_end:]], dim=0)
             para_embeds_full = None
             if has_para:
-                para_embeds_full = cached_para_embeds_full.clone()
-                para_embeds_full[chunk_start:chunk_end] = para_emb_grad  # [N, D]
+                para_embeds_full = torch.cat([
+                    cached_para_embeds_full[:chunk_start],
+                    para_emb_grad,
+                    cached_para_embeds_full[chunk_end:],
+                ], dim=0)
 
             # Compute loss on full batch (but only current chunk has gradients)
             if self.use_amp:
-                with torch.amp.autocast(device_type='cuda'):
+                with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                     loss_dict = self.criterion(
                         img_embeds_full,
                         txt_embeds_full,
-                        img_aug_embeds=None,
+                        self.model.clip.logit_scale,
+                        img_aug_embeds=None,  # Intra-modal img not supported yet in grad cache
                         txt_aug_embeds=para_embeds_full,
                     )
             else:
                 loss_dict = self.criterion(
                     img_embeds_full,
                     txt_embeds_full,
+                    self.model.clip.logit_scale,
                     img_aug_embeds=None,
                     txt_aug_embeds=para_embeds_full,
                 )
@@ -240,9 +242,10 @@ class GradCache:
     def _standard_forward(self, images, input_ids, attention_mask,
                           para_input_ids=None, para_attention_mask=None):
         """Standard forward pass when gradient caching is not needed."""
-        has_para = para_input_ids is not None
+        w_txt = getattr(self.criterion, 'w_txt', 0)
+        has_para = (para_input_ids is not None) and (w_txt > 0)
         if self.use_amp:
-            with torch.amp.autocast(device_type='cuda'):
+            with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                 img_embeds = self.model.encode_image(images)
                 txt_embeds = self.model.encode_text(input_ids, attention_mask)
                 para_embeds = (
@@ -251,6 +254,7 @@ class GradCache:
                 )
                 loss_dict = self.criterion(
                     img_embeds, txt_embeds,
+                    self.model.clip.logit_scale,
                     img_aug_embeds=None,
                     txt_aug_embeds=para_embeds,
                 )
@@ -263,6 +267,7 @@ class GradCache:
             )
             loss_dict = self.criterion(
                 img_embeds, txt_embeds,
+                self.model.clip.logit_scale,
                 img_aug_embeds=None,
                 txt_aug_embeds=para_embeds,
             )

@@ -5,7 +5,11 @@ Metrics computation for Cross-Modal Retrieval evaluation.
 Implements Recall@K, MAP@K, and AverageMeter utilities for tracking training metrics.
 """
 
+import logging
+import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class AverageMeter(object):
@@ -26,20 +30,60 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
+def _build_gt_mappings(image_ids, unique_image_ids):
+    """
+    Build ground-truth index structures shared by all metric functions.
+
+    Args:
+        image_ids (Tensor): Shape [N_captions] -> image ID for each caption
+        unique_image_ids (Tensor): Shape [N_images] -> unique image IDs
+
+    Returns:
+        image_id_to_idx (dict): image_id -> index in unique_image_ids
+        caption_to_image_idx (Tensor): Shape [N_captions] -> unique image index per caption
+        image_to_caption_indices (dict): unique image index -> set of caption indices
+    """
+    n_txts = image_ids.shape[0]
+    n_imgs = unique_image_ids.shape[0]
+
+    image_id_to_idx = {img_id.item(): idx for idx, img_id in enumerate(unique_image_ids)}
+
+    caption_to_image_idx = []
+    for caption_idx in range(n_txts):
+        caption_image_id = image_ids[caption_idx].item()
+        if caption_image_id not in image_id_to_idx:
+            raise ValueError(
+                f"Caption {caption_idx} has image_id {caption_image_id} which is not found in unique_image_ids. "
+                "This indicates a mismatch between caption and image data."
+            )
+        caption_to_image_idx.append(image_id_to_idx[caption_image_id])
+    caption_to_image_idx = torch.tensor(caption_to_image_idx, dtype=torch.long)
+
+    image_to_caption_indices = {}
+    for img_idx in range(n_imgs):
+        img_id = unique_image_ids[img_idx].item()
+        matching_captions = (image_ids == img_id).nonzero(as_tuple=True)[0]
+        image_to_caption_indices[img_idx] = set(matching_captions.tolist())
+
+    return image_id_to_idx, caption_to_image_idx, image_to_caption_indices
+
+
 @torch.no_grad()
-def compute_recall_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_values=[1, 5, 10]):
+def compute_recall_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_values=[1, 5, 10], sims=None):
     """
     Compute Recall@K for Image-Text Retrieval metrics.
-    
+
     Uses image_id matching from JSON data for accurate ground truth.
-    
+
     Args:
         img_embeds (Tensor): Shape [N_images, Dim] -> Normalized image features (unique images)
         txt_embeds (Tensor): Shape [N_captions, Dim] -> Normalized text features
         image_ids (Tensor): Shape [N_captions] -> Image ID for each caption (from dataset) - REQUIRED
         unique_image_ids (Tensor): Shape [N_images] -> Unique image IDs corresponding to img_embeds - REQUIRED
         k_values (list): Recall thresholds (e.g., R@1, R@5, R@10)
-        
+        sims (Tensor, optional): Precomputed similarity matrix [N_images, N_captions]. If provided,
+                                 skips the internal matmul.
+
     Returns:
         r_t2i (dict): Text-to-Image Recall scores
         r_i2t (dict): Image-to-Text Recall scores
@@ -50,39 +94,18 @@ def compute_recall_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_v
             "image_ids and unique_image_ids are required for accurate ground truth matching. "
             "These should be extracted from the dataset JSON file."
         )
-    
+
     # 1. Similarity Matrix Computation
     # [N, D] x [M, D]^T -> [N, M]
     # Rows: Images, Columns: Captions
-    sims = torch.matmul(img_embeds, txt_embeds.t())
-    
+    if sims is None:
+        sims = torch.matmul(img_embeds, txt_embeds.t())
+
     n_imgs = img_embeds.shape[0]
     n_txts = txt_embeds.shape[0]
-    
-    # 2. Build mapping from image_id to unique image index
-    # Create mapping: image_id -> index in unique_image_ids
-    image_id_to_idx = {img_id.item(): idx for idx, img_id in enumerate(unique_image_ids)}
-    
-    # Build ground truth: for each caption, which unique image index does it belong to?
-    caption_to_image_idx = []
-    for caption_idx in range(n_txts):
-        caption_image_id = image_ids[caption_idx].item()
-        if caption_image_id not in image_id_to_idx:
-            raise ValueError(
-                f"Caption {caption_idx} has image_id {caption_image_id} which is not found in unique_image_ids. "
-                "This indicates a mismatch between caption and image data."
-            )
-        unique_img_idx = image_id_to_idx[caption_image_id]
-        caption_to_image_idx.append(unique_img_idx)
-    caption_to_image_idx = torch.tensor(caption_to_image_idx, dtype=torch.long)
-    
-    # Build reverse mapping: for each unique image, which caption indices belong to it?
-    image_to_caption_indices = {}
-    for img_idx in range(n_imgs):
-        img_id = unique_image_ids[img_idx].item()
-        # Find all caption indices that have this image_id
-        matching_captions = (image_ids == img_id).nonzero(as_tuple=True)[0]
-        image_to_caption_indices[img_idx] = set(matching_captions.tolist())
+
+    # 2. Build ground-truth index structures
+    _, caption_to_image_idx, image_to_caption_indices = _build_gt_mappings(image_ids, unique_image_ids)
 
     # ----------------------------------------------------------------------
     # A. Text-to-Image Retrieval (T2I)
@@ -148,24 +171,26 @@ def compute_recall_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_v
 
 
 @torch.no_grad()
-def compute_map_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10]):
+def compute_map_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10], sims=None):
     """
     Compute Mean Average Precision (MAP@K) for Image-Text Retrieval.
-    
+
     MAP@K measures ranking quality by considering the position of all relevant items
     within the top-K results, not just whether they appear (like Recall@K).
-    
+
     For T2I: Each caption has exactly 1 correct image, so AP@K = 1/rank if rank <= K, else 0.
     For I2T: Each image has multiple correct captions (typically 5), so we compute
              the average precision across all relevant captions in top-K.
-    
+
     Args:
         img_embeds (Tensor): Shape [N_images, Dim] -> Normalized image features (unique images)
         txt_embeds (Tensor): Shape [N_captions, Dim] -> Normalized text features
         image_ids (Tensor): Shape [N_captions] -> Image ID for each caption
         unique_image_ids (Tensor): Shape [N_images] -> Unique image IDs
         k_values (list): MAP thresholds (e.g., MAP@5, MAP@10)
-        
+        sims (Tensor, optional): Precomputed similarity matrix [N_images, N_captions]. If provided,
+                                 skips the internal matmul.
+
     Returns:
         map_t2i (dict): Text-to-Image MAP scores
         map_i2t (dict): Image-to-Text MAP scores
@@ -175,32 +200,16 @@ def compute_map_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_valu
         raise ValueError(
             "image_ids and unique_image_ids are required for MAP computation."
         )
-    
+
     # Similarity Matrix: [N_images, N_captions]
-    sims = torch.matmul(img_embeds, txt_embeds.t())
-    
+    if sims is None:
+        sims = torch.matmul(img_embeds, txt_embeds.t())
+
     n_imgs = img_embeds.shape[0]
     n_txts = txt_embeds.shape[0]
-    
-    # Build mapping: image_id -> unique image index
-    image_id_to_idx = {img_id.item(): idx for idx, img_id in enumerate(unique_image_ids)}
-    
-    # Build caption -> image index mapping
-    caption_to_image_idx = []
-    for caption_idx in range(n_txts):
-        caption_image_id = image_ids[caption_idx].item()
-        unique_img_idx = image_id_to_idx.get(caption_image_id)
-        if unique_img_idx is None:
-            raise ValueError(f"Caption {caption_idx} has unknown image_id {caption_image_id}")
-        caption_to_image_idx.append(unique_img_idx)
-    caption_to_image_idx = torch.tensor(caption_to_image_idx, dtype=torch.long)
-    
-    # Build reverse mapping: image -> caption indices
-    image_to_caption_indices = {}
-    for img_idx in range(n_imgs):
-        img_id = unique_image_ids[img_idx].item()
-        matching_captions = (image_ids == img_id).nonzero(as_tuple=True)[0]
-        image_to_caption_indices[img_idx] = set(matching_captions.tolist())
+
+    # Build ground-truth index structures
+    _, caption_to_image_idx, image_to_caption_indices = _build_gt_mappings(image_ids, unique_image_ids)
     
     # ----------------------------------------------------------------------
     # A. Text-to-Image MAP (T2I)
@@ -273,3 +282,141 @@ def compute_map_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_valu
         map_i2t[k] = (map_i2t[k] / n_imgs) * 100.0
     
     return map_t2i, map_i2t
+
+
+def build_ranked_dicts(sim_matrix, image_ids, caption_ids):
+    """
+    Build ranked retrieval dicts for eccv_caption evaluation.
+
+    Args:
+        sim_matrix (np.ndarray): Shape [N_captions, N_images], similarity scores.
+        image_ids (list): Length N_images, image ID for each column.
+        caption_ids (list): Length N_captions, caption ID for each row.
+
+    Returns:
+        i2t (dict): {image_id: [caption_ids sorted by similarity, best first]}
+        t2i (dict): {caption_id: [image_ids sorted by similarity, best first]}
+    """
+    sim_matrix = np.array(sim_matrix)
+    # sim_matrix: [N_captions, N_images]
+
+    # t2i: for each caption (row), rank images (columns) descending
+    t2i = {}
+    for cap_idx, cap_id in enumerate(caption_ids):
+        ranked_img_indices = np.argsort(-sim_matrix[cap_idx])  # [N_images] descending
+        t2i[cap_id] = [image_ids[i] for i in ranked_img_indices]
+
+    # i2t: for each image (column), rank captions (rows) descending
+    i2t = {}
+    for img_idx, img_id in enumerate(image_ids):
+        ranked_cap_indices = np.argsort(-sim_matrix[:, img_idx])  # [N_captions] descending
+        i2t[img_id] = [caption_ids[i] for i in ranked_cap_indices]
+
+    return i2t, t2i
+
+
+def compute_mapr_rprecision(i2t, t2i, gt_i2t, gt_t2i):
+    """
+    Compute mAP@R and R-Precision for both i2t and t2i directions.
+
+    mAP@R: mean Average Precision truncated at R (number of relevant items).
+    R-Precision: precision at rank R, i.e. fraction of relevant items in top-R results.
+
+    For Flickr30k with Karpathy ground truth:
+      - i2t: R=5 per image (each image has 5 captions)
+      - t2i: R=1 per caption (each caption belongs to 1 image)
+
+    Args:
+        i2t (dict): {image_id: [caption_ids ranked descending by similarity]}
+        t2i (dict): {caption_id: [image_ids ranked descending by similarity]}
+        gt_i2t (dict): {image_id: set of relevant caption_ids}
+        gt_t2i (dict): {caption_id: set of relevant image_ids}
+
+    Returns:
+        dict with keys: mapr_i2t, mapr_t2i, rprecision_i2t, rprecision_t2i (all in %)
+    """
+    def _ap_at_r(ranked_list, relevant_set):
+        """AP@R for a single query."""
+        r = len(relevant_set)
+        if r == 0:
+            return 0.0, 0.0
+        hits = 0
+        precision_sum = 0.0
+        for pos, item in enumerate(ranked_list[:r]):
+            if item in relevant_set:
+                hits += 1
+                precision_sum += hits / (pos + 1)
+        ap = precision_sum / r
+        rprec = hits / r
+        return ap, rprec
+
+    # i2t
+    ap_sum_i2t = 0.0
+    rp_sum_i2t = 0.0
+    for img_id, ranked_caps in i2t.items():
+        relevant = gt_i2t.get(img_id, set())
+        ap, rp = _ap_at_r(ranked_caps, relevant)
+        ap_sum_i2t += ap
+        rp_sum_i2t += rp
+    n_i2t = len(i2t)
+    mapr_i2t = (ap_sum_i2t / n_i2t) * 100.0 if n_i2t > 0 else 0.0
+    rprecision_i2t = (rp_sum_i2t / n_i2t) * 100.0 if n_i2t > 0 else 0.0
+
+    # t2i
+    ap_sum_t2i = 0.0
+    rp_sum_t2i = 0.0
+    for cap_id, ranked_imgs in t2i.items():
+        relevant = gt_t2i.get(cap_id, set())
+        ap, rp = _ap_at_r(ranked_imgs, relevant)
+        ap_sum_t2i += ap
+        rp_sum_t2i += rp
+    n_t2i = len(t2i)
+    mapr_t2i = (ap_sum_t2i / n_t2i) * 100.0 if n_t2i > 0 else 0.0
+    rprecision_t2i = (rp_sum_t2i / n_t2i) * 100.0 if n_t2i > 0 else 0.0
+
+    return {
+        'mapr_i2t': mapr_i2t,
+        'mapr_t2i': mapr_t2i,
+        'rprecision_i2t': rprecision_i2t,
+        'rprecision_t2i': rprecision_t2i,
+    }
+
+
+def compute_eccv_metrics(sim_matrix, image_ids, caption_ids, dataset: str = "coco"):
+    """
+    Compute ECCV Caption metrics using the eccv_caption library.
+
+    Args:
+        sim_matrix (np.ndarray): Shape [N_captions, N_images].
+        image_ids (list): Image IDs corresponding to columns of sim_matrix.
+        caption_ids (list): Caption IDs corresponding to rows of sim_matrix.
+        dataset (str): 'coco' or 'flickr30k'. COCO-specific metrics
+            (coco_1k_recalls, coco_5k_recalls, cxc_recalls) are only
+            computed for COCO — they require COCO image IDs.
+
+    Returns:
+        dict: Full scores dict from eccv_caption, empty dict if library not installed.
+    """
+    if dataset != "coco":
+        return {}
+
+    try:
+        from eccv_caption import Metrics
+    except ImportError:
+        logger.warning("eccv_caption not installed; skipping ECCV metrics. Install with: pip install eccv-caption")
+        return {}
+
+    target_metrics = ['eccv_r1', 'eccv_map_at_r', 'eccv_rprecision']
+    if dataset == "coco":
+        target_metrics += ['coco_1k_recalls', 'coco_5k_recalls', 'cxc_recalls']
+
+    i2t, t2i = build_ranked_dicts(sim_matrix, image_ids, caption_ids)
+    metric = Metrics()
+    scores = metric.compute_all_metrics(
+        i2t,
+        t2i,
+        target_metrics=tuple(target_metrics),
+        Ks=(1, 5, 10),
+        verbose=False,
+    )
+    return scores
