@@ -145,14 +145,13 @@ class Trainer:
         
         return start_epoch
 
-    def save_checkpoint(self, epoch, is_best=False):
+    def save_checkpoint(self, epoch):
         """
-        Save checkpoint. Only two files are ever written: last_model.pth (for resume)
-        and best_model.pth (only when is_best=True). No epoch-based checkpoints.
+        Save checkpoint to best_model.pth (single file, overwritten every save_freq epochs).
+        Atomic write via .tmp + os.replace to avoid corrupt files on failure.
         Disk errors are caught and logged; training continues.
         """
-        last_path = os.path.join(self.checkpoint_dir, "last_model.pth")
-        best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
+        path = os.path.join(self.checkpoint_dir, "best_model.pth")
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -164,23 +163,13 @@ class Trainer:
         if self.use_amp:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
 
-        # Always update last_model.pth for resume
+        tmp_path = path + ".tmp"
         try:
-            torch.save(checkpoint, last_path)
-            logger.info(f"Checkpoint saved: last_model.pth (epoch {epoch})")
+            torch.save(checkpoint, tmp_path)
+            os.replace(tmp_path, path)
+            logger.info(f"Checkpoint saved: best_model.pth (epoch {epoch})")
         except (OSError, RuntimeError) as e:
-            # Do not crash training on disk errors; just log and continue.
-            logger.error(f"DISK ERROR: Could not save last_model.pth at Epoch {epoch}. {e}")
-            return
-
-        # Optionally update best_model.pth for best performance
-        if is_best:
-            try:
-                torch.save(checkpoint, best_path)
-                logger.info(f"Saved best model to {best_path} (R@1: {self.best_r1:.2f})")
-            except (OSError, RuntimeError) as e:
-                # Same here: log and keep training.
-                logger.error(f"DISK ERROR: Could not save best_model.pth at Epoch {epoch}. {e}")
+            logger.error(f"DISK ERROR: Could not save best_model.pth at Epoch {epoch}. {e}")
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -520,6 +509,8 @@ class Trainer:
 
     def fit(self, start_epoch=0):
         eval_frequency = self.config['logging']['eval_freq']
+        save_freq = self.config['logging']['save_freq']
+        improved_since_last_save = False
 
         # If start_epoch is 0 (i.e., not resuming), run initial evaluation.
         if start_epoch == 0:
@@ -536,18 +527,18 @@ class Trainer:
             logger.info(f"Epoch {epoch+1} Training Loss: {train_loss:.4f}")
 
             # Evaluation & Best Model Check
-            is_new_best = False
             is_eval_time = ((epoch + 1) % eval_frequency == 0) or (
                 (epoch + 1) == self.config['training']['epochs']
             )
             if is_eval_time:
                 score = self.evaluate(epoch)
-                is_new_best = score > self.best_r1
-                if is_new_best:
+                if score > self.best_r1:
                     self.best_r1 = score
+                    improved_since_last_save = True
                     logger.info(f"New Best R@1: {score:.2f} found at Epoch {epoch+1}!")
 
-            # Save Checkpoint
-            # Always keep last_model.pth up to date for resume; also update best_model.pth when is_new_best=True
-            os.makedirs(self.checkpoint_dir, exist_ok=True)
-            self.save_checkpoint(epoch + 1, is_best=is_new_best)
+            # Save only when save_freq is hit AND there has been improvement since last save
+            is_save_time = (epoch + 1) % save_freq == 0 or (epoch + 1) == self.config['training']['epochs']
+            if is_save_time and improved_since_last_save:
+                self.save_checkpoint(epoch + 1)
+                improved_since_last_save = False

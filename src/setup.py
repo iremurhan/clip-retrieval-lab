@@ -117,12 +117,12 @@ def format_run_name(job_id, dataset_name, exp_name=""):
     return "_".join(parts)
 
 
-def setup_tracker(config, debug_mode=False):
+def setup_tracker(config):
     """
     Initialize WandB with clean config and run name.
     job_id from SLURM_JOB_ID or 'local'; dataset from config; exp_name optional (e.g. from config).
     """
-    if not config.get("logging", {}).get("use_wandb", True) or debug_mode:
+    if not config.get("logging", {}).get("use_wandb", True):
         return
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     images_path = config.get("data", {}).get("images_path", "")

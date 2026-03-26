@@ -29,7 +29,7 @@ python run.py --config configs/config_coco.yaml
 python run.py --config configs/config_flickr.yaml --override training.epochs=10 loss.temperature=0.07
 
 # Resume from checkpoint
-python run.py --config configs/config_flickr.yaml --resume checkpoints/last_model.pth
+python run.py --config configs/config_flickr.yaml --resume checkpoints/best_model.pth
 ```
 
 **Training (HPC/SLURM)**
@@ -99,7 +99,7 @@ scripts/
 
 **False Negative Elimination (FNE):** During training, the dataset samples hard negatives from pre-mined caption neighbors. Neighbors with similarity > `mining.fne_threshold` are treated as false negatives and excluded. Requires mining to be run first and paths set in `mining.indices_path` / `mining.values_path`. Hard negatives are only used when `loss.use_clip_loss: false`.
 
-**Checkpointing:** Only two files are ever written — `last_model.pth` (every epoch, for resume) and `best_model.pth` (when T2I R@1 improves). After training, the best model is loaded and evaluated on the test split.
+**Checkpointing:** Single file `best_model.pth`, written every `save_freq` epochs (and at the final epoch). After training, this file is loaded and evaluated on the test split.
 
 **Mixed Precision:** AMP is automatically enabled when CUDA is available.
 

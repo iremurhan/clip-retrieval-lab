@@ -53,10 +53,6 @@ augment:
   image:
     enabled: true
 
-debug:
-  debug_mode: false
-  debug_samples: 100
-
 logging:
   use_wandb: true
   log_freq: 500
