@@ -346,14 +346,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform_aug=transform_aug,
     )
 
-    # Debug Truncation
-    if config.get('debug', {}).get('debug_mode', False):
-        debug_limit = config['debug'].get('debug_samples', 100)
-        if len(dataset.samples) > debug_limit:
-            logger.warning(f"DEBUG MODE: Truncating dataset to {debug_limit} samples.")
-            dataset.samples = dataset.samples[:debug_limit]
-
-    seed = config.get('training', {}).get('seed', 42)
+    seed = config['training']['seed']
 
     def _worker_init_fn(worker_id):
         worker_seed = seed + worker_id
