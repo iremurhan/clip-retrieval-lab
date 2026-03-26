@@ -73,24 +73,30 @@ class GradCache:
         """Split a tensor into chunks of size chunk_size."""
         return [tensor[i:i + chunk_size] for i in range(0, tensor.size(0), chunk_size)]
     
-    def forward(self, images, input_ids, attention_mask):
+    def forward(self, images, input_ids, attention_mask,
+                para_input_ids=None, para_attention_mask=None):
         """
         Perform gradient-cached forward and backward pass.
-        
+
         Args:
             images: [N, C, H, W] - Full batch of images
             input_ids: [N, L] - Full batch of text input IDs
             attention_mask: [N, L] - Full batch of attention masks
-        
+            para_input_ids: [N, 77] optional - Paraphrase token IDs for L_text_text
+            para_attention_mask: [N, 77] optional - Paraphrase attention mask
+
         Returns:
             dict: Loss dictionary with 'loss_total' and component losses
         """
         batch_size = images.size(0)
-        
+
         if batch_size <= self.micro_batch_size:
             # No need for gradient caching if batch fits in micro_batch
             logger.debug("Batch size <= micro_batch_size, using standard forward pass")
-            return self._standard_forward(images, input_ids, attention_mask)
+            return self._standard_forward(
+                images, input_ids, attention_mask,
+                para_input_ids, para_attention_mask,
+            )
         
         # ============================================================
         # PHASE 1: CACHE - Compute all embeddings without gradients
@@ -98,26 +104,51 @@ class GradCache:
         img_chunks = self._split_into_chunks(images, self.micro_batch_size)
         txt_input_chunks = self._split_into_chunks(input_ids, self.micro_batch_size)
         txt_mask_chunks = self._split_into_chunks(attention_mask, self.micro_batch_size)
-        
+
+        # Para chunks: split if provided, else fill with None placeholders
+        has_para = (para_input_ids is not None) and (self.criterion.w_txt > 0)
+        para_input_chunks = (
+            self._split_into_chunks(para_input_ids, self.micro_batch_size)
+            if has_para else [None] * len(img_chunks)
+        )
+        para_mask_chunks = (
+            self._split_into_chunks(para_attention_mask, self.micro_batch_size)
+            if has_para else [None] * len(img_chunks)
+        )
+
         cached_img_embeds = []
         cached_txt_embeds = []
-        
+        cached_para_embeds = []
+
         with torch.no_grad():
-            for img_chunk, txt_input_chunk, txt_mask_chunk in zip(img_chunks, txt_input_chunks, txt_mask_chunks):
+            for img_chunk, txt_input_chunk, txt_mask_chunk, para_in_chunk, para_mask_chunk in zip(
+                img_chunks, txt_input_chunks, txt_mask_chunks, para_input_chunks, para_mask_chunks
+            ):
                 if self.use_amp:
                     with torch.amp.autocast(device_type='cuda'):
                         img_emb = self.model.encode_image(img_chunk)
                         txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
+                        if has_para:
+                            para_emb = self.model.encode_text(para_in_chunk, para_mask_chunk)
+                            # para_emb: [micro_B, D]
                 else:
                     img_emb = self.model.encode_image(img_chunk)
                     txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
-                
+                    if has_para:
+                        para_emb = self.model.encode_text(para_in_chunk, para_mask_chunk)
+                        # para_emb: [micro_B, D]
+
                 cached_img_embeds.append(img_emb.detach())
                 cached_txt_embeds.append(txt_emb.detach())
-        
+                if has_para:
+                    cached_para_embeds.append(para_emb.detach())
+
         # Concatenate all cached embeddings
-        cached_img_embeds = torch.cat(cached_img_embeds, dim=0)
-        cached_txt_embeds = torch.cat(cached_txt_embeds, dim=0)
+        cached_img_embeds = torch.cat(cached_img_embeds, dim=0)      # [N, D]
+        cached_txt_embeds = torch.cat(cached_txt_embeds, dim=0)      # [N, D]
+        cached_para_embeds_full = (
+            torch.cat(cached_para_embeds, dim=0) if has_para else None
+        )  # [N, D] or None
         
         # ============================================================
         # PHASE 2: GRADIENT - Recompute each micro-batch with gradients
@@ -132,14 +163,17 @@ class GradCache:
         
         num_chunks = len(img_chunks)
         
-        for chunk_idx, (img_chunk, txt_input_chunk, txt_mask_chunk) in enumerate(
-            zip(img_chunks, txt_input_chunks, txt_mask_chunks)
+        for chunk_idx, (img_chunk, txt_input_chunk, txt_mask_chunk, para_in_chunk, para_mask_chunk) in enumerate(
+            zip(img_chunks, txt_input_chunks, txt_mask_chunks, para_input_chunks, para_mask_chunks)
         ):
             # Re-compute embeddings WITH gradients for current micro-batch
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):
                     img_emb_grad = self.model.encode_image(img_chunk)
                     txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
+                    if has_para:
+                        para_emb_grad = self.model.encode_text(para_in_chunk, para_mask_chunk)
+                        # para_emb_grad: [micro_B, D] — gradient-enabled
             else:
                 img_emb_grad = self.model.encode_image(img_chunk)
                 txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
@@ -155,17 +189,17 @@ class GradCache:
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):
                     loss_dict = self.criterion(
-                        img_embeds_full, 
+                        img_embeds_full,
                         txt_embeds_full,
-                        img_aug_embeds=None,  # Intra-modal not supported yet in grad cache
-                        txt_aug_embeds=None
+                        img_aug_embeds=None,
+                        txt_aug_embeds=para_embeds_full,
                     )
             else:
                 loss_dict = self.criterion(
-                    img_embeds_full, 
+                    img_embeds_full,
                     txt_embeds_full,
                     img_aug_embeds=None,
-                    txt_aug_embeds=None
+                    txt_aug_embeds=para_embeds_full,
                 )
             
             # NOTE: We do NOT scale the loss here. The full batch loss is computed,
@@ -190,24 +224,34 @@ class GradCache:
             for key, value in loss_dict_accumulator.items()
         }
     
-    def _standard_forward(self, images, input_ids, attention_mask):
+    def _standard_forward(self, images, input_ids, attention_mask,
+                          para_input_ids=None, para_attention_mask=None):
         """Standard forward pass when gradient caching is not needed."""
+        has_para = para_input_ids is not None
         if self.use_amp:
             with torch.amp.autocast(device_type='cuda'):
                 img_embeds = self.model.encode_image(images)
                 txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                para_embeds = (
+                    self.model.encode_text(para_input_ids, para_attention_mask)
+                    if has_para else None
+                )
                 loss_dict = self.criterion(
                     img_embeds, txt_embeds,
                     img_aug_embeds=None,
-                    txt_aug_embeds=None
+                    txt_aug_embeds=para_embeds,
                 )
         else:
             img_embeds = self.model.encode_image(images)
             txt_embeds = self.model.encode_text(input_ids, attention_mask)
+            para_embeds = (
+                self.model.encode_text(para_input_ids, para_attention_mask)
+                if has_para else None
+            )
             loss_dict = self.criterion(
                 img_embeds, txt_embeds,
                 img_aug_embeds=None,
-                txt_aug_embeds=None
+                txt_aug_embeds=para_embeds,
             )
-        
+
         return loss_dict

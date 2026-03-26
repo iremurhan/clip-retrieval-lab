@@ -290,7 +290,8 @@ class CaptionImageDataset(Dataset):
             'image_aug': img_aug_tensor,
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
-            'image_id': image_id
+            'image_id': image_id,
+            'caption': caption,
         }
 
 
