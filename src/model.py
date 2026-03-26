@@ -237,22 +237,3 @@ class DualEncoder(nn.Module):
             text_embeds = self.text_proj(text_embeds)
         return F.normalize(text_embeds, p=2, dim=1)
 
-    def forward_with_clip_loss(self, images, input_ids, attention_mask):
-        """
-        Alternative forward that returns CLIP's built-in contrastive loss.
-        
-        Use this if you want to bypass custom loss function.
-        Note: This ignores our additional projection heads.
-        
-        Returns:
-            loss: Scalar contrastive loss computed by CLIP
-            logits_per_image: [Batch, Batch] similarity matrix
-            logits_per_text: [Batch, Batch] similarity matrix (transposed)
-        """
-        outputs = self.clip(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=images,
-            return_loss=True
-        )
-        return outputs.loss, outputs.logits_per_image, outputs.logits_per_text
