@@ -22,7 +22,7 @@ import wandb
 import os
 import time
 import random
-from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k
+from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k, compute_eccv_metrics
 from .utils import compute_grad_norm
 from .grad_cache import GradCache
 
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device):
+    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device, clip_tokenizer=None):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -41,7 +41,8 @@ class Trainer:
         self.device = device
         
         self.use_wandb = wandb.run is not None
-        self.use_wandb = wandb.run is not None
+        self.tokenizer = clip_tokenizer
+
         self.log_freq = config['logging']['log_freq']
         self.checkpoint_dir = config['logging']['checkpoint_dir']
         
@@ -100,18 +101,14 @@ class Trainer:
         self.wandb_run = None
         if self.use_wandb and wandb.run is not None:
             self.wandb_run = wandb.run
-            # Define WandB summary metrics with max tracking for validation results
-            # This ensures the dashboard always shows the best scores, even if current epoch is worse
-            wandb.define_metric("val/t2i_r1", summary="max")
-            wandb.define_metric("val/t2i_r5", summary="max")
-            wandb.define_metric("val/t2i_r10", summary="max")
-            wandb.define_metric("val/i2t_r1", summary="max")
-            wandb.define_metric("val/i2t_r5", summary="max")
-            wandb.define_metric("val/i2t_r10", summary="max")
-            wandb.define_metric("val/t2i_map5", summary="max")
-            wandb.define_metric("val/t2i_map10", summary="max")
-            wandb.define_metric("val/i2t_map5", summary="max")
-            wandb.define_metric("val/i2t_map10", summary="max")
+            for metric in [
+                "val/r1_i2t", "val/r1_t2i",
+                "val/r5_i2t", "val/r5_t2i",
+                "val/r10_i2t", "val/r10_t2i",
+                "val/mapr_i2t", "val/mapr_t2i",
+                "val/rprecision_i2t", "val/rprecision_t2i",
+            ]:
+                wandb.define_metric(metric, summary="max")
 
 
     def load_checkpoint(self, checkpoint_path):
@@ -255,6 +252,7 @@ class Trainer:
 
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
+                            self.model.clip.logit_scale,
                             img_aug_embeds, txt_aug_embeds
                         )
                         loss = loss_dict["loss_total"]
@@ -288,6 +286,7 @@ class Trainer:
                     # loss is now a dict
                     loss_dict = self.criterion(
                         img_embeds, txt_embeds,
+                        self.model.clip.logit_scale,
                         img_aug_embeds, txt_aug_embeds
                     )
                     loss = loss_dict["loss_total"]
@@ -349,111 +348,127 @@ class Trainer:
         return losses.avg
 
     @torch.no_grad()
-    def evaluate(self, epoch):
+    def _extract_embeddings(self, loader):
+        """
+        Run the model over a dataloader and collect image/text embeddings + image IDs.
+        Returns (img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sentids,
+                 first_occurrence_indices, unique_image_ids_list).
+        """
         self.model.eval()
         img_embeds_list = []
         txt_embeds_list = []
         image_ids_list = []
-        
-        # Handle "TEST" epoch logging string
-        epoch_log = epoch if isinstance(epoch, str) else epoch
-        logger.info(f"Starting Evaluation ({epoch_log})...")
-        
-        for batch in self.val_loader:
+        sentids_list = []
+
+        for batch in loader:
             images = batch['image'].to(self.device)
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
-            
+
             img_emb, txt_emb = self.model(images, input_ids, attention_mask)
             img_embeds_list.append(img_emb.cpu())
             txt_embeds_list.append(txt_emb.cpu())
-            
-            # Collect image_ids for ground truth matching
             image_ids_list.append(batch['image_id'].cpu())
-            
+            sentids_list.append(batch['sentid'].cpu())
+
         img_embeds = torch.cat(img_embeds_list, dim=0)
         txt_embeds = torch.cat(txt_embeds_list, dim=0)
         image_ids = torch.cat(image_ids_list, dim=0)
-        
-        # Get unique images in insertion order (preserving order of first occurrence)
-        # This ensures alignment between unique_image_ids and img_embeds_unique
+        sentids = torch.cat(sentids_list, dim=0)
+
         seen_image_ids = set()
         first_occurrence_indices = []
         unique_image_ids_list = []
-        
         for idx in range(len(image_ids)):
             img_id = image_ids[idx].item()
             if img_id not in seen_image_ids:
                 seen_image_ids.add(img_id)
                 first_occurrence_indices.append(idx)
                 unique_image_ids_list.append(img_id)
-        
-        # Convert to tensors - order matches first_occurrence_indices (insertion order)
+
         unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
         img_embeds_unique = img_embeds[first_occurrence_indices]
-        
-        # Precompute similarity matrix once: [N_images, N_captions]
-        sims = torch.matmul(img_embeds_unique, txt_embeds.t())  # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
 
-        # Compute Recall@K metrics
+        return img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sentids, first_occurrence_indices, unique_image_ids_list
+
+    def _compute_standard_metrics(self, img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims, prefix="val"):
+        """
+        Computes standard R@1/5/10, mAP@R (mAP@5/10), R-Precision for both i2t and t2i.
+        Used for val (always) and test (Flickr, or COCO fallback).
+        Returns dict with keys prefixed by `prefix/`.
+        """
+        from .metrics import compute_mapr_rprecision, build_ranked_dicts
+
         r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims=sims)
-
-        # Compute MAP@K metrics
         map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10], sims=sims)
-        
-        # Log results to console
-        logger.info(
-            f"Epoch {epoch_log} Results:\n"
-            f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f} | MAP@5: {map_t2i[5]:.2f} | MAP@10: {map_t2i[10]:.2f}\n"
-            f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f} | MAP@5: {map_i2t[5]:.2f} | MAP@10: {map_i2t[10]:.2f}"
-        )
-        
-        # Current metrics dictionary
-        current_metrics = {
-            't2i_r1': r_t2i[1], 't2i_r5': r_t2i[5], 't2i_r10': r_t2i[10],
-            'i2t_r1': r_i2t[1], 'i2t_r5': r_i2t[5], 'i2t_r10': r_i2t[10],
-            't2i_map5': map_t2i[5], 't2i_map10': map_t2i[10],
-            'i2t_map5': map_i2t[5], 'i2t_map10': map_i2t[10],
+
+        # mAP@R and R-Precision via build_ranked_dicts + compute_mapr_rprecision
+        sims_np = sims.t().numpy()  # [N_imgs, N_txts]^T -> [N_txts, N_imgs]
+        unique_image_ids_list = unique_image_ids.tolist()
+        caption_ids = list(range(txt_embeds.shape[0]))
+        i2t_ranked, t2i_ranked = build_ranked_dicts(sims_np, unique_image_ids_list, caption_ids)
+
+        # Ground truth: image_id -> set of caption indices, caption_idx -> set of image_ids
+        from .metrics import _build_gt_mappings
+        _, caption_to_image_idx, image_to_caption_indices = _build_gt_mappings(image_ids, unique_image_ids)
+        gt_i2t = {unique_image_ids_list[img_idx]: set(cap_indices) for img_idx, cap_indices in image_to_caption_indices.items()}
+        gt_t2i = {cap_idx: {unique_image_ids_list[caption_to_image_idx[cap_idx].item()]} for cap_idx in range(len(caption_to_image_idx))}
+
+        mapr_rprec = compute_mapr_rprecision(i2t_ranked, t2i_ranked, gt_i2t, gt_t2i)
+
+        return {
+            f"{prefix}/r1_i2t":         r_i2t[1],
+            f"{prefix}/r5_i2t":         r_i2t[5],
+            f"{prefix}/r10_i2t":        r_i2t[10],
+            f"{prefix}/r1_t2i":         r_t2i[1],
+            f"{prefix}/r5_t2i":         r_t2i[5],
+            f"{prefix}/r10_t2i":        r_t2i[10],
+            f"{prefix}/mapr_i2t":       mapr_rprec['mapr_i2t'],
+            f"{prefix}/mapr_t2i":       mapr_rprec['mapr_t2i'],
+            f"{prefix}/rprecision_i2t": mapr_rprec['rprecision_i2t'],
+            f"{prefix}/rprecision_t2i": mapr_rprec['rprecision_t2i'],
         }
-        
+
+    @torch.no_grad()
+    def evaluate(self, epoch):
+        self.model.eval()
+        logger.info(f"Starting Evaluation (epoch={epoch})...")
+
+        img_embeds_unique, txt_embeds, image_ids, unique_image_ids, _, first_occurrence_indices, _ = \
+            self._extract_embeddings(self.val_loader)
+
+        # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
+        sims = torch.matmul(img_embeds_unique, txt_embeds.t())
+
+        metrics = self._compute_standard_metrics(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims, prefix="val")
+
+        logger.info(
+            f"Epoch {epoch} Results:\n"
+            f"  I2T: R@1: {metrics['val/r1_i2t']:.2f} | R@5: {metrics['val/r5_i2t']:.2f} | R@10: {metrics['val/r10_i2t']:.2f} | "
+            f"mAP@R: {metrics['val/mapr_i2t']:.2f} | R-Prec: {metrics['val/rprecision_i2t']:.2f}\n"
+            f"  T2I: R@1: {metrics['val/r1_t2i']:.2f} | R@5: {metrics['val/r5_t2i']:.2f} | R@10: {metrics['val/r10_t2i']:.2f} | "
+            f"mAP@R: {metrics['val/mapr_t2i']:.2f} | R-Prec: {metrics['val/rprecision_t2i']:.2f}"
+        )
+
         if self.use_wandb:
-            # Build log data dictionary
-            log_data = {
-                "val/t2i_r1": r_t2i[1], "val/t2i_r5": r_t2i[5], "val/t2i_r10": r_t2i[10],
-                "val/i2t_r1": r_i2t[1], "val/i2t_r5": r_i2t[5], "val/i2t_r10": r_i2t[10],
-                "val/t2i_map5": map_t2i[5], "val/t2i_map10": map_t2i[10],
-                "val/i2t_map5": map_i2t[5], "val/i2t_map10": map_i2t[10],
-            }
-            
-            # If epoch is a number, add epoch info; otherwise handle test logging
+            log_data = dict(metrics)
             if isinstance(epoch, int):
                 log_data["epoch"] = epoch + 1
-            else:
-                # For test evaluation (e.g., "TEST_FINAL"), store as summary metrics
-                for k, v in log_data.items():
-                    wandb.run.summary[f"test_{k.split('/')[1]}"] = v
-            
             try:
                 wandb.log(log_data)
-                
-                # Update best metrics in WandB summary if new best is found
-                # This ensures the run summary always shows MAX values
-                for metric_name, current_value in current_metrics.items():
-                    if current_value > self.best_metrics[metric_name]:
-                        self.best_metrics[metric_name] = current_value
-                        # Update WandB summary with best value
-                        wandb.run.summary[f"best_val_{metric_name}"] = current_value
-                        
             except Exception as e:
                 logger.warning(f"Failed to log to W&B: {e}")
 
-            if self.use_wandb:
+            is_final_epoch = (epoch + 1) == self.config['training']['epochs']
+            is_qualitative_epoch = (isinstance(epoch, int) and
+                                    (epoch + 1) % 5 == 0 or is_final_epoch)
+            if is_qualitative_epoch:
                 try:
                     self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
                 except Exception as e:
                     logger.warning(f"Qualitative table logging failed: {e}")
-            
-        return r_t2i[1]
+
+        return metrics['val/r1_t2i']
 
     def _log_qualitative_table(self, epoch, txt_embeds, img_embeds_unique, first_occurrence_indices):
         """
@@ -542,3 +557,89 @@ class Trainer:
             if is_save_time and improved_since_last_save:
                 self.save_checkpoint(epoch + 1)
                 improved_since_last_save = False
+
+        # --- TEST EVALUATION ---
+        logger.info("Training complete. Running final test evaluation...")
+        self._evaluate_test()
+
+    def _evaluate_test(self):
+        """
+        Runs evaluation on the test split using the best saved checkpoint.
+        Logs results to WandB as summary metrics under 'test/' prefix.
+        ECCV metrics are computed here for COCO only.
+        Val evaluation never uses ECCV — only test does.
+        """
+        best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
+        if not os.path.exists(best_path):
+            logger.warning("No best_model.pth found. Skipping test evaluation.")
+            return
+
+        logger.info(f"Loading best checkpoint from {best_path} for test evaluation...")
+
+        # Save current (last epoch) weights so we can restore after test eval
+        last_epoch_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+
+        checkpoint = torch.load(best_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.eval()
+
+        # Build test dataloader
+        from .data import create_image_text_dataloader
+        test_loader = create_image_text_dataloader(self.config, self.tokenizer, split='test')
+
+        img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sentids, _, unique_image_ids_list = \
+            self._extract_embeddings(test_loader)
+
+        # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
+        sims = torch.matmul(img_embeds_unique, txt_embeds.t())
+
+        is_coco = self.config['data']['dataset'] == 'coco'
+
+        if is_coco:
+            # ECCV metrics — only on test, only for COCO
+            sims_np = sims.t().numpy()  # [N_txts, N_imgs]
+            eccv_scores = compute_eccv_metrics(
+                sims_np,
+                image_ids=unique_image_ids_list,
+                caption_ids=sentids.tolist(),
+                dataset='coco',
+            )
+            if eccv_scores:
+                test_metrics = {
+                    "test/coco_5k_r1_i2t":      eccv_scores.get('coco_5k_r1', {}).get('i2t', 0),
+                    "test/coco_5k_r1_t2i":      eccv_scores.get('coco_5k_r1', {}).get('t2i', 0),
+                    "test/coco_5k_r5_i2t":      eccv_scores.get('coco_5k_recalls', {}).get('i2t', {}).get(5, 0),
+                    "test/coco_5k_r5_t2i":      eccv_scores.get('coco_5k_recalls', {}).get('t2i', {}).get(5, 0),
+                    "test/coco_5k_r10_i2t":     eccv_scores.get('coco_5k_recalls', {}).get('i2t', {}).get(10, 0),
+                    "test/coco_5k_r10_t2i":     eccv_scores.get('coco_5k_recalls', {}).get('t2i', {}).get(10, 0),
+                    "test/coco_1k_r1_i2t":      eccv_scores.get('coco_1k_r1', {}).get('i2t', 0),
+                    "test/coco_1k_r1_t2i":      eccv_scores.get('coco_1k_r1', {}).get('t2i', 0),
+                    "test/eccv_map_at_r_i2t":   eccv_scores.get('eccv_map_at_r', {}).get('i2t', 0),
+                    "test/eccv_map_at_r_t2i":   eccv_scores.get('eccv_map_at_r', {}).get('t2i', 0),
+                    "test/eccv_rprecision_i2t":  eccv_scores.get('eccv_rprecision', {}).get('i2t', 0),
+                    "test/eccv_rprecision_t2i":  eccv_scores.get('eccv_rprecision', {}).get('t2i', 0),
+                    "test/cxc_r1_i2t":          eccv_scores.get('cxc_recalls', {}).get('i2t', {}).get(1, 0),
+                    "test/cxc_r1_t2i":          eccv_scores.get('cxc_recalls', {}).get('t2i', {}).get(1, 0),
+                }
+            else:
+                logger.warning("ECCV metrics returned empty. Falling back to standard R@K for test.")
+                test_metrics = self._compute_standard_metrics(
+                    img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims, prefix="test"
+                )
+        else:
+            # Flickr — standard R@K + mAP@R + R-Precision
+            test_metrics = self._compute_standard_metrics(
+                img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims, prefix="test"
+            )
+
+        # Log to WandB as summary (not as a time-series metric)
+        if self.use_wandb and wandb.run is not None:
+            for k, v in test_metrics.items():
+                wandb.run.summary[k] = v
+
+        logger.info("Test Results:")
+        for k, v in test_metrics.items():
+            logger.info(f"  {k}: {v:.4f}")
+
+        # Restore last epoch weights
+        self.model.load_state_dict(last_epoch_state)

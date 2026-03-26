@@ -117,11 +117,10 @@ def main():
     # Build checkpoint dir: checkpoints/{SLURM_JOB_ID}_{run_id}_{dataset}_s{seed}/
     # Only when checkpoint_dir has not already been set via --override
     if not any("logging.checkpoint_dir" in o for o in (args.override or [])):
-        from src.setup import _infer_dataset_name
         job_id = os.environ.get("SLURM_JOB_ID", "local")
         run_id = config.get("logging", {}).get("run_id", "unnamed")
-        dataset = _infer_dataset_name(config)
-        seed = config.get("training", {}).get("seed", 42)
+        dataset = config["data"]["dataset"]
+        seed = config["training"]["seed"]
         config["logging"]["checkpoint_dir"] = f"checkpoints/{job_id}_{run_id}_{dataset}_s{seed}"
 
     # 2. Logging and seed
@@ -182,23 +181,6 @@ def main():
     try:
         log.info(f"Starting training from epoch {start_epoch}...")
         trainer.fit(start_epoch=start_epoch)
-
-        # 9. Final test evaluation (load best model, run on test set)
-        log.info("Training finished. Loading best model for test evaluation...")
-        best_path = os.path.join(config["logging"]["checkpoint_dir"], "best_model.pth")
-        if os.path.isfile(best_path):
-            ckpt = torch.load(best_path, map_location=device)
-            model.load_state_dict(ckpt["model_state_dict"])
-            log.info("Best model loaded.")
-            try:
-                test_loader = create_image_text_dataloader(config, tokenizer, split="test")
-                trainer.val_loader = test_loader
-                log.info("Running evaluation on TEST set...")
-                trainer.evaluate(epoch="TEST_FINAL")
-            except Exception as e:
-                log.warning(f"Test evaluation skipped: {e}")
-        else:
-            log.warning("Best model checkpoint not found; skipping test evaluation.")
     except KeyboardInterrupt:
         log.info("Training interrupted manually.")
     except Exception as e:

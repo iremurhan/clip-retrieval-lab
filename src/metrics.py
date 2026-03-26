@@ -382,7 +382,7 @@ def compute_mapr_rprecision(i2t, t2i, gt_i2t, gt_t2i):
     }
 
 
-def compute_eccv_metrics(sim_matrix, image_ids, caption_ids):
+def compute_eccv_metrics(sim_matrix, image_ids, caption_ids, dataset: str = "coco"):
     """
     Compute ECCV Caption metrics using the eccv_caption library.
 
@@ -390,25 +390,32 @@ def compute_eccv_metrics(sim_matrix, image_ids, caption_ids):
         sim_matrix (np.ndarray): Shape [N_captions, N_images].
         image_ids (list): Image IDs corresponding to columns of sim_matrix.
         caption_ids (list): Caption IDs corresponding to rows of sim_matrix.
+        dataset (str): 'coco' or 'flickr30k'. COCO-specific metrics
+            (coco_1k_recalls, coco_5k_recalls, cxc_recalls) are only
+            computed for COCO — they require COCO image IDs.
 
     Returns:
         dict: Full scores dict from eccv_caption, empty dict if library not installed.
     """
+    if dataset != "coco":
+        return {}
+
     try:
         from eccv_caption import Metrics
     except ImportError:
         logger.warning("eccv_caption not installed; skipping ECCV metrics. Install with: pip install eccv-caption")
         return {}
 
+    target_metrics = ['eccv_r1', 'eccv_map_at_r', 'eccv_rprecision']
+    if dataset == "coco":
+        target_metrics += ['coco_1k_recalls', 'coco_5k_recalls', 'cxc_recalls']
+
     i2t, t2i = build_ranked_dicts(sim_matrix, image_ids, caption_ids)
     metric = Metrics()
     scores = metric.compute_all_metrics(
         i2t,
         t2i,
-        target_metrics=(
-            'eccv_r1', 'eccv_map_at_r', 'eccv_rprecision',
-            'coco_1k_recalls', 'coco_5k_recalls', 'cxc_recalls',
-        ),
+        target_metrics=tuple(target_metrics),
         Ks=(1, 5, 10),
         verbose=False,
     )
