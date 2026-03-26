@@ -16,5 +16,5 @@ datasets/
 checkpoints
 *.pt
 
-# W&B
+# Weights & Biases
 wandb/

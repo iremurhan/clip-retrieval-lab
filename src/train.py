@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class Trainer:
-    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device, use_wandb=True, clip_tokenizer=None):
+    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -40,7 +40,7 @@ class Trainer:
         self.config = config
         self.device = device
         
-        self.use_wandb = use_wandb
+        self.use_wandb = wandb.run is not None
         self.log_freq = config['logging']['log_freq']
         self.checkpoint_dir = config['logging']['checkpoint_dir']
         
@@ -253,6 +253,8 @@ class Trainer:
             else:
                 # STANDARD MODE (Original Implementation)
                 if self.use_amp:
+                    # Zero gradients before forward to avoid stale gradient accumulation
+                    self.optimizer.zero_grad()
                     with torch.amp.autocast(device_type='cuda'):
                         if use_clip_loss:
                             loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
@@ -276,9 +278,8 @@ class Trainer:
                                 img_aug_embeds, txt_aug_embeds
                             )
                             loss = loss_dict["loss_total"]
-                    
+
                     # Backward with gradient scaling
-                    self.optimizer.zero_grad()
                     self.scaler.scale(loss).backward()
                     
                     # Unscale gradients to compute true grad norm
@@ -332,7 +333,7 @@ class Trainer:
             end_time = time.time()
 
             if step % self.log_freq == 0:
-                fractional_epoch = epoch + (step / num_batches)
+                fractional_epoch = (epoch + 1) + (step / num_batches)
                 samples_per_sec = batch_size / batch_time.val if batch_time.val > 0 else 0
                 
                 lr_dict = {}
@@ -351,7 +352,7 @@ class Trainer:
                 if self.use_wandb:
                     try:
                         log_dict = {
-                            "epoch": epoch,
+                            "epoch": epoch + 1,
                             "train/loss_total": loss_dict["loss_total"].item(),
                             "train/loss_inter": loss_dict["loss_inter"].item(),
                             "train/loss_intra_img": loss_dict["loss_intra_img"].item(),
@@ -413,11 +414,14 @@ class Trainer:
         unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
         img_embeds_unique = img_embeds[first_occurrence_indices]
         
+        # Precompute similarity matrix once: [N_images, N_captions]
+        sims = torch.matmul(img_embeds_unique, txt_embeds.t())  # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
+
         # Compute Recall@K metrics
-        r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
-        
+        r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims=sims)
+
         # Compute MAP@K metrics
-        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10])
+        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10], sims=sims)
         
         # Log results to console
         logger.info(
@@ -445,7 +449,7 @@ class Trainer:
             
             # If epoch is a number, add epoch info; otherwise handle test logging
             if isinstance(epoch, int):
-                log_data["epoch"] = epoch
+                log_data["epoch"] = epoch + 1
             else:
                 # For test evaluation (e.g., "TEST_FINAL"), store as summary metrics
                 for k, v in log_data.items():

@@ -17,7 +17,7 @@ loss:
   use_clip_loss: false
   temperature: 0.07
   intra_img_weight: 1
-  intra_txt_weight: 0
+  intra_txt_weight: 1
 
 # On-the-fly paraphrasing config for L_text_text = InfoNCE(T_orig, T_paraphrased).
 # Only loaded when loss.intra_txt_weight > 0. Safe to leave here with weight=0.
