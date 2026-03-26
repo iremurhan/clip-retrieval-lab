@@ -24,7 +24,7 @@ set -euo pipefail
 SEEDS=(42 123 456)
 CONFIGS=(
     "coco:configs/config_coco.yaml"
-    "flickr30k:configs/config_flickr.yaml"
+    "flickr30k:configs/config_flickr30k.yaml"
 )
 
 # --- Parse arguments ---

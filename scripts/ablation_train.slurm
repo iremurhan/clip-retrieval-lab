@@ -7,6 +7,8 @@
 #
 # Usage (via sbatch):
 #   sbatch scripts/ablation_train.slurm <RUN_ID> <SEED> <CONFIG>
+# Example:
+#   sbatch scripts/ablation_train.slurm B0plus 42 configs/config_flickr30k.yaml
 #
 # Arguments:
 #   $1  RUN_ID   Registry run ID (e.g. B0, FULL)
@@ -22,8 +24,8 @@
 #SBATCH --mem-per-gpu=48G
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.7
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
-#SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
-#SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
+#SBATCH --output=/users/beyza.urhan/experiments/results/slurm_%j.out
+#SBATCH --error=/users/beyza.urhan/experiments/results/slurm_%j.out
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
 
 set -euo pipefail
@@ -32,14 +34,16 @@ RUN_ID="${1}"
 SEED="${2}"
 CONFIG_FILE="${3:-configs/config_coco.yaml}"
 
-if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
-    DATASET="flickr30k"
-elif [[ "$CONFIG_FILE" == *"coco"* ]]; then
-    DATASET="coco"
-else
-    echo "ERROR: Cannot infer dataset from config path: $CONFIG_FILE"
-    exit 1
-fi
+DATASET=$(python3 -c "
+import sys, yaml
+base = yaml.safe_load(open('configs/config_base.yaml'))
+override = yaml.safe_load(open('${CONFIG_FILE}'))
+base.setdefault('data', {}).update(override.get('data', {}))
+d = base['data'].get('dataset')
+if not d:
+    sys.exit('ERROR: data.dataset not set in config')
+print(d)
+") || exit 1
 
 WANDB_PROJECT_AUTO="clip-retrieval"
 JOB_DIR="/output/results/${DATASET}/${SLURM_JOB_ID}"
@@ -69,6 +73,9 @@ else
     export WANDB_MODE=offline
 fi
 
+echo "Installing runtime dependencies..."
+pip install --no-cache-dir --no-deps bitsandbytes accelerate
+
 echo "Starting training..."
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
@@ -79,7 +86,6 @@ python3 -u run.py \
     --run "$RUN_ID" \
     --seed "$SEED" \
     --override \
-        debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
     > "$JOB_DIR/training.log" 2>&1
 
@@ -99,7 +105,7 @@ echo "=========================================="
 echo "Syncing WandB logs before cleanup..."
 SYNC_EXIT=1
 if [ -d "$JOB_DIR/wandb" ]; then
-    python3 -m wandb sync "$JOB_DIR/wandb/latest-run" > "$JOB_DIR/wandb_sync.log" 2>&1
+    python3 -m wandb sync --sync-all "$JOB_DIR/wandb" > "$JOB_DIR/wandb_sync.log" 2>&1
     SYNC_EXIT=$?
 fi
 
@@ -115,6 +121,12 @@ if [ $SYNC_EXIT -eq 0 ]; then
     fi
 else
     echo "WARNING: WandB sync failed. Keeping '$JOB_DIR/wandb' and 'last_model.pth' for manual recovery."
+fi
+
+# Move slurm log into the dataset/job directory now that JOB_DIR is known.
+SLURM_LOG="/users/beyza.urhan/experiments/results/slurm_${SLURM_JOB_ID}.out"
+if [ -f "$SLURM_LOG" ]; then
+    mv "$SLURM_LOG" "$JOB_DIR/slurm.out"
 fi
 
 exit $TRAIN_EXIT_CODE

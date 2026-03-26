@@ -1,7 +1,7 @@
 #!/bin/bash
 # Launch a W&B hyperparameter sweep and submit multiple Slurm agents.
 # Dataset-specific sweep configs:
-#   - configs/sweep_flickr.yaml  (uses configs/config_flickr.yaml)
+#   - configs/sweep_flickr.yaml  (uses configs/config_flickr30k.yaml)
 #   - configs/sweep_coco.yaml    (uses configs/config_coco.yaml)
 #
 # Usage:
