@@ -56,10 +56,11 @@ class Trainer:
         }
         
         # Initialize Mixed Precision Training (AMP)
-        self.use_amp = torch.cuda.is_available()
+        self.use_amp = self.device.type == 'cuda'
+        self.amp_dtype = torch.bfloat16 if self.use_amp else None
         if self.use_amp:
-            self.scaler = torch.cuda.amp.GradScaler()
-            logger.info("Mixed Precision Training (AMP) enabled.")
+            self.scaler = torch.amp.GradScaler('cuda', enabled=False)
+            logger.info("Mixed Precision Training (AMP) enabled with torch.bfloat16.")
         else:
             self.scaler = None
             logger.info("Mixed Precision Training (AMP) disabled (CPU mode).")
@@ -183,15 +184,15 @@ class Trainer:
         end_time = time.time()
         
         for step, batch in enumerate(self.train_loader):
-            images = batch['image'].to(self.device)
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
+            images = batch['image'].to(self.device, non_blocking=True)
+            input_ids = batch['input_ids'].to(self.device, non_blocking=True)
+            attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
             neg_input_ids = batch.get('negative_input_ids')
             neg_attention_mask = batch.get('negative_attention_mask')
             if neg_input_ids is not None:
-                neg_input_ids = neg_input_ids.to(self.device)
-                neg_attention_mask = neg_attention_mask.to(self.device)
+                neg_input_ids = neg_input_ids.to(self.device, non_blocking=True)
+                neg_attention_mask = neg_attention_mask.to(self.device, non_blocking=True)
             
             # ============================================================
             # Forward Pass: Use Gradient Caching if enabled, else standard
@@ -237,14 +238,14 @@ class Trainer:
                 if self.use_amp:
                     # Zero gradients before forward to avoid stale gradient accumulation
                     self.optimizer.zero_grad()
-                    with torch.amp.autocast(device_type='cuda'):
+                    with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                         img_embeds = self.model.encode_image(images)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
                         if intra_img_weight > 0:
                             img_aug_embeds = self.model.encode_image(
-                                batch['image_aug'].to(self.device))
+                                batch['image_aug'].to(self.device, non_blocking=True))
                         if intra_txt_weight > 0 and self.paraphraser is not None:
                             para_ids, para_mask = self.paraphraser.generate(
                                 batch['caption'])
@@ -276,7 +277,7 @@ class Trainer:
                     img_aug_embeds = None
                     txt_aug_embeds = None
                     if intra_img_weight > 0:
-                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
                     # TODO: Re-enable when real text augmentation (e.g. synonym replacement or
                     # random token dropout) is implemented. Using identical inputs produces a
                     # trivially zero intra-text loss and is therefore disabled until then.
@@ -361,11 +362,12 @@ class Trainer:
         sentids_list = []
 
         for batch in loader:
-            images = batch['image'].to(self.device)
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
+            images = batch['image'].to(self.device, non_blocking=True)
+            input_ids = batch['input_ids'].to(self.device, non_blocking=True)
+            attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
-            img_emb, txt_emb = self.model(images, input_ids, attention_mask)
+            with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
+                img_emb, txt_emb = self.model(images, input_ids, attention_mask)
             img_embeds_list.append(img_emb.cpu())
             txt_embeds_list.append(txt_emb.cpu())
             image_ids_list.append(batch['image_id'].cpu())
@@ -527,8 +529,8 @@ class Trainer:
         save_freq = self.config['logging']['save_freq']
         improved_since_last_save = False
 
-        # If start_epoch is 0 (i.e., not resuming), run initial evaluation.
-        if start_epoch == 0:
+        # If start_epoch is 0 (i.e., not resuming) and eval_epoch_zero is enabled, run initial evaluation.
+        if start_epoch == 0 and self.config['logging'].get('eval_epoch_zero', False):
             logger.info("Running initial evaluation at Epoch 0...")
             score = self.evaluate(epoch=-1)
             if score > self.best_r1:

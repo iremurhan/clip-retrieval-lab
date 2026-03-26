@@ -2,6 +2,7 @@ runs:
   B0:
     description: "Minimal FT — InfoNCE, projection layers only, no aug"
     overrides:
+      logging.eval_epoch_zero: true
       loss.intra_img_weight: 0
       loss.intra_txt_weight: 0
       augment.k_photometric_augs: 0

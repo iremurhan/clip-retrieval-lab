@@ -60,6 +60,7 @@ class GradCache:
         self.config = config
         self.device = device
         self.scaler = scaler
+        self.amp_dtype = torch.bfloat16 if (scaler is not None and self.device.type == 'cuda') else None
         
         # STRICT CONFIG: No fallback, must crash if missing
         self.micro_batch_size = config['training']['micro_batch_size']
@@ -127,7 +128,7 @@ class GradCache:
                 img_chunks, txt_input_chunks, txt_mask_chunks, para_input_chunks, para_mask_chunks
             ):
                 if self.use_amp:
-                    with torch.amp.autocast(device_type='cuda'):
+                    with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                         img_emb = self.model.encode_image(img_chunk)
                         txt_emb = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
                         if has_para:
@@ -170,7 +171,7 @@ class GradCache:
         ):
             # Re-compute embeddings WITH gradients for current micro-batch
             if self.use_amp:
-                with torch.amp.autocast(device_type='cuda'):
+                with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                     img_emb_grad = self.model.encode_image(img_chunk)
                     txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
                     if has_para:
@@ -199,7 +200,7 @@ class GradCache:
 
             # Compute loss on full batch (but only current chunk has gradients)
             if self.use_amp:
-                with torch.amp.autocast(device_type='cuda'):
+                with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                     loss_dict = self.criterion(
                         img_embeds_full,
                         txt_embeds_full,
@@ -244,7 +245,7 @@ class GradCache:
         w_txt = getattr(self.criterion, 'w_txt', 0)
         has_para = (para_input_ids is not None) and (w_txt > 0)
         if self.use_amp:
-            with torch.amp.autocast(device_type='cuda'):
+            with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
                 img_embeds = self.model.encode_image(images)
                 txt_embeds = self.model.encode_text(input_ids, attention_mask)
                 para_embeds = (
