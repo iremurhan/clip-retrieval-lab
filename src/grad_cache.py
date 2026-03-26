@@ -177,27 +177,14 @@ class GradCache:
             else:
                 img_emb_grad = self.model.encode_image(img_chunk)
                 txt_emb_grad = self.model.encode_text(txt_input_chunk, txt_mask_chunk)
-                if has_para:
-                    para_emb_grad = self.model.encode_text(para_in_chunk, para_mask_chunk)
-                    # para_emb_grad: [micro_B, D] — gradient-enabled
-
-            # Build full-batch embeddings: Current chunk has gradients, others are cached (detached)
+            
+            # Build full-batch embeddings: current chunk has gradients, others are cached (detached)
             chunk_start = chunk_idx * self.micro_batch_size
             chunk_end = chunk_start + img_chunk.size(0)
 
-            # Clone cached embeddings and insert gradient-enabled chunk
-            img_embeds_full = cached_img_embeds.clone()
-            txt_embeds_full = cached_txt_embeds.clone()
-
-            img_embeds_full[chunk_start:chunk_end] = img_emb_grad  # [N, D]
-            txt_embeds_full[chunk_start:chunk_end] = txt_emb_grad  # [N, D]
-
-            # Build full para tensor: substitute current chunk with gradient version
-            para_embeds_full = None
-            if has_para:
-                para_embeds_full = cached_para_embeds_full.clone()
-                para_embeds_full[chunk_start:chunk_end] = para_emb_grad  # [N, D]
-
+            img_embeds_full = torch.cat([cached_img_embeds[:chunk_start], img_emb_grad, cached_img_embeds[chunk_end:]], dim=0)
+            txt_embeds_full = torch.cat([cached_txt_embeds[:chunk_start], txt_emb_grad, cached_txt_embeds[chunk_end:]], dim=0)
+            
             # Compute loss on full batch (but only current chunk has gradients)
             if self.use_amp:
                 with torch.amp.autocast(device_type='cuda'):

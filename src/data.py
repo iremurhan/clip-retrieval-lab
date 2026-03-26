@@ -316,8 +316,8 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     images_root = config['data']['images_path']
     captions_path = config['data']['captions_path']
 
-    # Resolve image size from model config (336 for CLIP ViT-L/14@336px)
-    image_size = config['data']['image_size']
+    # Resolve image size from training config (default 336 defined in config_base.yaml)
+    image_size = config['training']['image_size']
 
     if split == 'train':
         # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
@@ -339,7 +339,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         images_root_path=images_root,
         captions_path=captions_path,
         tokenizer=tokenizer,
-        max_length=config['data']['max_length'],
+        max_length=config['training']['max_length'],  # defined in config_base.yaml
         split=split,
         transform=transform,
         transform_aug=transform_aug,
@@ -354,9 +354,9 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
 
     loader = DataLoader(
         dataset,
-        batch_size=config['training']['batch_size'],
+        batch_size=config['training']['batch_size'],  # defined in config_base.yaml
         shuffle=shuffle,
-        num_workers=config['data']['num_workers'],
+        num_workers=config['training']['num_workers'],  # defined in config_base.yaml
         pin_memory=True,
         drop_last=(split == 'train')
     )
