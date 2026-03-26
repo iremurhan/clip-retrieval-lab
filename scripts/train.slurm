@@ -2,21 +2,37 @@
 # =============================================================================
 # SLURM TRAINING SCRIPT
 # =============================================================================
-# Usage:
-#   sbatch scripts/train.slurm <EXPERIMENT_NAME> <CONFIG_PATH>
+# Positional args:
+#   $1  EXPERIMENT_NAME   Human-readable label shown in logs (e.g. "B0_coco_s42")
+#   $2  CONFIG_PATH       Path to dataset config, relative to /workspace
+#                         (e.g. "configs/config_coco.yaml")
+#   $3+ EXTRA_ARGS        Any additional flags forwarded verbatim to run.py
+#                         (e.g. --run B0 --seed 42)
 #
-# Example:
-#   sbatch scripts/train.slurm my_fne_exp configs/config_flickr.yaml
+# Usage (direct sbatch):
+#   sbatch scripts/train.slurm <EXP_NAME> <CONFIG_PATH> [run.py flags...]
+#
+# Examples:
+#   # Single run with registry overrides and seed
+#   sbatch scripts/train.slurm B0_coco_s42 configs/config_coco.yaml \
+#       --run B0 --seed 42
+#
+#   # Debug run (no W&B, fast)
+#   sbatch scripts/train.slurm debug_run configs/config_coco.yaml \
+#       --run B0 --seed 42 --override debug.debug_mode=true
+#
+# Note: Prefer launch_run.sh for batch submission across datasets and seeds.
 #
 # Outputs:
-#   Results are saved to: /output/results/{dataset}/{job_id}/
-#   Includes: slurm.out, training.log, checkpoints, and WandB logs.
+#   /output/results/{dataset}/{job_id}/slurm.out       SLURM stdout+stderr
+#   /output/results/{dataset}/{job_id}/training.log    Python stdout
+#   /output/results/{dataset}/{job_id}/best_model.pth  Best checkpoint
 # =============================================================================
 #SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=48G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.4
+#SBATCH --container-image=biremurhan/image-text-contrast:v0.7
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
@@ -35,6 +51,8 @@ fi
 
 EXP_NAME="${1:-}"
 CONFIG_FILE="${2:-configs/config_coco.yaml}"
+shift 2
+EXTRA_ARGS=("$@")
 
 if [ ! -f "/workspace/$CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
@@ -46,7 +64,7 @@ if [[ "$CONFIG_FILE" == *"flickr"* ]]; then
 else
     DATASET="coco"
 fi
-WANDB_PROJECT_AUTO="retrieval"
+WANDB_PROJECT_AUTO="clip-retrieval"
 
 JOB_DIR="/output/results/${DATASET}/${SLURM_JOB_ID}"
 CKPT_DIR="$JOB_DIR"
@@ -66,12 +84,6 @@ fi
 
 if [ -n "${WANDB_API_KEY:-}" ]; then
     export WANDB_MODE=online
-    if [ -n "$EXP_NAME" ]; then
-        export WANDB_NAME="${SLURM_JOB_ID}_${EXP_NAME}"
-    else
-        export WANDB_NAME="${SLURM_JOB_ID}"
-    fi
-
     export WANDB_PROJECT="$WANDB_PROJECT_AUTO"
     echo "W&B Project auto-set: $WANDB_PROJECT"
 else
@@ -82,13 +94,14 @@ fi
 echo "Starting training..."
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python3 -u run.py \
     --config "$CONFIG_FILE" \
     --override \
         debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
-        logging.wandb_project="$WANDB_PROJECT_AUTO" \
+    "${EXTRA_ARGS[@]}" \
     > "$JOB_DIR/training.log" 2>&1
 
 TRAIN_EXIT_CODE=$?

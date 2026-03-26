@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.setup import setup_config, setup_seed, setup_tracker, _infer_dataset_name
 from src.data import create_image_text_dataloader
 from src.model import DualEncoder
-from src.loss import SymmetricInfoNCELoss
+from src.loss import build_loss
 from src.train import Trainer
 
 logging.basicConfig(
@@ -132,7 +132,7 @@ def _build_eval_trainer(config: dict, device: torch.device, use_wandb: bool) -> 
     test_loader = create_image_text_dataloader(config, tokenizer, split="test")
 
     model = DualEncoder(config).to(device)
-    criterion = SymmetricInfoNCELoss(config)
+    criterion = build_loss(config)
 
     # Optimizer and scheduler are unused during evaluate(); provide minimal stubs.
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)

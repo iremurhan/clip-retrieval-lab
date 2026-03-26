@@ -77,6 +77,12 @@ class DualEncoder(nn.Module):
         
         # 3. Freezing Strategy - Freeze backbone, train projections
         self._apply_freezing_strategy()
+
+        # 4. Reset logit_scale to fine-tuning starting value
+        # Pretrained CLIP has logit_scale ~4.6 (τ≈0.01), too high for fine-tuning.
+        with torch.no_grad():
+            self.clip.logit_scale.fill_(2.6593)  # ln(1/0.07) = 2.6593
+        logger.info("logit_scale reset to 2.6593 (τ=0.07)")
     
     def _apply_freezing_strategy(self):
         """

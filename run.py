@@ -9,6 +9,7 @@ import argparse
 import os
 import sys
 import logging
+import warnings
 import torch
 import wandb
 from transformers import CLIPTokenizer, get_cosine_schedule_with_warmup
@@ -16,7 +17,7 @@ from transformers import CLIPTokenizer, get_cosine_schedule_with_warmup
 from src.setup import setup_config, setup_seed, setup_tracker, load_registry_overrides
 from src.data import create_image_text_dataloader
 from src.model import DualEncoder
-from src.loss import SymmetricInfoNCELoss
+from src.loss import build_loss
 from src.train import Trainer
 
 
@@ -79,7 +80,12 @@ def create_lr_scheduler(optimizer, config, num_training_steps):
     """Create learning rate scheduler (cosine with warmup)."""
     warmup = int(config["training"].get("warmup_epochs", 2))
     warmup_steps = min(warmup * (num_training_steps // config["training"]["epochs"]), num_training_steps)
-    return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
+    # Suppress the spurious "scheduler.step() before optimizer.step()" warning that
+    # transformers' get_cosine_schedule_with_warmup triggers internally during __init__.
+    # The training loop calls optimizer.step() before scheduler.step() correctly.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step`")
+        return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
 
 
 def main():
@@ -150,8 +156,15 @@ def main():
 
     # 6. Model, loss, optimizer, scheduler
     model = DualEncoder(config).to(device)
-    criterion = SymmetricInfoNCELoss(config)
+    criterion = build_loss(config)
     optimizer = create_clip_optimizer(model, config)
+    if hasattr(criterion, 'bias') and isinstance(criterion.bias, torch.nn.Parameter):
+        optimizer.add_param_group({
+            'params': [criterion.bias],
+            'lr': config['training']['clip_projection_lr'],
+            'name': 'siglip_bias',
+        })
+        log.info("SigLIP bias added to optimizer")
     num_batches = len(train_loader) * config["training"]["epochs"]
     scheduler = create_lr_scheduler(optimizer, config, num_batches)
 

@@ -20,7 +20,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=48G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.5
+#SBATCH --container-image=biremurhan/image-text-contrast:v0.7
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/%j/slurm.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/%j/slurm.out
@@ -41,7 +41,7 @@ else
     exit 1
 fi
 
-WANDB_PROJECT_AUTO="retrieval"
+WANDB_PROJECT_AUTO="clip-retrieval"
 JOB_DIR="/output/results/${DATASET}/${SLURM_JOB_ID}"
 CKPT_DIR="$JOB_DIR"
 mkdir -p "$JOB_DIR"
@@ -72,6 +72,7 @@ fi
 echo "Starting training..."
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python3 -u run.py \
     --config "$CONFIG_FILE" \
@@ -80,7 +81,6 @@ python3 -u run.py \
     --override \
         debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \
-        logging.wandb_project="$WANDB_PROJECT_AUTO" \
     > "$JOB_DIR/training.log" 2>&1
 
 TRAIN_EXIT_CODE=$?
