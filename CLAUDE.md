@@ -22,14 +22,14 @@ Docker image for HPC: `biremurhan/image-text-contrast:v0.5` (includes PyTorch).
 
 **Training (local)**
 ```bash
-python run.py --config configs/config_flickr.yaml
+python run.py --config configs/config_flickr30k.yaml
 python run.py --config configs/config_coco.yaml
 
 # With config overrides
-python run.py --config configs/config_flickr.yaml --override training.epochs=10 loss.temperature=0.07
+python run.py --config configs/config_flickr30k.yaml --override training.epochs=10 loss.temperature=0.07
 
 # Resume from checkpoint
-python run.py --config configs/config_flickr.yaml --resume checkpoints/best_model.pth
+python run.py --config configs/config_flickr30k.yaml --resume checkpoints/best_model.pth
 ```
 
 **Training (HPC/SLURM)**
@@ -40,13 +40,13 @@ python run.py --config configs/config_flickr.yaml --resume checkpoints/best_mode
 **Pairwise similarity mining (required before training with hard negatives)**
 ```bash
 # Text-text caption similarity (most common — used for FNE in training)
-python tools/mine_pairwise_sim.py --modality caption --config configs/config_flickr.yaml --top_k 1000
+python tools/mine_pairwise_sim.py --modality caption --config configs/config_flickr30k.yaml --top_k 1000
 
 # Image-image visual similarity
-python tools/mine_pairwise_sim.py --modality visual --config configs/config_flickr.yaml
+python tools/mine_pairwise_sim.py --modality visual --config configs/config_flickr30k.yaml
 
 # Image-image caption consensus (saves mean/min/max variants)
-python tools/mine_pairwise_sim.py --modality consensus --config configs/config_flickr.yaml
+python tools/mine_pairwise_sim.py --modality consensus --config configs/config_flickr30k.yaml
 
 # HPC wrapper
 ./scripts/start_mining.sh flickr30k   # or coco
@@ -54,7 +54,7 @@ python tools/mine_pairwise_sim.py --modality consensus --config configs/config_f
 
 **Debug mode (fast iteration, uses train set for val)**
 ```bash
-python run.py --config configs/config_flickr.yaml --override debug.debug_mode=true debug.debug_samples=100
+python run.py --config configs/config_flickr30k.yaml --override debug.debug_mode=true debug.debug_samples=100
 ```
 
 ## Config System
