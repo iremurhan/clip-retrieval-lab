@@ -117,7 +117,7 @@ class DualEncoder(nn.Module):
             # Dynamically get total blocks from the model
             total_blocks = len(self.clip.vision_model.encoder.layers)
             unfreeze_vision_blocks = list(range(total_blocks - num_vision_layers, total_blocks))
-            print(f"  Unfreezing Vision Blocks: {unfreeze_vision_blocks} (strategy: {unfreeze_strategy})")
+            logger.info(f"Unfreezing Vision Blocks: {unfreeze_vision_blocks} (strategy: {unfreeze_strategy})")
             
             # Directly access and unfreeze the specified blocks
             for block_idx in unfreeze_vision_blocks:
@@ -179,7 +179,7 @@ class DualEncoder(nn.Module):
             return 'bias' in name
         
         else:
-            print(f"  Warning: Unknown unfreeze strategy '{strategy}', defaulting to 'full'")
+            logger.warning(f"Unknown unfreeze strategy '{strategy}', defaulting to 'full'")
             return True
     
     def _print_freezing_summary(self):
@@ -187,8 +187,8 @@ class DualEncoder(nn.Module):
         total_params = sum(p.numel() for p in self.clip.parameters())
         trainable_params = sum(p.numel() for p in self.clip.parameters() if p.requires_grad)
         
-        print(f"  CLIP: {trainable_params:,} trainable / {total_params:,} total params")
-        print(f"  Frozen: Vision Encoder (partial), Text Encoder | Unfrozen: Projections + Selected")
+        logger.info(f"CLIP: {trainable_params:,} trainable / {total_params:,} total params")
+        logger.info("Frozen: Vision Encoder (partial), Text Encoder | Unfrozen: Projections + Selected")
     
     def _init_head_weights(self):
         """Initialize additional projection heads."""
