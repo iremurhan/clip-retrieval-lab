@@ -6,7 +6,6 @@ runs:
       loss.intra_txt_weight: 0
       augment.k_photometric_augs: 0
       model.unfreeze_vision_layers: 0
-      logging.eval_epoch_zero: true
 
   B0plus:
     description: "Full baseline — mix aug for img + paraphrase for txt + intra-modal + 4-layer unfreeze"
