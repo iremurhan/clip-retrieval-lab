@@ -1,3 +1,4 @@
 data:
+  dataset: "coco"
   images_path: "datasets/coco"
   captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
