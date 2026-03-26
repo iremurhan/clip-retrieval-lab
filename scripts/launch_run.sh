@@ -97,7 +97,7 @@ for DATASET in $DATASETS; do
     # Map dataset name to config file
     case "$DATASET" in
         coco)    CONFIG="configs/config_coco.yaml" ;;
-        flickr)  CONFIG="configs/config_flickr.yaml" ;;
+        flickr)  CONFIG="configs/config_flickr30k.yaml" ;;
         *)
             echo "WARNING: Unknown dataset '${DATASET}'; skipping."
             continue

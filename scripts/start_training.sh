@@ -14,11 +14,16 @@ fi
 EXP_NAME="$1"
 CONFIG="${2:-configs/config_coco.yaml}"
 
-if [[ "$CONFIG" == *"flickr"* ]]; then
-    DATASET="flickr30k"
-else
-    DATASET="coco"
-fi
+DATASET=$(python3 -c "
+import sys, yaml
+base = yaml.safe_load(open('configs/config_base.yaml'))
+override = yaml.safe_load(open('${CONFIG}'))
+base.setdefault('data', {}).update(override.get('data', {}))
+d = base['data'].get('dataset')
+if not d:
+    sys.exit('ERROR: data.dataset not set in config')
+print(d)
+") || exit 1
 
 RESULTS_ROOT="${EXPERIMENTS_RESULTS:-$HOME/experiments/results}"
 SLURM_OUT="${RESULTS_ROOT}/${DATASET}/%j/slurm.out"
