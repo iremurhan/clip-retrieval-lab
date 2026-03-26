@@ -58,5 +58,6 @@ logging:
   wandb_project: "clip-retrieval"
   log_freq: 500
   eval_freq: 1
+  eval_epoch_zero: false
   save_freq: 3
   checkpoint_dir: "checkpoints"
