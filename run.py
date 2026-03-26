@@ -123,13 +123,6 @@ def main():
         seed = config.get("training", {}).get("seed", 42)
         config["logging"]["checkpoint_dir"] = f"checkpoints/{job_id}_{run_id}_{dataset}_s{seed}"
 
-    # Ensure data has required keys; use literal defaults only (no config-as-fallback)
-    config.setdefault("data", {})
-    config["data"].setdefault("max_length", 77)
-    config["data"].setdefault("num_workers", 8)
-    config["data"].setdefault("batch_size", 256)
-    config["data"].setdefault("image_size", 336)
-
     # 2. Logging and seed
     setup_logging()
     log = logging.getLogger(__name__)
@@ -213,6 +206,10 @@ def main():
     except KeyboardInterrupt:
         log.info("Training interrupted manually.")
     except Exception as e:
+        if wandb.run is not None:
+            wandb.run.summary["status"] = "failed"
+            wandb.run.summary["error_type"] = type(e).__name__
+            wandb.run.summary["error_message"] = str(e)
         log.error(f"Training failed: {e}", exc_info=True)
         raise
     finally:
