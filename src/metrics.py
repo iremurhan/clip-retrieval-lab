@@ -5,7 +5,11 @@ Metrics computation for Cross-Modal Retrieval evaluation.
 Implements Recall@K, MAP@K, and AverageMeter utilities for tracking training metrics.
 """
 
+import logging
+import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class AverageMeter(object):
@@ -278,3 +282,134 @@ def compute_map_at_k(img_embeds, txt_embeds, image_ids, unique_image_ids, k_valu
         map_i2t[k] = (map_i2t[k] / n_imgs) * 100.0
     
     return map_t2i, map_i2t
+
+
+def build_ranked_dicts(sim_matrix, image_ids, caption_ids):
+    """
+    Build ranked retrieval dicts for eccv_caption evaluation.
+
+    Args:
+        sim_matrix (np.ndarray): Shape [N_captions, N_images], similarity scores.
+        image_ids (list): Length N_images, image ID for each column.
+        caption_ids (list): Length N_captions, caption ID for each row.
+
+    Returns:
+        i2t (dict): {image_id: [caption_ids sorted by similarity, best first]}
+        t2i (dict): {caption_id: [image_ids sorted by similarity, best first]}
+    """
+    sim_matrix = np.array(sim_matrix)
+    # sim_matrix: [N_captions, N_images]
+
+    # t2i: for each caption (row), rank images (columns) descending
+    t2i = {}
+    for cap_idx, cap_id in enumerate(caption_ids):
+        ranked_img_indices = np.argsort(-sim_matrix[cap_idx])  # [N_images] descending
+        t2i[cap_id] = [image_ids[i] for i in ranked_img_indices]
+
+    # i2t: for each image (column), rank captions (rows) descending
+    i2t = {}
+    for img_idx, img_id in enumerate(image_ids):
+        ranked_cap_indices = np.argsort(-sim_matrix[:, img_idx])  # [N_captions] descending
+        i2t[img_id] = [caption_ids[i] for i in ranked_cap_indices]
+
+    return i2t, t2i
+
+
+def compute_mapr_rprecision(i2t, t2i, gt_i2t, gt_t2i):
+    """
+    Compute mAP@R and R-Precision for both i2t and t2i directions.
+
+    mAP@R: mean Average Precision truncated at R (number of relevant items).
+    R-Precision: precision at rank R, i.e. fraction of relevant items in top-R results.
+
+    For Flickr30k with Karpathy ground truth:
+      - i2t: R=5 per image (each image has 5 captions)
+      - t2i: R=1 per caption (each caption belongs to 1 image)
+
+    Args:
+        i2t (dict): {image_id: [caption_ids ranked descending by similarity]}
+        t2i (dict): {caption_id: [image_ids ranked descending by similarity]}
+        gt_i2t (dict): {image_id: set of relevant caption_ids}
+        gt_t2i (dict): {caption_id: set of relevant image_ids}
+
+    Returns:
+        dict with keys: mapr_i2t, mapr_t2i, rprecision_i2t, rprecision_t2i (all in %)
+    """
+    def _ap_at_r(ranked_list, relevant_set):
+        """AP@R for a single query."""
+        r = len(relevant_set)
+        if r == 0:
+            return 0.0, 0.0
+        hits = 0
+        precision_sum = 0.0
+        for pos, item in enumerate(ranked_list[:r]):
+            if item in relevant_set:
+                hits += 1
+                precision_sum += hits / (pos + 1)
+        ap = precision_sum / r
+        rprec = hits / r
+        return ap, rprec
+
+    # i2t
+    ap_sum_i2t = 0.0
+    rp_sum_i2t = 0.0
+    for img_id, ranked_caps in i2t.items():
+        relevant = gt_i2t.get(img_id, set())
+        ap, rp = _ap_at_r(ranked_caps, relevant)
+        ap_sum_i2t += ap
+        rp_sum_i2t += rp
+    n_i2t = len(i2t)
+    mapr_i2t = (ap_sum_i2t / n_i2t) * 100.0 if n_i2t > 0 else 0.0
+    rprecision_i2t = (rp_sum_i2t / n_i2t) * 100.0 if n_i2t > 0 else 0.0
+
+    # t2i
+    ap_sum_t2i = 0.0
+    rp_sum_t2i = 0.0
+    for cap_id, ranked_imgs in t2i.items():
+        relevant = gt_t2i.get(cap_id, set())
+        ap, rp = _ap_at_r(ranked_imgs, relevant)
+        ap_sum_t2i += ap
+        rp_sum_t2i += rp
+    n_t2i = len(t2i)
+    mapr_t2i = (ap_sum_t2i / n_t2i) * 100.0 if n_t2i > 0 else 0.0
+    rprecision_t2i = (rp_sum_t2i / n_t2i) * 100.0 if n_t2i > 0 else 0.0
+
+    return {
+        'mapr_i2t': mapr_i2t,
+        'mapr_t2i': mapr_t2i,
+        'rprecision_i2t': rprecision_i2t,
+        'rprecision_t2i': rprecision_t2i,
+    }
+
+
+def compute_eccv_metrics(sim_matrix, image_ids, caption_ids):
+    """
+    Compute ECCV Caption metrics using the eccv_caption library.
+
+    Args:
+        sim_matrix (np.ndarray): Shape [N_captions, N_images].
+        image_ids (list): Image IDs corresponding to columns of sim_matrix.
+        caption_ids (list): Caption IDs corresponding to rows of sim_matrix.
+
+    Returns:
+        dict: Full scores dict from eccv_caption, empty dict if library not installed.
+    """
+    try:
+        from eccv_caption import Metrics
+    except ImportError:
+        logger.warning("eccv_caption not installed; skipping ECCV metrics. Install with: pip install eccv-caption")
+        return {}
+
+    i2t, t2i = build_ranked_dicts(sim_matrix, image_ids, caption_ids)
+    metric = Metrics()
+    scores = metric.compute_all_metrics(
+        i2t,
+        t2i,
+        target_metrics=(
+            'eccv_r1', 'eccv_map_at_r', 'eccv_rprecision',
+            'coco_1k_recalls', 'coco_5k_recalls', 'cxc_recalls',
+        ),
+        Ks=(1, 5, 10),
+        verbose=False,
+    )
+    return scores

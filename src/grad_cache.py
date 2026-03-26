@@ -191,13 +191,15 @@ class GradCache:
                     loss_dict = self.criterion(
                         img_embeds_full,
                         txt_embeds_full,
-                        img_aug_embeds=None,
-                        txt_aug_embeds=para_embeds_full,
+                        self.model.clip.logit_scale,
+                        img_aug_embeds=None,  # Intra-modal not supported yet in grad cache
+                        txt_aug_embeds=None
                     )
             else:
                 loss_dict = self.criterion(
                     img_embeds_full,
                     txt_embeds_full,
+                    self.model.clip.logit_scale,
                     img_aug_embeds=None,
                     txt_aug_embeds=para_embeds_full,
                 )
@@ -238,6 +240,7 @@ class GradCache:
                 )
                 loss_dict = self.criterion(
                     img_embeds, txt_embeds,
+                    self.model.clip.logit_scale,
                     img_aug_embeds=None,
                     txt_aug_embeds=para_embeds,
                 )
@@ -250,6 +253,7 @@ class GradCache:
             )
             loss_dict = self.criterion(
                 img_embeds, txt_embeds,
+                self.model.clip.logit_scale,
                 img_aug_embeds=None,
                 txt_aug_embeds=para_embeds,
             )

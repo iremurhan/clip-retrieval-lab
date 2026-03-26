@@ -241,6 +241,7 @@ class CaptionImageDataset(Dataset):
                     self.samples.append({
                         'image_id': img_id,
                         'caption': sent['raw'],
+                        'sentid': int(sent['sentid']),
                         'filepath': img.get('filepath', ''),
                         'filename': img.get('filename', '')
                     })
@@ -291,7 +292,7 @@ class CaptionImageDataset(Dataset):
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
             'image_id': image_id,
-            'caption': caption,
+            'sentid': sample['sentid'],
         }
 
 
@@ -352,13 +353,23 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
             logger.warning(f"DEBUG MODE: Truncating dataset to {debug_limit} samples.")
             dataset.samples = dataset.samples[:debug_limit]
 
+    seed = config.get('training', {}).get('seed', 42)
+
+    def _worker_init_fn(worker_id):
+        worker_seed = seed + worker_id
+        import numpy as np
+        import random
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
     loader = DataLoader(
         dataset,
         batch_size=config['training']['batch_size'],  # defined in config_base.yaml
         shuffle=shuffle,
         num_workers=config['training']['num_workers'],  # defined in config_base.yaml
         pin_memory=True,
-        drop_last=(split == 'train')
+        drop_last=(split == 'train'),
+        worker_init_fn=_worker_init_fn,
     )
 
     return loader

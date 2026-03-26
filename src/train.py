@@ -16,13 +16,12 @@ Usage:
 """
 
 import torch
-import torch.nn.functional as F
 import logging
 import wandb
 import os
 import time
 import random
-from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k
+from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k, compute_eccv_metrics, build_ranked_dicts, compute_mapr_rprecision
 from .utils import compute_grad_norm
 from .grad_cache import GradCache
 
@@ -101,16 +100,38 @@ class Trainer:
             self.wandb_run = wandb.run
             # Define WandB summary metrics with max tracking for validation results
             # This ensures the dashboard always shows the best scores, even if current epoch is worse
+            # Flickr metrics
             wandb.define_metric("val/t2i_r1", summary="max")
             wandb.define_metric("val/t2i_r5", summary="max")
             wandb.define_metric("val/t2i_r10", summary="max")
             wandb.define_metric("val/i2t_r1", summary="max")
             wandb.define_metric("val/i2t_r5", summary="max")
             wandb.define_metric("val/i2t_r10", summary="max")
-            wandb.define_metric("val/t2i_map5", summary="max")
-            wandb.define_metric("val/t2i_map10", summary="max")
-            wandb.define_metric("val/i2t_map5", summary="max")
-            wandb.define_metric("val/i2t_map10", summary="max")
+            wandb.define_metric("val/t2i_mapr", summary="max")
+            wandb.define_metric("val/i2t_mapr", summary="max")
+            wandb.define_metric("val/t2i_rprecision", summary="max")
+            wandb.define_metric("val/i2t_rprecision", summary="max")
+            # COCO / ECCV metrics
+            wandb.define_metric("val/coco_5k_r1_i2t", summary="max")
+            wandb.define_metric("val/coco_5k_r1_t2i", summary="max")
+            wandb.define_metric("val/coco_5k_r5_i2t", summary="max")
+            wandb.define_metric("val/coco_5k_r5_t2i", summary="max")
+            wandb.define_metric("val/coco_5k_r10_i2t", summary="max")
+            wandb.define_metric("val/coco_5k_r10_t2i", summary="max")
+            wandb.define_metric("val/coco_1k_r1_i2t", summary="max")
+            wandb.define_metric("val/coco_1k_r1_t2i", summary="max")
+            wandb.define_metric("val/coco_1k_r5_i2t", summary="max")
+            wandb.define_metric("val/coco_1k_r5_t2i", summary="max")
+            wandb.define_metric("val/coco_1k_r10_i2t", summary="max")
+            wandb.define_metric("val/coco_1k_r10_t2i", summary="max")
+            wandb.define_metric("val/eccv_r1_i2t", summary="max")
+            wandb.define_metric("val/eccv_r1_t2i", summary="max")
+            wandb.define_metric("val/eccv_map_at_r_i2t", summary="max")
+            wandb.define_metric("val/eccv_map_at_r_t2i", summary="max")
+            wandb.define_metric("val/eccv_rprecision_i2t", summary="max")
+            wandb.define_metric("val/eccv_rprecision_t2i", summary="max")
+            wandb.define_metric("val/cxc_r1_i2t", summary="max")
+            wandb.define_metric("val/cxc_r1_t2i", summary="max")
 
 
     def load_checkpoint(self, checkpoint_path):
@@ -152,6 +173,9 @@ class Trainer:
         """
         last_path = os.path.join(self.checkpoint_dir, "last_model.pth")
         best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
+        # NOTE: Python/numpy/torch random state is intentionally not saved.
+        # Resuming from checkpoint will have different augmentation than a fresh run
+        # at the same epoch. This is a known, accepted limitation.
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
@@ -188,7 +212,6 @@ class Trainer:
         
         num_batches = len(self.train_loader)
         batch_size = self.config['data']['batch_size']
-        use_clip_loss = self.config['loss'].get('use_clip_loss', False)
         intra_img_weight = self.config['loss'].get('intra_img_weight', 0.0)
         intra_txt_weight = self.config['loss'].get('intra_txt_weight', 0.0)
 
@@ -213,10 +236,8 @@ class Trainer:
             if self.use_grad_cache:
                 # GRADIENT CACHING MODE
                 # GradCache handles the forward/backward internally
-                # Note: Currently GradCache does NOT support use_clip_loss, neg_txt_embeds, or intra-modal
+                # Note: Currently GradCache does NOT support neg_txt_embeds or intra-modal
                 # TODO: Add support for these features if needed
-                if use_clip_loss:
-                    raise NotImplementedError("GradCache does not support use_clip_loss yet. Set loss.use_clip_loss=false.")
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
                 if intra_img_weight > 0:
@@ -256,28 +277,23 @@ class Trainer:
                     # Zero gradients before forward to avoid stale gradient accumulation
                     self.optimizer.zero_grad()
                     with torch.amp.autocast(device_type='cuda'):
-                        if use_clip_loss:
-                            loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
-                        else:
-                            img_embeds = self.model.encode_image(images)
-                            txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                            neg_txt_embeds = None
-                            if neg_input_ids is not None:
-                                neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
-                            img_aug_embeds = None
-                            txt_aug_embeds = None
-                            if intra_img_weight > 0:
-                                img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                            if intra_txt_weight > 0 and self.paraphraser is not None:
-                                para_ids, para_mask = self.paraphraser.generate(batch['caption'])
-                                txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
-                                # txt_aug_embeds: [N, D] — L2-normalized paraphrase embeddings
-                            
-                            loss_dict = self.criterion(
-                                img_embeds, txt_embeds,
-                                img_aug_embeds, txt_aug_embeds
-                            )
-                            loss = loss_dict["loss_total"]
+                        img_embeds = self.model.encode_image(images)
+                        txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                        img_aug_embeds = None
+                        txt_aug_embeds = None
+                        if intra_img_weight > 0:
+                            img_aug_embeds = self.model.encode_image(
+                                batch['image_aug'].to(self.device))
+                        if intra_txt_weight > 0 and self.paraphraser is not None:
+                            para_ids, para_mask = self.paraphraser.generate(
+                                batch['caption'])
+                            txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+
+                        loss_dict = self.criterion(
+                            img_embeds, txt_embeds,
+                            img_aug_embeds, txt_aug_embeds
+                        )
+                        loss = loss_dict["loss_total"]
 
                     # Backward with gradient scaling
                     self.scaler.scale(loss).backward()
@@ -295,9 +311,6 @@ class Trainer:
                     else:
                         img_embeds = self.model.encode_image(images)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                        neg_txt_embeds = None
-                        if neg_input_ids is not None:
-                            neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
                         if intra_img_weight > 0:
@@ -310,12 +323,87 @@ class Trainer:
                         # loss is now a dict
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
+                            self.model.clip.logit_scale,
                             img_aug_embeds, txt_aug_embeds
                         )
                         loss = loss_dict["loss_total"]
+
+                        if step == 0:
+                            # Sanity: embeddings must be unit-norm after L2 normalization
+                            with torch.no_grad():
+                                img_norms = torch.norm(img_embeds, dim=1)
+                                txt_norms = torch.norm(txt_embeds, dim=1)
+                                if not torch.allclose(img_norms, torch.ones_like(img_norms), atol=1e-5):
+                                    raise RuntimeError(
+                                        f"Image embeddings are not unit-norm at step 0. "
+                                        f"Max deviation: {(img_norms - 1).abs().max().item():.6f}"
+                                    )
+                                if not torch.allclose(txt_norms, torch.ones_like(txt_norms), atol=1e-5):
+                                    raise RuntimeError(
+                                        f"Text embeddings are not unit-norm at step 0. "
+                                        f"Max deviation: {(txt_norms - 1).abs().max().item():.6f}"
+                                    )
+                                # Sanity: intra-modal loss is exactly 0 when weight is 0
+                                if self.criterion.w_img == 0.0:
+                                    assert loss_dict["loss_intra_img"].item() == 0.0, \
+                                        "loss_intra_img is non-zero but intra_img_weight=0"
+                                if self.criterion.w_txt == 0.0:
+                                    assert loss_dict["loss_intra_txt"].item() == 0.0, \
+                                        "loss_intra_txt is non-zero but intra_txt_weight=0"
+
+                    # Backward with gradient scaling
+                    self.scaler.scale(loss).backward()
                     
-                    # Backward
+                    # Unscale gradients to compute true grad norm
+                    self.scaler.unscale_(self.optimizer)
+                    grad_norm = compute_grad_norm(self.model)
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Standard precision training
                     self.optimizer.zero_grad()
+                    img_embeds = self.model.encode_image(images)
+                    txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                    img_aug_embeds = None
+                    txt_aug_embeds = None
+                    if intra_img_weight > 0:
+                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                    if intra_txt_weight > 0:
+                        txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+
+                    # loss is now a dict
+                    loss_dict = self.criterion(
+                        img_embeds, txt_embeds,
+                        self.model.clip.logit_scale,
+                        img_aug_embeds, txt_aug_embeds
+                    )
+                    loss = loss_dict["loss_total"]
+
+                    if step == 0:
+                        # Sanity: embeddings must be unit-norm after L2 normalization
+                        with torch.no_grad():
+                            img_norms = torch.norm(img_embeds, dim=1)
+                            txt_norms = torch.norm(txt_embeds, dim=1)
+                            if not torch.allclose(img_norms, torch.ones_like(img_norms), atol=1e-5):
+                                raise RuntimeError(
+                                    f"Image embeddings are not unit-norm at step 0. "
+                                    f"Max deviation: {(img_norms - 1).abs().max().item():.6f}"
+                                )
+                            if not torch.allclose(txt_norms, torch.ones_like(txt_norms), atol=1e-5):
+                                raise RuntimeError(
+                                    f"Text embeddings are not unit-norm at step 0. "
+                                    f"Max deviation: {(txt_norms - 1).abs().max().item():.6f}"
+                                )
+                            # Sanity: intra-modal loss is exactly 0 when weight is 0
+                            if self.criterion.w_img == 0.0:
+                                assert loss_dict["loss_intra_img"].item() == 0.0, \
+                                    "loss_intra_img is non-zero but intra_img_weight=0"
+                            if self.criterion.w_txt == 0.0:
+                                assert loss_dict["loss_intra_txt"].item() == 0.0, \
+                                    "loss_intra_txt is non-zero but intra_txt_weight=0"
+
+                    # Backward
                     loss.backward()
                     
                     # Compute grad norm before optimizer step
@@ -327,7 +415,12 @@ class Trainer:
             
             # Update metrics
             losses.update(loss.item(), images.size(0))
-            
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Loss is {loss.item()} at epoch {epoch} step {step}. "
+                    "Training cannot continue."
+                )
+
             # Measure batch time
             batch_time.update(time.time() - end_time)
             end_time = time.time()
@@ -348,7 +441,15 @@ class Trainer:
                     f"Loss: {losses.avg:.4f} | LR: {primary_lr:.6f} | "
                     f"GradNorm: {grad_norm:.2f} | Speed: {samples_per_sec:.1f} samples/s"
                 )
-                
+
+                with torch.no_grad():
+                    scale_val = self.model.clip.logit_scale.exp().item()
+                    if scale_val >= 99.9:
+                        logger.warning(
+                            f"logit_scale.exp()={scale_val:.2f} has hit the clamp ceiling (100). "
+                            "This indicates temperature instability."
+                        )
+
                 if self.use_wandb:
                     try:
                         log_dict = {
@@ -376,106 +477,199 @@ class Trainer:
         img_embeds_list = []
         txt_embeds_list = []
         image_ids_list = []
-        
-        # Handle "TEST" epoch logging string
+        sentids_list = []
+
         epoch_log = epoch if isinstance(epoch, str) else epoch
         logger.info(f"Starting Evaluation ({epoch_log})...")
-        
+
         for batch in self.val_loader:
             images = batch['image'].to(self.device)
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
-            
+
             img_emb, txt_emb = self.model(images, input_ids, attention_mask)
             img_embeds_list.append(img_emb.cpu())
             txt_embeds_list.append(txt_emb.cpu())
-            
-            # Collect image_ids for ground truth matching
             image_ids_list.append(batch['image_id'].cpu())
-            
-        img_embeds = torch.cat(img_embeds_list, dim=0)
-        txt_embeds = torch.cat(txt_embeds_list, dim=0)
-        image_ids = torch.cat(image_ids_list, dim=0)
-        
-        # Get unique images in insertion order (preserving order of first occurrence)
-        # This ensures alignment between unique_image_ids and img_embeds_unique
+            sentids_list.append(batch['sentid'].cpu())
+
+        img_embeds = torch.cat(img_embeds_list, dim=0)   # [N_captions, D]
+        txt_embeds = torch.cat(txt_embeds_list, dim=0)   # [N_captions, D]
+        image_ids = torch.cat(image_ids_list, dim=0)     # [N_captions]
+        sentids = torch.cat(sentids_list, dim=0)         # [N_captions]
+
+        # Deduplicate images, preserving insertion order
         seen_image_ids = set()
         first_occurrence_indices = []
         unique_image_ids_list = []
-        
         for idx in range(len(image_ids)):
             img_id = image_ids[idx].item()
             if img_id not in seen_image_ids:
                 seen_image_ids.add(img_id)
                 first_occurrence_indices.append(idx)
                 unique_image_ids_list.append(img_id)
-        
-        # Convert to tensors - order matches first_occurrence_indices (insertion order)
+
         unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
-        img_embeds_unique = img_embeds[first_occurrence_indices]
-        
-        # Precompute similarity matrix once: [N_images, N_captions]
-        sims = torch.matmul(img_embeds_unique, txt_embeds.t())  # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
+        img_embeds_unique = img_embeds[first_occurrence_indices]  # [N_images, D]
 
-        # Compute Recall@K metrics
-        r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims=sims)
+        eval_eccv = self.config.get('logging', {}).get('eval_eccv', False)
 
-        # Compute MAP@K metrics
-        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10], sims=sims)
-        
-        # Log results to console
-        logger.info(
-            f"Epoch {epoch_log} Results:\n"
-            f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f} | MAP@5: {map_t2i[5]:.2f} | MAP@10: {map_t2i[10]:.2f}\n"
-            f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f} | MAP@5: {map_i2t[5]:.2f} | MAP@10: {map_i2t[10]:.2f}"
-        )
-        
-        # Current metrics dictionary
-        current_metrics = {
-            't2i_r1': r_t2i[1], 't2i_r5': r_t2i[5], 't2i_r10': r_t2i[10],
-            'i2t_r1': r_i2t[1], 'i2t_r5': r_i2t[5], 'i2t_r10': r_i2t[10],
-            't2i_map5': map_t2i[5], 't2i_map10': map_t2i[10],
-            'i2t_map5': map_i2t[5], 'i2t_map10': map_i2t[10],
-        }
-        
-        if self.use_wandb:
-            # Build log data dictionary
+        # ------------------------------------------------------------------
+        # COCO path: use eccv_caption library
+        # ------------------------------------------------------------------
+        if eval_eccv:
+            # sim_matrix: [N_captions, N_images]
+            sim_matrix = torch.matmul(txt_embeds, img_embeds_unique.t()).numpy()
+            caption_ids_eccv = [sid.item() for sid in sentids]
+            image_ids_eccv = [uid.item() for uid in unique_image_ids]
+
+            eccv_scores = compute_eccv_metrics(sim_matrix, image_ids_eccv, caption_ids_eccv)
+
+            if not eccv_scores:
+                logger.warning("eccv_caption returned empty scores; falling back to standard R@K.")
+                eval_eccv = False
+
+        if eval_eccv:
+            # eccv_caption output structure:
+            #   coco_5k_recalls / coco_1k_recalls: {direction: {K: value}}   (0-1 scale)
+            #   eccv_r1 / eccv_map_at_r / eccv_rprecision: {direction: value} (0-1 scale)
+            #   cxc_recalls: {direction: {K: value}}                          (0-1 scale)
+            coco5k = eccv_scores.get('coco_5k_recalls', {})
+            coco1k = eccv_scores.get('coco_1k_recalls', {})
+            eccv_r1 = eccv_scores.get('eccv_r1', {})
+            eccv_mapr = eccv_scores.get('eccv_map_at_r', {})
+            eccv_rprec = eccv_scores.get('eccv_rprecision', {})
+            cxc = eccv_scores.get('cxc_recalls', {})
+
+            def _recall(d, direction, k):
+                return d.get(direction, {}).get(k, 0.0) * 100.0
+
+            def _scalar(d, direction):
+                return d.get(direction, 0.0) * 100.0
+
             log_data = {
-                "val/t2i_r1": r_t2i[1], "val/t2i_r5": r_t2i[5], "val/t2i_r10": r_t2i[10],
-                "val/i2t_r1": r_i2t[1], "val/i2t_r5": r_i2t[5], "val/i2t_r10": r_i2t[10],
-                "val/t2i_map5": map_t2i[5], "val/t2i_map10": map_t2i[10],
-                "val/i2t_map5": map_i2t[5], "val/i2t_map10": map_i2t[10],
+                # COCO-5K recalls
+                "val/coco_5k_r1_i2t":  _recall(coco5k, 'i2t', 1),
+                "val/coco_5k_r1_t2i":  _recall(coco5k, 't2i', 1),
+                "val/coco_5k_r5_i2t":  _recall(coco5k, 'i2t', 5),
+                "val/coco_5k_r5_t2i":  _recall(coco5k, 't2i', 5),
+                "val/coco_5k_r10_i2t": _recall(coco5k, 'i2t', 10),
+                "val/coco_5k_r10_t2i": _recall(coco5k, 't2i', 10),
+                # COCO-1K recalls
+                "val/coco_1k_r1_i2t":  _recall(coco1k, 'i2t', 1),
+                "val/coco_1k_r1_t2i":  _recall(coco1k, 't2i', 1),
+                "val/coco_1k_r5_i2t":  _recall(coco1k, 'i2t', 5),
+                "val/coco_1k_r5_t2i":  _recall(coco1k, 't2i', 5),
+                "val/coco_1k_r10_i2t": _recall(coco1k, 'i2t', 10),
+                "val/coco_1k_r10_t2i": _recall(coco1k, 't2i', 10),
+                # ECCV metrics
+                "val/eccv_r1_i2t":          _scalar(eccv_r1,   'i2t'),
+                "val/eccv_r1_t2i":          _scalar(eccv_r1,   't2i'),
+                "val/eccv_map_at_r_i2t":    _scalar(eccv_mapr, 'i2t'),
+                "val/eccv_map_at_r_t2i":    _scalar(eccv_mapr, 't2i'),
+                "val/eccv_rprecision_i2t":  _scalar(eccv_rprec, 'i2t'),
+                "val/eccv_rprecision_t2i":  _scalar(eccv_rprec, 't2i'),
+                # CxC recalls (R@1 only for brevity; full set available via eccv_scores)
+                "val/cxc_r1_i2t": _recall(cxc, 'i2t', 1),
+                "val/cxc_r1_t2i": _recall(cxc, 't2i', 1),
             }
-            
-            # If epoch is a number, add epoch info; otherwise handle test logging
+
+            logger.info(
+                f"Epoch {epoch_log} COCO Results:\n"
+                f"  COCO-5K  R@1: i2t={log_data['val/coco_5k_r1_i2t']:.2f} | t2i={log_data['val/coco_5k_r1_t2i']:.2f} | "
+                f"R@5: i2t={log_data['val/coco_5k_r5_i2t']:.2f} | t2i={log_data['val/coco_5k_r5_t2i']:.2f} | "
+                f"R@10: i2t={log_data['val/coco_5k_r10_i2t']:.2f} | t2i={log_data['val/coco_5k_r10_t2i']:.2f}\n"
+                f"  COCO-1K  R@1: i2t={log_data['val/coco_1k_r1_i2t']:.2f} | t2i={log_data['val/coco_1k_r1_t2i']:.2f}\n"
+                f"  ECCV R@1:     i2t={log_data['val/eccv_r1_i2t']:.2f} | t2i={log_data['val/eccv_r1_t2i']:.2f}\n"
+                f"  ECCV mAP@R:   i2t={log_data['val/eccv_map_at_r_i2t']:.2f} | t2i={log_data['val/eccv_map_at_r_t2i']:.2f}\n"
+                f"  ECCV R-Prec:  i2t={log_data['val/eccv_rprecision_i2t']:.2f} | t2i={log_data['val/eccv_rprecision_t2i']:.2f}"
+            )
+
+            current_metrics = {k.split('val/')[1]: v for k, v in log_data.items()}
+            primary_score = log_data["val/coco_5k_r1_i2t"]
+
+        # ------------------------------------------------------------------
+        # Flickr path: existing R@K + manual mAP@R / R-Precision
+        # ------------------------------------------------------------------
+        if not eval_eccv:
+            r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids)
+
+            # Build ground-truth dicts for mAP@R / R-Precision
+            # Keys are sentids (stable Karpathy IDs); ranked list values are also sentids / image_ids.
+            # gt_i2t: image_id -> set of sentids belonging to that image (R=5)
+            # gt_t2i: sentid -> set of image_ids for that caption (R=1)
+            caption_ids_flickr = [sid.item() for sid in sentids]
+            image_ids_list_flickr = [uid.item() for uid in unique_image_ids]
+
+            gt_i2t = {}
+            for i, uid in enumerate(unique_image_ids):
+                uid_val = uid.item()
+                gt_i2t[uid_val] = set(
+                    caption_ids_flickr[cap_idx]
+                    for cap_idx in range(len(image_ids))
+                    if image_ids[cap_idx].item() == uid_val
+                )
+            gt_t2i = {}
+            for cap_idx, sid in enumerate(caption_ids_flickr):
+                img_id = image_ids[cap_idx].item()
+                gt_t2i[sid] = {img_id}
+
+            # sim_matrix: [N_captions, N_images]
+            sim_matrix = torch.matmul(txt_embeds, img_embeds_unique.t()).numpy()
+            i2t_ranked, t2i_ranked = build_ranked_dicts(sim_matrix, image_ids_list_flickr, caption_ids_flickr)
+
+            mapr_scores = compute_mapr_rprecision(i2t_ranked, t2i_ranked, gt_i2t, gt_t2i)
+
+            logger.info(
+                f"Epoch {epoch_log} Flickr Results:\n"
+                f"  T2I: R@1: {r_t2i[1]:.2f} | R@5: {r_t2i[5]:.2f} | R@10: {r_t2i[10]:.2f} | "
+                f"mAP@R: {mapr_scores['mapr_t2i']:.2f} | R-Prec: {mapr_scores['rprecision_t2i']:.2f}\n"
+                f"  I2T: R@1: {r_i2t[1]:.2f} | R@5: {r_i2t[5]:.2f} | R@10: {r_i2t[10]:.2f} | "
+                f"mAP@R: {mapr_scores['mapr_i2t']:.2f} | R-Prec: {mapr_scores['rprecision_i2t']:.2f}"
+            )
+
+            log_data = {
+                "val/t2i_r1":         r_t2i[1],
+                "val/t2i_r5":         r_t2i[5],
+                "val/t2i_r10":        r_t2i[10],
+                "val/i2t_r1":         r_i2t[1],
+                "val/i2t_r5":         r_i2t[5],
+                "val/i2t_r10":        r_i2t[10],
+                "val/t2i_mapr":       mapr_scores['mapr_t2i'],
+                "val/i2t_mapr":       mapr_scores['mapr_i2t'],
+                "val/t2i_rprecision": mapr_scores['rprecision_t2i'],
+                "val/i2t_rprecision": mapr_scores['rprecision_i2t'],
+            }
+
+            current_metrics = {k.split('val/')[1]: v for k, v in log_data.items()}
+            primary_score = r_t2i[1]
+
+        if self.use_wandb:
             if isinstance(epoch, int):
                 log_data["epoch"] = epoch + 1
             else:
-                # For test evaluation (e.g., "TEST_FINAL"), store as summary metrics
+                # TEST_FINAL: write everything to run summary
                 for k, v in log_data.items():
-                    wandb.run.summary[f"test_{k.split('/')[1]}"] = v
-            
+                    if k != "epoch":
+                        wandb.run.summary[f"test_{k.split('/')[1]}"] = v
+
             try:
                 wandb.log(log_data)
-                
-                # Update best metrics in WandB summary if new best is found
-                # This ensures the run summary always shows MAX values
+
                 for metric_name, current_value in current_metrics.items():
-                    if current_value > self.best_metrics[metric_name]:
+                    if current_value > self.best_metrics.get(metric_name, 0.0):
                         self.best_metrics[metric_name] = current_value
-                        # Update WandB summary with best value
                         wandb.run.summary[f"best_val_{metric_name}"] = current_value
-                        
+
             except Exception as e:
                 logger.warning(f"Failed to log to W&B: {e}")
 
-            if self.use_wandb:
-                try:
-                    self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
-                except Exception as e:
-                    logger.warning(f"Qualitative table logging failed: {e}")
-            
-        return r_t2i[1]
+            try:
+                self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
+            except Exception as e:
+                logger.warning(f"Qualitative table logging failed: {e}")
+
+        return primary_score
 
     def _log_qualitative_table(self, epoch, txt_embeds, img_embeds_unique, first_occurrence_indices):
         """
@@ -532,13 +726,13 @@ class Trainer:
     def fit(self, start_epoch=0):
         eval_frequency = self.config['logging']['eval_freq']
 
-        # If start_epoch is 0 (i.e., not resuming), run initial evaluation.
-        if start_epoch == 0:
-            logger.info("Running initial evaluation at Epoch 0...")
+        # Run evaluation before training only when explicitly requested via eval_epoch_zero.
+        if start_epoch == 0 and self.config['logging'].get('eval_epoch_zero', False):
+            logger.info("Running initial evaluation at Epoch 0 (eval_epoch_zero=true)...")
             score = self.evaluate(epoch=0)
             if score > self.best_r1:
                 self.best_r1 = score
-            logger.info(f"Initial state saved. Starting training loop from Epoch {start_epoch}.")
+            logger.info(f"Epoch 0 evaluation done. Starting training loop.")
 
         # --- MAIN TRAINING LOOP ---
         for epoch in range(start_epoch, self.config['training']['epochs']):
