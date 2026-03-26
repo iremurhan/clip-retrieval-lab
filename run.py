@@ -84,7 +84,8 @@ def create_lr_scheduler(optimizer, config, num_training_steps):
     # transformers' get_cosine_schedule_with_warmup triggers internally during __init__.
     # The training loop calls optimizer.step() before scheduler.step() correctly.
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step`")
+        warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*before.*optimizer.step.*")
+        warnings.filterwarnings("ignore", message=".*Detected call of.*lr_scheduler.step.*")
         return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
 
 
