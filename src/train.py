@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 class Trainer:
     def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device):
-    def __init__(self, model, train_loader, val_loader, criterion, optimizer, scheduler, config, device):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -190,7 +189,6 @@ class Trainer:
         
         num_batches = len(self.train_loader)
         batch_size = self.config['training']['batch_size']
-        use_clip_loss = self.config['loss'].get('use_clip_loss', False)
         intra_img_weight = self.config['loss'].get('intra_img_weight', 0.0)
         intra_txt_weight = self.config['loss'].get('intra_txt_weight', 0.0)
 
@@ -215,10 +213,6 @@ class Trainer:
             if self.use_grad_cache:
                 # GRADIENT CACHING MODE
                 # GradCache handles the forward/backward internally
-                # Note: Currently GradCache does NOT support use_clip_loss, neg_txt_embeds, or intra-modal
-                # TODO: Add support for these features if needed
-                if use_clip_loss:
-                    raise NotImplementedError("GradCache does not support use_clip_loss yet. Set loss.use_clip_loss=false.")
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
                 if intra_img_weight > 0:
@@ -287,71 +281,35 @@ class Trainer:
                     self.scaler.update()
                 else:
                     # Standard precision training
-                    if use_clip_loss:
-                        loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
-                    else:
-                        img_embeds = self.model.encode_image(images)
-                        txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                        img_aug_embeds = None
-                        txt_aug_embeds = None
-                        if intra_img_weight > 0:
-                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                        if intra_txt_weight > 0 and self.paraphraser is not None:
-                            para_ids, para_mask = self.paraphraser.generate(batch['caption'])
-                            txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
-                            # txt_aug_embeds: [N, D] — L2-normalized paraphrase embeddings
-                        
-                        # loss is now a dict
-                        loss_dict = self.criterion(
-                            img_embeds, txt_embeds,
-                            self.model.clip.logit_scale,
-                            img_aug_embeds, txt_aug_embeds
-                        )
-                        loss = loss_dict["loss_total"]
+                    img_embeds = self.model.encode_image(images)
+                    txt_embeds = self.model.encode_text(input_ids, attention_mask)
+                    neg_txt_embeds = None
+                    if neg_input_ids is not None:
+                        neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
+                    img_aug_embeds = None
+                    txt_aug_embeds = None
+                    if intra_img_weight > 0:
+                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
+                    # TODO: Re-enable when real text augmentation (e.g. synonym replacement or
+                    # random token dropout) is implemented. Using identical inputs produces a
+                    # trivially zero intra-text loss and is therefore disabled until then.
+                    if False:  # intra_txt_weight > 0
+                        txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
 
-                    # Backward with gradient scaling
-                    self.scaler.scale(loss).backward()
-                    
-                    # Unscale gradients to compute true grad norm
-                    self.scaler.unscale_(self.optimizer)
-                    grad_norm = compute_grad_norm(self.model)
-                    
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    # Standard precision training
-                    if use_clip_loss:
-                        loss, _, _ = self.model.forward_with_clip_loss(images, input_ids, attention_mask)
-                    else:
-                        img_embeds = self.model.encode_image(images)
-                        txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                        neg_txt_embeds = None
-                        if neg_input_ids is not None:
-                            neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
-                        img_aug_embeds = None
-                        txt_aug_embeds = None
-                        if intra_img_weight > 0:
-                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device))
-                        # TODO: Re-enable when real text augmentation (e.g. synonym replacement or
-                        # random token dropout) is implemented. Using identical inputs produces a
-                        # trivially zero intra-text loss and is therefore disabled until then.
-                        if False:  # intra_txt_weight > 0
-                            txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                    # loss is now a dict
+                    loss_dict = self.criterion(
+                        img_embeds, txt_embeds,
+                        img_aug_embeds, txt_aug_embeds
+                    )
+                    loss = loss_dict["loss_total"]
 
-                        # loss is now a dict
-                        loss_dict = self.criterion(
-                            img_embeds, txt_embeds,
-                            img_aug_embeds, txt_aug_embeds
-                        )
-                        loss = loss_dict["loss_total"]
-                    
                     # Backward
                     self.optimizer.zero_grad()
                     loss.backward()
-                    
+
                     # Compute grad norm before optimizer step
                     grad_norm = compute_grad_norm(self.model)
-                    
+
                     self.optimizer.step()
             
             self.scheduler.step()
@@ -566,7 +524,7 @@ class Trainer:
         # If start_epoch is 0 (i.e., not resuming), run initial evaluation.
         if start_epoch == 0:
             logger.info("Running initial evaluation at Epoch 0...")
-            score = self.evaluate(epoch=0)
+            score = self.evaluate(epoch=-1)
             if score > self.best_r1:
                 self.best_r1 = score
             logger.info(f"Initial state saved. Starting training loop from Epoch {start_epoch}.")
