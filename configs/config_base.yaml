@@ -19,6 +19,16 @@ loss:
   intra_img_weight: 1
   intra_txt_weight: 1
 
+# On-the-fly paraphrasing config for L_text_text = InfoNCE(T_orig, T_paraphrased).
+# Only loaded when loss.intra_txt_weight > 0. Safe to leave here with weight=0.
+paraphraser:
+  model_name: "mistralai/Mistral-7B-Instruct-v0.2"
+  max_new_tokens: 60
+  generation_temperature: 0.8
+  do_sample: true
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+
 training:
   # DataLoader-related defaults (will be mirrored into data.* at runtime)
   batch_size: 128
