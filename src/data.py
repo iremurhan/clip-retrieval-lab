@@ -289,6 +289,7 @@ class CaptionImageDataset(Dataset):
         return {
             'image': img_tensor,
             'image_aug': img_aug_tensor,
+            'caption': caption,
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
             'image_id': image_id,
@@ -317,8 +318,8 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     images_root = config['data']['images_path']
     captions_path = config['data']['captions_path']
 
-    # Resolve image size from training config (default 336 defined in config_base.yaml)
-    image_size = config['training']['image_size']
+    # Resolve image size from data config (defined in config_base.yaml)
+    image_size = config['data']['image_size']
 
     if split == 'train':
         # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
@@ -340,7 +341,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         images_root_path=images_root,
         captions_path=captions_path,
         tokenizer=tokenizer,
-        max_length=config['training']['max_length'],  # defined in config_base.yaml
+        max_length=config['data']['max_length'],  # defined in config_base.yaml
         split=split,
         transform=transform,
         transform_aug=transform_aug,
@@ -352,6 +353,8 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         worker_seed = seed + worker_id
         import numpy as np
         import random
+        import torch as _torch
+        _torch.manual_seed(worker_seed)
         np.random.seed(worker_seed)
         random.seed(worker_seed)
 
@@ -359,7 +362,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         dataset,
         batch_size=config['training']['batch_size'],  # defined in config_base.yaml
         shuffle=shuffle,
-        num_workers=config['training']['num_workers'],  # defined in config_base.yaml
+        num_workers=config['data']['num_workers'],  # defined in config_base.yaml
         pin_memory=True,
         drop_last=(split == 'train'),
         worker_init_fn=_worker_init_fn,

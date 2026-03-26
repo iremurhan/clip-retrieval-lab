@@ -217,6 +217,11 @@ class SymmetricInfoNCELoss(nn.Module):
 
         total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
 
+        if torch.isnan(total_loss):
+            raise RuntimeError("SymmetricInfoNCELoss is NaN. Check embeddings and logit_scale.")
+        if torch.isinf(total_loss):
+            raise RuntimeError("SymmetricInfoNCELoss is Inf. Check embeddings and logit_scale.")
+
         return {
             "loss_total": total_loss,
             "loss_inter": loss_inter,
