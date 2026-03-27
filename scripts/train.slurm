@@ -3,23 +3,22 @@
 # SLURM TRAINING SCRIPT
 # =============================================================================
 # Positional args:
-#   $1  EXPERIMENT_NAME   Human-readable label shown in logs (e.g. "B0_coco_s42")
+#   $1  RUN_ID            Registry run ID (e.g. B0, FULL) — passed to --run
 #   $2  CONFIG_PATH       Path to dataset config, relative to /workspace
 #                         (e.g. "configs/config_coco.yaml")
 #   $3+ EXTRA_ARGS        Any additional flags forwarded verbatim to run.py
-#                         (e.g. --run B0 --seed 42)
+#                         (e.g. --seed 42)
 #
 # Usage (direct sbatch):
-#   sbatch scripts/train.slurm <EXP_NAME> <CONFIG_PATH> [run.py flags...]
+#   sbatch scripts/train.slurm <RUN_ID> <CONFIG_PATH> [run.py flags...]
 #
 # Examples:
 #   # Single run with registry overrides and seed
-#   sbatch scripts/train.slurm B0_coco_s42 configs/config_coco.yaml \
-#       --run B0 --seed 42
+#   sbatch scripts/train.slurm B0 configs/config_coco.yaml --seed 42
 #
 #   # Debug run (no W&B, fast)
-#   sbatch scripts/train.slurm debug_run configs/config_coco.yaml \
-#       --run B0 --seed 42 --override debug.debug_mode=true
+#   sbatch scripts/train.slurm B0 configs/config_coco.yaml \
+#       --seed 42 --override debug.debug_mode=true
 #
 # Note: Prefer launch_run.sh for batch submission across datasets and seeds.
 #
@@ -32,7 +31,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=48G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.8
+#SBATCH --container-image=biremurhan/image-text-contrast:v0.13
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/slurm_%j.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/slurm_%j.out
@@ -49,7 +48,7 @@ if [ ! -d "/workspace" ] || [ ! -d "/output" ]; then
     exit 1
 fi
 
-EXP_NAME="${1:-}"
+RUN_ID="${1:-unnamed}"
 CONFIG_FILE="${2:-configs/config_coco.yaml}"
 shift 2
 EXTRA_ARGS=("$@")
@@ -77,7 +76,7 @@ mkdir -p "$JOB_DIR"
 
 echo "=========================================="
 echo "Job ID:        ${SLURM_JOB_ID}"
-echo "Experiment:    ${EXP_NAME:- (Unnamed)}"
+echo "Run ID:        ${RUN_ID}"
 echo "Dataset:       ${DATASET}"
 echo "Job dir:       ${JOB_DIR} (slurm.out, training.log, last_model.pth, best_model.pth, wandb/)"
 echo "=========================================="
@@ -103,6 +102,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python3 -u run.py \
     --config "$CONFIG_FILE" \
+    --run "$RUN_ID" \
     --override \
         debug.debug_mode=false \
         logging.checkpoint_dir="$CKPT_DIR" \

@@ -22,9 +22,13 @@ Additionally supports optional intra-modal consistency terms that enforce struct
 preservation within each modality (image↔augmented_image, text↔augmented_text).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 class SigLIPLoss(nn.Module):
@@ -50,8 +54,9 @@ class SigLIPLoss(nn.Module):
     Reference: Zhai et al., "Sigmoid Loss for Language Image Pre-Training" (ICCV 2023).
 
     Args:
-        config (dict): Configuration dict. No keys are read from it; accepts for
-                       interface compatibility with SymmetricInfoNCELoss.
+        config (dict): Configuration dict. Reads:
+                       - loss.intra_img_weight (default: 0.0)
+                       - loss.intra_txt_weight (default: 0.0)
     """
 
     def __init__(self, config):
@@ -59,48 +64,59 @@ class SigLIPLoss(nn.Module):
         # Learnable bias initialized to -10 so that sigmoid(-10) ≈ 0 at step 0,
         # preventing the model from being overconfident on the N²-N negatives.
         self.bias = nn.Parameter(torch.tensor(-10.0))
+        self.w_img = config['loss'].get('intra_img_weight', 0.0)
+        self.w_txt = config['loss'].get('intra_txt_weight', 0.0)
+
+    def _compute_siglip_loss(self, embed_a, embed_b, scale):
+        """Pairwise sigmoid loss between two sets of L2-normalized embeddings."""
+        N = embed_a.shape[0]
+        sim = torch.matmul(embed_a, embed_b.t())          # [N, N]
+        logits = scale * sim + self.bias                   # [N, N]
+        labels = 2 * torch.eye(N, device=embed_a.device) - 1  # [N, N]
+        return -F.logsigmoid(labels * logits).mean()       # scalar
 
     def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None):
         """
-        Compute SigLIP loss.
+        Compute SigLIP loss with optional intra-modal consistency terms.
 
         Args:
             img_embeds: [N, D] L2-normalized image embeddings
             txt_embeds: [N, D] L2-normalized text embeddings
             logit_scale: scalar nn.Parameter — model.clip.logit_scale (log scale)
-            img_aug_embeds: ignored (SigLIP has no intra-modal term)
-            txt_aug_embeds: ignored (SigLIP has no intra-modal term)
+            img_aug_embeds: [N, D] optional — augmented image embeddings for intra-modal loss
+            txt_aug_embeds: [N, D] optional — paraphrase text embeddings for intra-modal loss
 
         Returns:
-            dict: Same keys as SymmetricInfoNCELoss:
-                - "loss_total": SigLIP loss
-                - "loss_inter": same as loss_total
-                - "loss_intra_img": zero tensor
-                - "loss_intra_txt": zero tensor
+            dict with keys: loss_total, loss_inter, loss_intra_img, loss_intra_txt
         """
-        N = img_embeds.shape[0]
-
         scale = logit_scale.exp().clamp(max=100)  # scalar
+        ls_val = logit_scale.exp().item()
+        if ls_val >= 99.0:
+            logger.warning(
+                f"logit_scale.exp()={ls_val:.2f} has hit the clamp ceiling (100). "
+                "This indicates temperature instability."
+            )
 
-        # Full N×N similarity matrix
-        sim = torch.matmul(img_embeds, txt_embeds.t())  # [N, N]
-        logits = scale * sim + self.bias                # [N, N]
+        loss_inter = self._compute_siglip_loss(img_embeds, txt_embeds, scale)
 
-        # Labels: +1 on diagonal (positive pairs), -1 off-diagonal (negative pairs)
-        labels = 2 * torch.eye(N, device=img_embeds.device) - 1  # [N, N]
+        loss_img = torch.tensor(0.0, device=img_embeds.device)
+        if self.w_img > 0 and img_aug_embeds is not None:
+            loss_img = self._compute_siglip_loss(img_embeds, img_aug_embeds, scale)
 
-        # Pairwise sigmoid loss (numerically stable via F.logsigmoid)
-        loss_total = -F.logsigmoid(labels * logits).mean()  # scalar
+        loss_txt = torch.tensor(0.0, device=txt_embeds.device)
+        if self.w_txt > 0 and txt_aug_embeds is not None:
+            loss_txt = self._compute_siglip_loss(txt_embeds, txt_aug_embeds, scale)
 
-        assert not torch.isnan(loss_total), "SigLIP loss is NaN"
-        assert not torch.isinf(loss_total), "SigLIP loss is Inf"
+        total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
 
-        zero = torch.tensor(0.0, device=img_embeds.device)
+        assert not torch.isnan(total_loss), "SigLIP loss is NaN"
+        assert not torch.isinf(total_loss), "SigLIP loss is Inf"
+
         return {
-            "loss_total": loss_total,
-            "loss_inter": loss_total,
-            "loss_intra_img": zero,
-            "loss_intra_txt": zero,
+            "loss_total": total_loss,
+            "loss_inter": loss_inter,
+            "loss_intra_img": loss_img,
+            "loss_intra_txt": loss_txt,
         }
 
 
@@ -203,6 +219,12 @@ class SymmetricInfoNCELoss(nn.Module):
                 - "loss_intra_txt": Text-Text intra-modal loss
         """
         scale = logit_scale.exp().clamp(max=100)  # scalar
+        ls_val = logit_scale.exp().item()
+        if ls_val >= 99.0:
+            logger.warning(
+                f"logit_scale.exp()={ls_val:.2f} has hit the clamp ceiling (100). "
+                "This indicates temperature instability."
+            )
 
         # Inter-Modal Loss (Image <-> Text)
         loss_inter = self._compute_contrastive(img_embeds, txt_embeds, scale)

@@ -16,13 +16,12 @@ Usage:
 """
 
 import torch
-import torch.nn.functional as F
 import logging
 import wandb
 import os
 import time
 import random
-from .metrics import AverageMeter, compute_recall_at_k, compute_map_at_k, compute_eccv_metrics
+from .metrics import AverageMeter, compute_recall_at_k, compute_eccv_metrics
 from .utils import compute_grad_norm
 from .grad_cache import GradCache
 
@@ -46,14 +45,8 @@ class Trainer:
         self.log_freq = config['logging']['log_freq']
         self.checkpoint_dir = config['logging']['checkpoint_dir']
         
-        # Best score tracking for checkpointing and WandB summary
+        # Best score tracking for checkpointing
         self.best_r1 = 0.0
-        self.best_metrics = {
-            't2i_r1': 0.0, 't2i_r5': 0.0, 't2i_r10': 0.0,
-            'i2t_r1': 0.0, 'i2t_r5': 0.0, 'i2t_r10': 0.0,
-            't2i_map5': 0.0, 't2i_map10': 0.0,
-            'i2t_map5': 0.0, 'i2t_map10': 0.0,
-        }
         
         # Initialize Mixed Precision Training (AMP)
         self.use_amp = self.device.type == 'cuda'
@@ -93,14 +86,14 @@ class Trainer:
                 from .paraphraser import PrecomputedParaphraser
                 self.paraphraser = PrecomputedParaphraser(
                     clip_tokenizer, device,
-                    max_length=config['training']['max_length'],
+                    max_length=config['data']['max_length'],
                 )
                 logger.info("Using pre-computed paraphraser.")
             else:
                 from .paraphraser import NLTKParaphraser
                 self.paraphraser = NLTKParaphraser(
                     clip_tokenizer, device,
-                    max_length=config['training']['max_length'],
+                    max_length=config['data']['max_length'],
                     seed=config['training']['seed'],
                 )
                 logger.info("Using NLTK synonym replacement paraphraser.")
@@ -214,8 +207,6 @@ class Trainer:
                 # GradCache handles the forward/backward internally
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
-                if intra_img_weight > 0:
-                    logger.warning("L_i2i (image intra-modal) not supported with GradCache yet. Ignoring.")
 
                 # Generate paraphrases for full batch before GradCache phases
                 para_input_ids, para_attention_mask = None, None
@@ -223,6 +214,11 @@ class Trainer:
                     captions = batch['caption']  # list[str], len=N
                     para_input_ids, para_attention_mask = self.paraphraser.generate(captions)
                     # para_input_ids: [N, 77], para_attention_mask: [N, 77]
+
+                image_aug = (
+                    batch['image_aug'].to(self.device, non_blocking=True)
+                    if intra_img_weight > 0 else None
+                )  # [N, C, H, W] or None
 
                 # Zero gradients before GradCache forward (which accumulates gradients)
                 self.optimizer.zero_grad()
@@ -232,6 +228,7 @@ class Trainer:
                     images, input_ids, attention_mask,
                     para_input_ids=para_input_ids,
                     para_attention_mask=para_attention_mask,
+                    image_aug=image_aug,
                 )
                 loss = loss_dict["loss_total"]
                 
@@ -256,12 +253,14 @@ class Trainer:
                         img_aug_embeds = None
                         txt_aug_embeds = None
                         if intra_img_weight > 0:
-                            img_aug_embeds = self.model.encode_image(
-                                batch['image_aug'].to(self.device, non_blocking=True))
+                            with torch.no_grad():
+                                img_aug_embeds = self.model.encode_image(
+                                    batch['image_aug'].to(self.device, non_blocking=True))
                         if intra_txt_weight > 0 and self.paraphraser is not None:
-                            para_ids, para_mask = self.paraphraser.generate(
-                                batch['caption'])
-                            txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+                            with torch.no_grad():
+                                para_ids, para_mask = self.paraphraser.generate(
+                                    batch['caption'])
+                                txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
 
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
@@ -281,22 +280,19 @@ class Trainer:
                     self.scaler.update()
                 else:
                     # Standard precision training
+                    self.optimizer.zero_grad()
                     img_embeds = self.model.encode_image(images)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                    neg_txt_embeds = None
-                    if neg_input_ids is not None:
-                        neg_txt_embeds = self.model.encode_text(neg_input_ids, neg_attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
                     if intra_img_weight > 0:
-                        img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
-                    # TODO: Re-enable when real text augmentation (e.g. synonym replacement or
-                    # random token dropout) is implemented. Using identical inputs produces a
-                    # trivially zero intra-text loss and is therefore disabled until then.
-                    if False:  # intra_txt_weight > 0
-                        txt_aug_embeds = self.model.encode_text(input_ids, attention_mask)
+                        with torch.no_grad():
+                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
+                    if intra_txt_weight > 0 and self.paraphraser is not None:
+                        with torch.no_grad():
+                            para_ids, para_mask = self.paraphraser.generate(batch['caption'])
+                            txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
 
-                    # loss is now a dict
                     loss_dict = self.criterion(
                         img_embeds, txt_embeds,
                         self.model.clip.logit_scale,
@@ -304,8 +300,6 @@ class Trainer:
                     )
                     loss = loss_dict["loss_total"]
 
-                    # Backward
-                    self.optimizer.zero_grad()
                     loss.backward()
 
                     # Compute grad norm before optimizer step
@@ -414,7 +408,6 @@ class Trainer:
         from .metrics import compute_mapr_rprecision, build_ranked_dicts
 
         r_t2i, r_i2t = compute_recall_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims=sims)
-        map_t2i, map_i2t = compute_map_at_k(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, k_values=[5, 10], sims=sims)
 
         # mAP@R and R-Precision via build_ranked_dicts + compute_mapr_rprecision
         sims_np = sims.t().numpy()  # [N_imgs, N_txts]^T -> [N_txts, N_imgs]

@@ -8,12 +8,10 @@
 model:
   image_model_name: "openai/clip-vit-large-patch14-336"
   embed_dim: null
-  dropout: 0.1
   unfreeze_vision_layers: 4
   unfreeze_strategy: "full"
 
 loss:
-  temperature: 0.07
   intra_img_weight: 1
   intra_txt_weight: 1
 
@@ -23,14 +21,13 @@ paraphraser:
 training:
   batch_size: 128
 
-  epochs: 20
+  epochs: 10
   seed: 42
   optimizer: "adamw"
   scheduler: "cosine"
   warmup_epochs: 2
 
   clip_projection_lr: 0.00005
-  head_lr: 0.0005
   backbone_lr: 0.000002
   weight_decay: 0.01
 
@@ -43,8 +40,6 @@ augment:
   # Number of photometric transforms sampled from the VLM-safe pool per image.
   # Pool: [ColorJitter, GaussianBlur, RandomGrayscale]. Max k=3.
   k_photometric_augs: 2
-  image:
-    enabled: true
 
 logging:
   use_wandb: true
