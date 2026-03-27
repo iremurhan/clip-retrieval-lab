@@ -78,7 +78,33 @@ class SigLIPLoss(nn.Module):
         labels = 2 * torch.eye(n, device=embeds_a.device) - 1   # [N, N]
         return -F.logsigmoid(labels * logits).mean()             # scalar
 
-    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None):
+    def _compute_siglip_with_hard_negatives(self, img_embeds, txt_embeds, neg_txt_embeds, logit_scale):
+        """
+        SigLIP variant with hard negatives.
+        Hard negatives are treated as additional negative pairs with label -1.
+
+        img_embeds:     [N, D]
+        txt_embeds:     [N, D] — original captions (positives on diagonal)
+        neg_txt_embeds: [N, D] — hard negative captions (never positive)
+        """
+        n = img_embeds.shape[0]
+        ls = logit_scale.exp().clamp(max=100)                    # scalar
+
+        # Similarity with original captions: [N, N]
+        sim_pos = img_embeds @ txt_embeds.T                      # [N, N]
+        logits_pos = ls * sim_pos + self.bias                    # [N, N]
+        labels_pos = 2 * torch.eye(n, device=img_embeds.device) - 1  # [N, N]
+        loss_pos = -F.logsigmoid(labels_pos * logits_pos).mean() # scalar
+
+        # Similarity with hard negatives: [N, N] — all negative pairs
+        sim_neg = img_embeds @ neg_txt_embeds.T                  # [N, N]
+        logits_neg = ls * sim_neg + self.bias                    # [N, N]
+        labels_neg = -torch.ones(n, n, device=img_embeds.device) # [N, N]
+        loss_neg = -F.logsigmoid(labels_neg * logits_neg).mean() # scalar
+
+        return (loss_pos + loss_neg) / 2
+
+    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
         """
         Compute SigLIP loss with optional intra-modal consistency terms.
 
@@ -92,7 +118,11 @@ class SigLIPLoss(nn.Module):
         Returns:
             dict with keys: loss_total, loss_inter, loss_intra_img, loss_intra_txt
         """
-        loss_inter = self._compute_siglip(img_embeds, txt_embeds, logit_scale)
+        if neg_txt_embeds is not None:
+            loss_inter = self._compute_siglip_with_hard_negatives(
+                img_embeds, txt_embeds, neg_txt_embeds, logit_scale)
+        else:
+            loss_inter = self._compute_siglip(img_embeds, txt_embeds, logit_scale)
 
         loss_img = torch.tensor(0.0, device=img_embeds.device)
         if self.w_img > 0 and img_aug_embeds is not None:
@@ -195,7 +225,38 @@ class SymmetricInfoNCELoss(nn.Module):
         # Return average of both directions
         return (loss_a2b + loss_b2a) / 2
 
-    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None):
+    def _compute_contrastive_with_hard_negatives(self, img_embeds, txt_embeds, neg_txt_embeds, scale):
+        """
+        Extends the N×N similarity matrix to N×(2N) by appending hard negatives.
+        Hard negatives are additional text negatives — never treated as positives.
+
+        img_embeds:     [N, D]
+        txt_embeds:     [N, D] — original captions (positives on diagonal)
+        neg_txt_embeds: [N, D] — hard negative captions (never positive)
+        scale:          scalar — logit_scale.exp().clamp(max=100)
+
+        Returns scalar loss (i2t uses N×2N, t2i uses N×N only).
+        """
+        n = img_embeds.shape[0]
+
+        # [N, 2N] similarity matrix: positives in columns [0..N-1], hard negs in [N..2N-1]
+        all_txt = torch.cat([txt_embeds, neg_txt_embeds], dim=0)  # [2N, D]
+        logits_i2t = torch.matmul(img_embeds, all_txt.t()) * scale  # [N, 2N]
+
+        # Labels: for image i, the positive is text i (index i in [0..N-1])
+        labels = torch.arange(n, device=img_embeds.device)
+
+        # i2t: each image finds its caption among 2N candidates
+        loss_i2t = self.criterion(logits_i2t, labels)
+
+        # t2i: each original caption finds its image among N candidates
+        # Use only the N×N submatrix (hard negs don't have matching images)
+        logits_t2i = torch.matmul(txt_embeds, img_embeds.t()) * scale  # [N, N]
+        loss_t2i = self.criterion(logits_t2i, labels)
+
+        return (loss_i2t + loss_t2i) / 2
+
+    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
         """
         Computes the complete retrieval loss with optional intra-modal regularization.
 
@@ -222,7 +283,11 @@ class SymmetricInfoNCELoss(nn.Module):
             )
 
         # Inter-Modal Loss (Image <-> Text)
-        loss_inter = self._compute_contrastive(img_embeds, txt_embeds, scale)
+        if neg_txt_embeds is not None:
+            loss_inter = self._compute_contrastive_with_hard_negatives(
+                img_embeds, txt_embeds, neg_txt_embeds, scale)
+        else:
+            loss_inter = self._compute_contrastive(img_embeds, txt_embeds, scale)
 
         loss_img = torch.tensor(0.0, device=img_embeds.device)
         if self.w_img > 0 and img_aug_embeds is not None:

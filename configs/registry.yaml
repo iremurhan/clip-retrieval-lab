@@ -18,7 +18,7 @@ runs:
       loss.type: siglip
 
   B2:
-    description: "B0+ + syntactic hard negatives"
+    description: "B0+ + syntactic hard negatives (NegCLIP-style POS-tag swapping)"
     overrides:
       loss.hard_negatives: true
 

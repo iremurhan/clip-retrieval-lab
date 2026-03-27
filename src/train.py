@@ -15,6 +15,7 @@ Usage:
     - Logging (WandB, Tensorboard-style metrics)
 """
 
+import gc
 import torch
 import logging
 import wandb
@@ -22,7 +23,7 @@ import os
 import time
 import random
 from .metrics import AverageMeter, compute_recall_at_k, compute_eccv_metrics
-from .utils import compute_grad_norm
+from .utils import compute_grad_norm, chunked_matmul
 from .grad_cache import GradCache
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,17 @@ class Trainer:
         else:
             logger.info("Paraphraser disabled (intra_txt_weight=0).")
 
+        # Initialize hard negative generator for B2 (POS-tag swapping)
+        self.use_hard_negatives = config.get('loss', {}).get('hard_negatives', False)
+        if self.use_hard_negatives:
+            from .data import HardNegativeGenerator
+            self.hard_neg_generator = HardNegativeGenerator(
+                seed=config['training']['seed']
+            )
+            logger.info("Hard negative generator initialized (spaCy POS-tag swapping).")
+        else:
+            self.hard_neg_generator = None
+
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         
@@ -155,11 +167,18 @@ class Trainer:
         Disk errors are caught and logged; training continues.
         """
         path = os.path.join(self.checkpoint_dir, "best_model.pth")
+
+        # Explicitly move state_dict to CPU to avoid torch.save creating
+        # a second full-model CPU copy while GPU tensors are still alive.
+        cpu_model_sd = {k: v.cpu() for k, v in self.model.state_dict().items()}
+        cpu_optim_sd = self.optimizer.state_dict()  # already CPU
+        cpu_sched_sd = self.scheduler.state_dict()
+
         checkpoint = {
             'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
+            'model_state_dict': cpu_model_sd,
+            'optimizer_state_dict': cpu_optim_sd,
+            'scheduler_state_dict': cpu_sched_sd,
             'best_r1': self.best_r1,
             'config': self.config
         }
@@ -173,6 +192,9 @@ class Trainer:
             logger.info(f"Checkpoint saved: best_model.pth (epoch {epoch})")
         except (OSError, RuntimeError) as e:
             logger.error(f"DISK ERROR: Could not save best_model.pth at Epoch {epoch}. {e}")
+        finally:
+            del checkpoint, cpu_model_sd
+            gc.collect()
 
     def train_epoch(self, epoch):
         self.model.train()
@@ -230,6 +252,8 @@ class Trainer:
                 # GradCache handles the forward/backward internally
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
+                if self.use_hard_negatives:
+                    logger.warning("Syntactic hard negatives (loss.hard_negatives) are not supported with GradCache yet. Ignoring.")
 
                 # Generate paraphrases for full batch before GradCache phases
                 para_input_ids, para_attention_mask = None, None
@@ -275,6 +299,7 @@ class Trainer:
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
+                        neg_txt_embeds = None
                         if intra_img_weight > 0:
                             with torch.no_grad():
                                 img_aug_embeds = self.model.encode_image(
@@ -284,6 +309,20 @@ class Trainer:
                                 para_ids, para_mask = self.paraphraser.generate(
                                     batch['caption'])
                                 txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+                        if self.hard_neg_generator is not None:
+                            captions = batch['caption']
+                            hard_neg_captions = self.hard_neg_generator.generate(captions)
+                            tokenized_neg = self.tokenizer(
+                                hard_neg_captions,
+                                padding='max_length',
+                                truncation=True,
+                                max_length=self.config['data']['max_length'],
+                                return_tensors='pt'
+                            )
+                            neg_ids = tokenized_neg['input_ids'].to(self.device)
+                            neg_mask = tokenized_neg['attention_mask'].to(self.device)
+                            with torch.no_grad():
+                                neg_txt_embeds = self.model.encode_text(neg_ids, neg_mask)  # [N, D]
 
                         if step == 0 and epoch == 0:
                             loss_type = self.config['loss']['type']
@@ -305,11 +344,32 @@ class Trainer:
                                     f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
                                     "Check that paraphraser is initialized and intra_txt_weight > 0."
                                 )
+                            if self.use_hard_negatives:
+                                if neg_txt_embeds is None:
+                                    raise RuntimeError(
+                                        "loss.hard_negatives=true but neg_txt_embeds is None at step 0. "
+                                        "Check HardNegativeGenerator initialization."
+                                    )
+                                captions_v = batch['caption']
+                                hard_negs_v = self.hard_neg_generator.generate(captions_v)
+                                n_different = sum(h != c for h, c in zip(hard_negs_v, captions_v))
+                                pct_different = n_different / len(captions_v)
+                                if pct_different < 0.5:
+                                    logger.warning(
+                                        f"Only {pct_different:.1%} of hard negatives differ from "
+                                        f"source captions. Hard negative quality may be low."
+                                    )
+                                else:
+                                    logger.info(
+                                        f"Hard negatives verified: {pct_different:.1%} differ from source. "
+                                        f"Example: '{captions_v[0]}' -> '{hard_negs_v[0]}'"
+                                    )
 
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
                             self.model.clip.logit_scale,
-                            img_aug_embeds, txt_aug_embeds
+                            img_aug_embeds, txt_aug_embeds,
+                            neg_txt_embeds=neg_txt_embeds
                         )
                         loss = loss_dict["loss_total"]
 
@@ -329,6 +389,7 @@ class Trainer:
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
+                    neg_txt_embeds = None
                     if intra_img_weight > 0:
                         with torch.no_grad():
                             img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
@@ -336,6 +397,20 @@ class Trainer:
                         with torch.no_grad():
                             para_ids, para_mask = self.paraphraser.generate(batch['caption'])
                             txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+                    if self.hard_neg_generator is not None:
+                        captions = batch['caption']
+                        hard_neg_captions = self.hard_neg_generator.generate(captions)
+                        tokenized_neg = self.tokenizer(
+                            hard_neg_captions,
+                            padding='max_length',
+                            truncation=True,
+                            max_length=self.config['data']['max_length'],
+                            return_tensors='pt'
+                        )
+                        neg_ids = tokenized_neg['input_ids'].to(self.device)
+                        neg_mask = tokenized_neg['attention_mask'].to(self.device)
+                        with torch.no_grad():
+                            neg_txt_embeds = self.model.encode_text(neg_ids, neg_mask)  # [N, D]
 
                     if step == 0 and epoch == 0:
                         loss_type = self.config['loss']['type']
@@ -357,11 +432,32 @@ class Trainer:
                                 f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
                                 "Check that paraphraser is initialized and intra_txt_weight > 0."
                             )
+                        if self.use_hard_negatives:
+                            if neg_txt_embeds is None:
+                                raise RuntimeError(
+                                    "loss.hard_negatives=true but neg_txt_embeds is None at step 0. "
+                                    "Check HardNegativeGenerator initialization."
+                                )
+                            captions_v = batch['caption']
+                            hard_negs_v = self.hard_neg_generator.generate(captions_v)
+                            n_different = sum(h != c for h, c in zip(hard_negs_v, captions_v))
+                            pct_different = n_different / len(captions_v)
+                            if pct_different < 0.5:
+                                logger.warning(
+                                    f"Only {pct_different:.1%} of hard negatives differ from "
+                                    f"source captions. Hard negative quality may be low."
+                                )
+                            else:
+                                logger.info(
+                                    f"Hard negatives verified: {pct_different:.1%} differ from source. "
+                                    f"Example: '{captions_v[0]}' -> '{hard_negs_v[0]}'"
+                                )
 
                     loss_dict = self.criterion(
                         img_embeds, txt_embeds,
                         self.model.clip.logit_scale,
-                        img_aug_embeds, txt_aug_embeds
+                        img_aug_embeds, txt_aug_embeds,
+                        neg_txt_embeds=neg_txt_embeds
                     )
                     loss = loss_dict["loss_total"]
 
@@ -509,8 +605,8 @@ class Trainer:
         img_embeds_unique, txt_embeds, image_ids, unique_image_ids, _, first_occurrence_indices, _ = \
             self._extract_embeddings(self.val_loader)
 
-        # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
-        sims = torch.matmul(img_embeds_unique, txt_embeds.t())
+        # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]  (chunked to limit peak RAM)
+        sims = chunked_matmul(img_embeds_unique, txt_embeds)
 
         metrics = self._compute_standard_metrics(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims, prefix="val")
 
@@ -539,6 +635,12 @@ class Trainer:
                     self._log_qualitative_table(epoch, txt_embeds, img_embeds_unique, first_occurrence_indices)
                 except Exception as e:
                     logger.warning(f"Qualitative table logging failed: {e}")
+
+        # Explicitly free evaluation artifacts before checkpoint save
+        del img_embeds_unique, txt_embeds, sims, image_ids, unique_image_ids
+        gc.collect()
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
 
         return metrics['val/r1_t2i']
 
@@ -648,11 +750,10 @@ class Trainer:
 
         logger.info(f"Loading best checkpoint from {best_path} for test evaluation...")
 
-        # Save current (last epoch) weights so we can restore after test eval
-        last_epoch_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-
         checkpoint = torch.load(best_path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
+        del checkpoint
+        gc.collect()
         self.model.eval()
 
         # Build test dataloader
@@ -662,8 +763,8 @@ class Trainer:
         img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sentids, _, unique_image_ids_list = \
             self._extract_embeddings(test_loader)
 
-        # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]
-        sims = torch.matmul(img_embeds_unique, txt_embeds.t())
+        # [N_imgs, D] x [D, N_txts] -> [N_imgs, N_txts]  (chunked to limit peak RAM)
+        sims = chunked_matmul(img_embeds_unique, txt_embeds)
 
         is_coco = self.config['data']['dataset'] == 'coco'
 
@@ -712,6 +813,3 @@ class Trainer:
         logger.info("Test Results:")
         for k, v in test_metrics.items():
             logger.info(f"  {k}: {v:.4f}")
-
-        # Restore last epoch weights
-        self.model.load_state_dict(last_epoch_state)

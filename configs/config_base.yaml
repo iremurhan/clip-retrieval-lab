@@ -15,6 +15,7 @@ loss:
   type: infonce
   intra_img_weight: 1
   intra_txt_weight: 1
+  hard_negatives: false
 
 paraphraser:
   precomputed_path: null  # set to path if pre-computed JSON exists; otherwise NLTK is used

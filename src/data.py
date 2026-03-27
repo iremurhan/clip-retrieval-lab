@@ -178,6 +178,74 @@ def build_eval_transform(image_size):
 
 
 # ============================================================================
+# Hard Negative Generation (POS-tag swapping)
+# ============================================================================
+
+class HardNegativeGenerator:
+    """
+    Generates hard negative captions via POS-tag based word swapping.
+    Swaps nouns, verbs, and adjectives with random alternatives from
+    the same batch to create syntactically valid but semantically wrong captions.
+    Deterministic given a fixed seed.
+    """
+
+    def __init__(self, seed=42):
+        import spacy
+        try:
+            self.nlp = spacy.load("en_core_web_sm", disable=["ner", "parser"])
+        except OSError:
+            raise RuntimeError(
+                "spaCy model 'en_core_web_sm' not found. "
+                "Run: python -m spacy download en_core_web_sm"
+            )
+        self.rng = random.Random(seed)
+
+    def generate(self, captions: list[str]) -> list[str]:
+        """
+        For each caption, generate one hard negative by swapping
+        content words (nouns, verbs, adjectives) with words from
+        other captions in the batch.
+
+        Returns list of hard negative strings, same length as input.
+        Guaranteed to differ from source for captions with swappable words.
+        Falls back to word-order shuffle if no swap candidates found.
+        """
+        docs = list(self.nlp.pipe(captions))
+        swap_pos = {"NOUN", "VERB", "ADJ"}
+
+        # Collect all swappable words per POS from the batch
+        pool = {}  # pos -> list of words
+        for doc in docs:
+            for token in doc:
+                if token.pos_ in swap_pos and not token.is_stop:
+                    pool.setdefault(token.pos_, []).append(token.text)
+
+        hard_negatives = []
+        for doc, original in zip(docs, captions):
+            tokens = [token.text for token in doc]
+            modified = tokens.copy()
+            swapped = False
+
+            for i, token in enumerate(doc):
+                if token.pos_ in swap_pos and not token.is_stop:
+                    candidates = [
+                        w for w in pool.get(token.pos_, [])
+                        if w.lower() != token.text.lower()
+                    ]
+                    if candidates and self.rng.random() < 0.5:
+                        modified[i] = self.rng.choice(candidates)
+                        swapped = True
+
+            if not swapped:
+                # Fallback: shuffle word order
+                self.rng.shuffle(modified)
+
+            hard_negatives.append(" ".join(modified))
+
+        return hard_negatives
+
+
+# ============================================================================
 # Dataset
 # ============================================================================
 
