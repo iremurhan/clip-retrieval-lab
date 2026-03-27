@@ -12,6 +12,7 @@ model:
   unfreeze_strategy: "full"
 
 loss:
+  type: infonce
   intra_img_weight: 1
   intra_txt_weight: 1
 

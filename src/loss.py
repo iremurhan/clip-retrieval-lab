@@ -251,13 +251,13 @@ def build_loss(config):
     """Factory function to instantiate the correct loss from config['loss']['type']."""
     if 'loss' not in config:
         raise KeyError("Config missing 'loss' section")
-    for required_key in ['intra_img_weight', 'intra_txt_weight']:
+    for required_key in ['type', 'intra_img_weight', 'intra_txt_weight']:
         if required_key not in config['loss']:
             raise KeyError(
                 f"Config missing 'loss.{required_key}'. "
                 f"Add it to config_base.yaml."
             )
-    loss_type = config['loss'].get('type', 'infonce').lower()
+    loss_type = config['loss']['type'].lower()
     if loss_type == 'siglip':
         return SigLIPLoss(config)
     elif loss_type == 'infonce':
