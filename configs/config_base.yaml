@@ -12,6 +12,7 @@ model:
   unfreeze_strategy: "full"
 
 loss:
+  type: infonce
   intra_img_weight: 1
   intra_txt_weight: 1
 
@@ -20,6 +21,7 @@ paraphraser:
 
 training:
   batch_size: 128
+  use_grad_cache: false
 
   epochs: 10
   seed: 42

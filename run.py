@@ -151,7 +151,7 @@ def main():
             'lr': config['training']['clip_projection_lr'],
             'name': 'siglip_bias',
         })
-        log.info("SigLIP bias added to optimizer")
+        log.info(f"SigLIP bias added to optimizer (lr={config['training']['clip_projection_lr']})")
     num_batches = len(train_loader) * config["training"]["epochs"]
     scheduler = create_lr_scheduler(optimizer, config, num_batches)
 

@@ -60,7 +60,7 @@ class Trainer:
         
         # Initialize Gradient Caching (STRICT CONFIG: will raise KeyError if missing)
         # Check if gradient caching is enabled
-        self.use_grad_cache = config['training'].get('use_grad_cache', False)
+        self.use_grad_cache = config['training']['use_grad_cache']
         if self.use_grad_cache:
             # STRICT: micro_batch_size MUST exist if grad_cache is enabled
             # GradCache constructor will raise KeyError if missing
@@ -78,9 +78,9 @@ class Trainer:
         
         # Initialize paraphraser for L_text_text = InfoNCE(T_orig, T_paraphrased)
         self.paraphraser = None
-        para_cfg = config.get('paraphraser', {})
-        paraphrase_path = para_cfg.get('precomputed_path')
-        intra_txt_weight = config['loss'].get('intra_txt_weight', 0.0)
+        para_cfg = config['paraphraser']
+        paraphrase_path = para_cfg['precomputed_path']
+        intra_txt_weight = config['loss']['intra_txt_weight']
         if intra_txt_weight > 0:
             if paraphrase_path and os.path.exists(paraphrase_path):
                 from .paraphraser import PrecomputedParaphraser
@@ -181,8 +181,8 @@ class Trainer:
         
         num_batches = len(self.train_loader)
         batch_size = self.config['training']['batch_size']
-        intra_img_weight = self.config['loss'].get('intra_img_weight', 0.0)
-        intra_txt_weight = self.config['loss'].get('intra_txt_weight', 0.0)
+        intra_img_weight = self.config['loss']['intra_img_weight']
+        intra_txt_weight = self.config['loss']['intra_txt_weight']
 
         # Initialize grad_norm for logging
         grad_norm = 0.0
@@ -198,7 +198,30 @@ class Trainer:
             if neg_input_ids is not None:
                 neg_input_ids = neg_input_ids.to(self.device, non_blocking=True)
                 neg_attention_mask = neg_attention_mask.to(self.device, non_blocking=True)
-            
+
+            if step == 0 and epoch == 0:
+                loss_type = self.config['loss']['type']
+                w_img = self.config['loss']['intra_img_weight']
+                w_txt = self.config['loss']['intra_txt_weight']
+                img_aug_available = 'image_aug' in batch
+                txt_aug_available = self.paraphraser is not None
+                logger.info(
+                    f"Loss config at step 0: type={loss_type}, "
+                    f"intra_img_weight={w_img}, intra_txt_weight={w_txt}, "
+                    f"img_aug_available={img_aug_available}, "
+                    f"txt_aug_available={txt_aug_available}"
+                )
+                if w_img > 0 and not img_aug_available:
+                    raise RuntimeError(
+                        f"intra_img_weight={w_img} but img_aug_embeds is None. "
+                        "Check that k_photometric_augs > 0 and image_aug is in batch."
+                    )
+                if w_txt > 0 and not txt_aug_available:
+                    raise RuntimeError(
+                        f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
+                        "Check that paraphraser is initialized and intra_txt_weight > 0."
+                    )
+
             # ============================================================
             # Forward Pass: Use Gradient Caching if enabled, else standard
             # ============================================================
@@ -262,6 +285,27 @@ class Trainer:
                                     batch['caption'])
                                 txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
 
+                        if step == 0 and epoch == 0:
+                            loss_type = self.config['loss']['type']
+                            w_img = self.config['loss']['intra_img_weight']
+                            w_txt = self.config['loss']['intra_txt_weight']
+                            logger.info(
+                                f"Loss config at step 0: type={loss_type}, "
+                                f"intra_img_weight={w_img}, intra_txt_weight={w_txt}, "
+                                f"img_aug_available={img_aug_embeds is not None}, "
+                                f"txt_aug_available={txt_aug_embeds is not None}"
+                            )
+                            if w_img > 0 and img_aug_embeds is None:
+                                raise RuntimeError(
+                                    f"intra_img_weight={w_img} but img_aug_embeds is None. "
+                                    "Check that k_photometric_augs > 0 and image_aug is in batch."
+                                )
+                            if w_txt > 0 and txt_aug_embeds is None:
+                                raise RuntimeError(
+                                    f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
+                                    "Check that paraphraser is initialized and intra_txt_weight > 0."
+                                )
+
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
                             self.model.clip.logit_scale,
@@ -292,6 +336,27 @@ class Trainer:
                         with torch.no_grad():
                             para_ids, para_mask = self.paraphraser.generate(batch['caption'])
                             txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+
+                    if step == 0 and epoch == 0:
+                        loss_type = self.config['loss']['type']
+                        w_img = self.config['loss']['intra_img_weight']
+                        w_txt = self.config['loss']['intra_txt_weight']
+                        logger.info(
+                            f"Loss config at step 0: type={loss_type}, "
+                            f"intra_img_weight={w_img}, intra_txt_weight={w_txt}, "
+                            f"img_aug_available={img_aug_embeds is not None}, "
+                            f"txt_aug_available={txt_aug_embeds is not None}"
+                        )
+                        if w_img > 0 and img_aug_embeds is None:
+                            raise RuntimeError(
+                                f"intra_img_weight={w_img} but img_aug_embeds is None. "
+                                "Check that k_photometric_augs > 0 and image_aug is in batch."
+                            )
+                        if w_txt > 0 and txt_aug_embeds is None:
+                            raise RuntimeError(
+                                f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
+                                "Check that paraphraser is initialized and intra_txt_weight > 0."
+                            )
 
                     loss_dict = self.criterion(
                         img_embeds, txt_embeds,
@@ -535,7 +600,7 @@ class Trainer:
         improved_since_last_save = False
 
         # If start_epoch is 0 (i.e., not resuming) and eval_epoch_zero is enabled, run initial evaluation.
-        if start_epoch == 0 and self.config['logging'].get('eval_epoch_zero', False):
+        if start_epoch == 0 and self.config['logging']['eval_epoch_zero']:
             logger.info("Running initial evaluation at Epoch 0...")
             score = self.evaluate(epoch=-1)
             if score > self.best_r1:

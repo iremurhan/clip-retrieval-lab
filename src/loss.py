@@ -64,16 +64,19 @@ class SigLIPLoss(nn.Module):
         # Learnable bias initialized to -10 so that sigmoid(-10) ≈ 0 at step 0,
         # preventing the model from being overconfident on the N²-N negatives.
         self.bias = nn.Parameter(torch.tensor(-10.0))
-        self.w_img = config['loss'].get('intra_img_weight', 0.0)
-        self.w_txt = config['loss'].get('intra_txt_weight', 0.0)
+        self.w_img = config['loss']['intra_img_weight']
+        self.w_txt = config['loss']['intra_txt_weight']
 
-    def _compute_siglip_loss(self, embed_a, embed_b, scale):
+    def _compute_siglip(self, embeds_a, embeds_b, logit_scale):
         """Pairwise sigmoid loss between two sets of L2-normalized embeddings."""
-        N = embed_a.shape[0]
-        sim = torch.matmul(embed_a, embed_b.t())          # [N, N]
-        logits = scale * sim + self.bias                   # [N, N]
-        labels = 2 * torch.eye(N, device=embed_a.device) - 1  # [N, N]
-        return -F.logsigmoid(labels * logits).mean()       # scalar
+        n = embeds_a.shape[0]
+        sim = embeds_a @ embeds_b.T                              # [N, N]
+        ls = logit_scale.exp().clamp(max=100)                    # scalar
+        if ls.item() >= 99.0:
+            logger.warning(f"logit_scale.exp()={ls.item():.2f} hit clamp ceiling")
+        logits = ls * sim + self.bias                            # [N, N]
+        labels = 2 * torch.eye(n, device=embeds_a.device) - 1   # [N, N]
+        return -F.logsigmoid(labels * logits).mean()             # scalar
 
     def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None):
         """
@@ -89,31 +92,23 @@ class SigLIPLoss(nn.Module):
         Returns:
             dict with keys: loss_total, loss_inter, loss_intra_img, loss_intra_txt
         """
-        scale = logit_scale.exp().clamp(max=100)  # scalar
-        ls_val = logit_scale.exp().item()
-        if ls_val >= 99.0:
-            logger.warning(
-                f"logit_scale.exp()={ls_val:.2f} has hit the clamp ceiling (100). "
-                "This indicates temperature instability."
-            )
-
-        loss_inter = self._compute_siglip_loss(img_embeds, txt_embeds, scale)
+        loss_inter = self._compute_siglip(img_embeds, txt_embeds, logit_scale)
 
         loss_img = torch.tensor(0.0, device=img_embeds.device)
         if self.w_img > 0 and img_aug_embeds is not None:
-            loss_img = self._compute_siglip_loss(img_embeds, img_aug_embeds, scale)
+            loss_img = self._compute_siglip(img_embeds, img_aug_embeds, logit_scale)
 
-        loss_txt = torch.tensor(0.0, device=txt_embeds.device)
+        loss_txt = torch.tensor(0.0, device=img_embeds.device)
         if self.w_txt > 0 and txt_aug_embeds is not None:
-            loss_txt = self._compute_siglip_loss(txt_embeds, txt_aug_embeds, scale)
+            loss_txt = self._compute_siglip(txt_embeds, txt_aug_embeds, logit_scale)
 
-        total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
+        loss_total = loss_inter + self.w_img * loss_img + self.w_txt * loss_txt
 
-        assert not torch.isnan(total_loss), "SigLIP loss is NaN"
-        assert not torch.isinf(total_loss), "SigLIP loss is Inf"
+        assert not torch.isnan(loss_total), "SigLIP loss_total is NaN"
+        assert not torch.isinf(loss_total), "SigLIP loss_total is Inf"
 
         return {
-            "loss_total": total_loss,
+            "loss_total": loss_total,
             "loss_inter": loss_inter,
             "loss_intra_img": loss_img,
             "loss_intra_txt": loss_txt,
@@ -156,8 +151,8 @@ class SymmetricInfoNCELoss(nn.Module):
         super().__init__()
         # Separate weights for Intra-Modal Image and Text consistency
         # Set to 0.0 to disable intra-modal regularization
-        self.w_img = config['loss'].get('intra_img_weight', 0.0)
-        self.w_txt = config['loss'].get('intra_txt_weight', 0.0)
+        self.w_img = config['loss']['intra_img_weight']
+        self.w_txt = config['loss']['intra_txt_weight']
 
         self.criterion = nn.CrossEntropyLoss()
 
@@ -254,10 +249,21 @@ class SymmetricInfoNCELoss(nn.Module):
 
 def build_loss(config):
     """Factory function to instantiate the correct loss from config['loss']['type']."""
-    loss_type = config.get('loss', {}).get('type', 'infonce').lower()
+    if 'loss' not in config:
+        raise KeyError("Config missing 'loss' section")
+    for required_key in ['type', 'intra_img_weight', 'intra_txt_weight']:
+        if required_key not in config['loss']:
+            raise KeyError(
+                f"Config missing 'loss.{required_key}'. "
+                f"Add it to config_base.yaml."
+            )
+    loss_type = config['loss']['type'].lower()
     if loss_type == 'siglip':
         return SigLIPLoss(config)
     elif loss_type == 'infonce':
         return SymmetricInfoNCELoss(config)
     else:
-        raise ValueError(f"Unknown loss type: '{loss_type}'. Choose 'infonce' or 'siglip'.")
+        raise ValueError(
+            f"Unknown loss type: '{loss_type}'. "
+            f"Valid options: 'infonce', 'siglip'"
+        )
