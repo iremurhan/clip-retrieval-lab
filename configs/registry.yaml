@@ -13,7 +13,7 @@ runs:
     overrides: {}  # current defaults, no changes needed
 
   B1:
-    description: "B0+ + SigLIP loss"
+    description: "B0+ + SigLIP loss (replaces InfoNCE)"
     overrides:
       loss.type: siglip
 

@@ -20,6 +20,7 @@ paraphraser:
 
 training:
   batch_size: 128
+  use_grad_cache: false
 
   epochs: 10
   seed: 42
