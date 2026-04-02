@@ -178,6 +178,74 @@ def build_eval_transform(image_size):
 
 
 # ============================================================================
+# Hard Negative Generation (POS-tag swapping)
+# ============================================================================
+
+class HardNegativeGenerator:
+    """
+    Generates hard negative captions via POS-tag based word swapping.
+    Swaps nouns, verbs, and adjectives with random alternatives from
+    the same batch to create syntactically valid but semantically wrong captions.
+    Deterministic given a fixed seed.
+    """
+
+    def __init__(self, seed=42):
+        import spacy
+        try:
+            self.nlp = spacy.load("en_core_web_sm", disable=["ner", "parser"])
+        except OSError:
+            raise RuntimeError(
+                "spaCy model 'en_core_web_sm' not found. "
+                "Run: python -m spacy download en_core_web_sm"
+            )
+        self.rng = random.Random(seed)
+
+    def generate(self, captions: list[str]) -> list[str]:
+        """
+        For each caption, generate one hard negative by swapping
+        content words (nouns, verbs, adjectives) with words from
+        other captions in the batch.
+
+        Returns list of hard negative strings, same length as input.
+        Guaranteed to differ from source for captions with swappable words.
+        Falls back to word-order shuffle if no swap candidates found.
+        """
+        docs = list(self.nlp.pipe(captions))
+        swap_pos = {"NOUN", "VERB", "ADJ"}
+
+        # Collect all swappable words per POS from the batch
+        pool = {}  # pos -> list of words
+        for doc in docs:
+            for token in doc:
+                if token.pos_ in swap_pos and not token.is_stop:
+                    pool.setdefault(token.pos_, []).append(token.text)
+
+        hard_negatives = []
+        for doc, original in zip(docs, captions):
+            tokens = [token.text for token in doc]
+            modified = tokens.copy()
+            swapped = False
+
+            for i, token in enumerate(doc):
+                if token.pos_ in swap_pos and not token.is_stop:
+                    candidates = [
+                        w for w in pool.get(token.pos_, [])
+                        if w.lower() != token.text.lower()
+                    ]
+                    if candidates and self.rng.random() < 0.5:
+                        modified[i] = self.rng.choice(candidates)
+                        swapped = True
+
+            if not swapped:
+                # Fallback: shuffle word order
+                self.rng.shuffle(modified)
+
+            hard_negatives.append(" ".join(modified))
+
+        return hard_negatives
+
+
+# ============================================================================
 # Dataset
 # ============================================================================
 
@@ -289,6 +357,7 @@ class CaptionImageDataset(Dataset):
         return {
             'image': img_tensor,
             'image_aug': img_aug_tensor,
+            'caption': caption,
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
             'image_id': image_id,
@@ -317,8 +386,8 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     images_root = config['data']['images_path']
     captions_path = config['data']['captions_path']
 
-    # Resolve image size from training config (default 336 defined in config_base.yaml)
-    image_size = config['training']['image_size']
+    # Resolve image size from data config (defined in config_base.yaml)
+    image_size = config['data']['image_size']
 
     if split == 'train':
         # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
@@ -340,36 +409,38 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         images_root_path=images_root,
         captions_path=captions_path,
         tokenizer=tokenizer,
-        max_length=config['training']['max_length'],  # defined in config_base.yaml
+        max_length=config['data']['max_length'],  # defined in config_base.yaml
         split=split,
         transform=transform,
         transform_aug=transform_aug,
     )
 
-    # Debug Truncation
-    if config.get('debug', {}).get('debug_mode', False):
-        debug_limit = config['debug'].get('debug_samples', 100)
-        if len(dataset.samples) > debug_limit:
-            logger.warning(f"DEBUG MODE: Truncating dataset to {debug_limit} samples.")
-            dataset.samples = dataset.samples[:debug_limit]
-
-    seed = config.get('training', {}).get('seed', 42)
+    seed = config['training']['seed']
 
     def _worker_init_fn(worker_id):
         worker_seed = seed + worker_id
         import numpy as np
         import random
+        import torch as _torch
+        _torch.manual_seed(worker_seed)
         np.random.seed(worker_seed)
         random.seed(worker_seed)
+
+    if split == 'train':
+        g = torch.Generator()
+        g.manual_seed(seed)
+    else:
+        g = None
 
     loader = DataLoader(
         dataset,
         batch_size=config['training']['batch_size'],  # defined in config_base.yaml
         shuffle=shuffle,
-        num_workers=config['training']['num_workers'],  # defined in config_base.yaml
+        num_workers=config['data']['num_workers'],  # defined in config_base.yaml
         pin_memory=True,
         drop_last=(split == 'train'),
         worker_init_fn=_worker_init_fn,
+        generator=g,
     )
 
     return loader

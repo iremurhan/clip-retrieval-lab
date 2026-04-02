@@ -25,6 +25,7 @@ def setup_seed(seed=42):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
 def deep_merge_dicts(base, override):
@@ -103,133 +104,89 @@ def setup_config(base_path=None, config_path=None, overrides=None):
     return config
 
 
-_DATASET_KEYWORDS = {
-    "flickr30k": "flickr",
-    "coco": "coco",
-}
-
-
-def _infer_dataset_name(config):
-    """
-    Infer dataset name from data.images_path by keyword matching.
-    Returns the matched dataset name, or 'unknown' if no keyword matches.
-    """
-    images_path = config.get("data", {}).get("images_path", "").lower()
-    for name, keyword in _DATASET_KEYWORDS.items():
-        if keyword in images_path:
-            return name
-    return "unknown"
-
-
-_VALID_SEEDS = {42, 123, 456}
-
-
 def make_wandb_config(config):
-    """Build config dict for WandB (scientific params only)."""
-    dataset_name = _infer_dataset_name(config)
-    seed = config.get("training", {}).get("seed", 42)
-    run_id = config.get("logging", {}).get("run_id", "unnamed")
-    # wise_alpha is None for standard runs; a float only for WiSE-FT post-hoc runs.
-    # Using None (not 0.0) because 0.0 is a valid interpolation weight.
-    wise_alpha = config.get("logging", {}).get("wise_alpha", None)
+    """Build a minimal config dict for WandB (scientific params only)."""
     return {
-        "dataset": dataset_name,
-        "run_id": run_id,
-        "seed": seed,
-        "loss_type": config.get("loss", {}).get("type", "infonce"),
-        "hard_negatives": config.get("loss", {}).get("hard_negatives", False),
-        "lora_rank": config.get("model", {}).get("lora_rank", 0),
-        "unfreeze_layers": config.get("model", {}).get("unfreeze_vision_layers"),
-        "intra_img_weight": config.get("loss", {}).get("intra_img_weight", 0.0),
-        "intra_txt_weight": config.get("loss", {}).get("intra_txt_weight", 0.0),
-        "k_photometric_augs": config.get("augment", {}).get("k_photometric_augs"),
-        "wise_alpha": wise_alpha,
-        "model": {
-            "name": config.get("model", {}).get("image_model_name"),
-            "unfreeze": config.get("model", {}).get("unfreeze_vision_layers"),
-            "strategy": config.get("model", {}).get("unfreeze_strategy"),
-        },
-        "batch_size": config.get("training", {}).get("batch_size"),
-        "epochs": config.get("training", {}).get("epochs"),
-        "lr": {
-            "backbone": config.get("training", {}).get("backbone_lr"),
-            "clip": config.get("training", {}).get("clip_projection_lr"),
-        },
+        "run_id":              config['logging']['run_id'],
+        "dataset":             config['data']['dataset'],
+        "seed":                config['training']['seed'],
+        "model":               config.get('model', {}).get('image_model_name'),
+        "loss_type":           config.get('loss', {}).get('type', 'infonce'),
+        "hard_negatives":      config.get('loss', {}).get('hard_negatives', False),
+        "lora_rank":           config.get('model', {}).get('lora_rank', 0),
+        "unfreeze_layers":     config.get('model', {}).get('unfreeze_vision_layers', 0),
+        "intra_img_weight":    config.get('loss', {}).get('intra_img_weight', 0),
+        "intra_txt_weight":    config.get('loss', {}).get('intra_txt_weight', 0),
+        "k_photometric_augs":  config.get('augment', {}).get('k_photometric_augs', 0),
+        "batch_size":          config.get('training', {}).get('batch_size'),
+        "epochs":              config.get('training', {}).get('epochs'),
+        "use_grad_cache":      config.get('training', {}).get('use_grad_cache', False),
     }
 
 
-def setup_tracker(config, debug_mode=False):
+def format_run_name(run_id, dataset_name, seed=None):
+    """Generate WandB run name: {run_id}_{dataset}_{seed}"""
+    parts = [str(run_id), dataset_name]
+    if seed is not None:
+        parts.append(f"s{seed}")
+    return "_".join(parts)
+
+
+def setup_tracker(config):
     """
     Initialize WandB with clean config and run name.
-
-    Run naming:
-      Standard : {run_id}_{dataset}_s{seed}   e.g. B0_coco_s42
-      WiSE-FT  : {run_id}_{dataset}_wise{alpha} e.g. FULL_coco_wise0.5
-                 (no seed suffix — WiSE-FT interpolation is deterministic)
-
-    Group is set to run_id so all seeds of the same config are grouped together
-    and WandB can show mean ± std in the group view.
-
-    Valid seeds for standard runs: 42, 123, 456.
+    run_id from config['logging']['run_id']; dataset and seed from config.
     """
-    if not config.get("logging", {}).get("use_wandb", True) or debug_mode:
+    if not config.get("logging", {}).get("use_wandb", True):
         return
-
     project = config.get("logging", {}).get("wandb_project")
     if not project:
-        raise ValueError(
-            "logging.wandb_project is not set but logging.use_wandb is true. "
-            "Set wandb_project in config or pass it via --override, or set use_wandb: false."
-        )
+        logger.warning("wandb_project not set; skipping WandB init.")
+        return
 
-    dataset_name = _infer_dataset_name(config)
-    run_id = config.get("logging", {}).get("run_id", "unnamed")
-    seed = config.get("training", {}).get("seed", 42)
-    wise_alpha = config.get("logging", {}).get("wise_alpha", None)
+    run_id = config['logging']['run_id']
+    seed = config['training']['seed']
+    dataset_name = config['data']['dataset']
 
-    is_wise = wise_alpha is not None
-
-    if not is_wise:
-        if seed not in _VALID_SEEDS:
-            raise ValueError(
-                f"seed={seed} is not a valid seed. "
-                f"Valid seeds are: {sorted(_VALID_SEEDS)}. "
-                "Use one of these or set logging.wise_alpha for a WiSE-FT run."
-            )
-        run_name = f"{run_id}_{dataset_name}_s{seed}"
-    else:
-        run_name = f"{run_id}_{dataset_name}_wise{wise_alpha}"
-
-    wandb_id = config.get("logging", {}).get("wandb_id")
-    job_type = config.get("wandb", {}).get("job_type") or config.get("logging", {}).get("job_type")
+    run_name = format_run_name(run_id, dataset_name, seed=seed)
+    group = run_id
 
     tags = [
-        f"dataset:{dataset_name}",
         f"run_id:{run_id}",
+        f"dataset:{dataset_name}",
+        f"seed:{seed}",
     ]
-    if is_wise:
-        tags.append(f"phase:wise")
-        tags.append(f"alpha:{wise_alpha}")
-    else:
-        tags.append(f"phase:train")
-        tags.append(f"seed:{seed}")
+
+    wandb_id = config.get("logging", {}).get("wandb_id")
 
     init_kwargs = {
         "project": project,
         "config": make_wandb_config(config),
         "name": run_name,
-        "group": run_id,
+        "group": group,
         "tags": tags,
     }
-
-    if job_type:
-        init_kwargs["job_type"] = job_type
 
     # If a specific WandB run id is provided, force resume onto that run
     if wandb_id:
         init_kwargs["id"] = wandb_id
         init_kwargs["resume"] = "must"
     else:
+        # Otherwise allow WandB to create a new run or resume heuristically
         init_kwargs["resume"] = "allow"
 
-    wandb.init(**init_kwargs)
+    try:
+        wandb.init(**init_kwargs)
+    except Exception as e:
+        logger.error(
+            f"WandB init failed (non-fatal): {e}. "
+            "Training will proceed without WandB logging."
+        )
+        return
+
+    slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
+    wandb.config.update(
+        {'slurm_job_id': slurm_job_id},
+        allow_val_change=True
+    )
+    logger.info(f"WandB run: {run_name} | group: {group} | slurm_job_id: {slurm_job_id}")

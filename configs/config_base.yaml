@@ -3,40 +3,29 @@
 # Dataset-specific files (e.g. config_coco.yaml, config_flickr.yaml) only define:
 # - data paths (images_path, captions_path)
 #
-# W&B: single project "clip-retrieval" for all runs; dataset is in run name and config.
+# W&B: single project "retrieval" for training; dataset is in run name and config.
 
 model:
   image_model_name: "openai/clip-vit-large-patch14-336"
   embed_dim: null
-  dropout: 0.1
   unfreeze_vision_layers: 4
   unfreeze_strategy: "full"
 
 loss:
+  type: infonce
   intra_img_weight: 1
   intra_txt_weight: 1
+  hard_negatives: false
 
-# On-the-fly paraphrasing config for L_text_text = InfoNCE(T_orig, T_paraphrased).
-# Only loaded when loss.intra_txt_weight > 0. Safe to leave here with weight=0.
 paraphraser:
-  model_name: "mistralai/Mistral-7B-Instruct-v0.2"
-  max_new_tokens: 60
-  generation_temperature: 0.8
-  do_sample: true
-  bnb_4bit_quant_type: "nf4"
-  bnb_4bit_use_double_quant: true
+  precomputed_path: null  # set to path if pre-computed JSON exists; otherwise NLTK is used
 
 training:
-  # DataLoader-related defaults (will be mirrored into data.* at runtime)
-  batch_size: 512
-  num_workers: 8
-  max_length: 77
-  image_size: 336
+  batch_size: 128
+  use_grad_cache: false
 
   epochs: 10
   seed: 42
-  use_grad_cache: true
-  micro_batch_size: 128
   optimizer: "adamw"
   scheduler: "cosine"
   warmup_epochs: 2
@@ -45,14 +34,15 @@ training:
   backbone_lr: 0.000002
   weight_decay: 0.01
 
+data:
+  max_length: 77
+  num_workers: 4
+  image_size: 336
+
 augment:
   # Number of photometric transforms sampled from the VLM-safe pool per image.
   # Pool: [ColorJitter, GaussianBlur, RandomGrayscale]. Max k=3.
   k_photometric_augs: 2
-
-debug:
-  debug_mode: false
-  debug_samples: 100
 
 logging:
   use_wandb: true
@@ -60,7 +50,5 @@ logging:
   log_freq: 500
   eval_freq: 1
   eval_epoch_zero: false
-  eval_eccv: false
   save_freq: 3
   checkpoint_dir: "checkpoints"
-  run_id: "unnamed"

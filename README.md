@@ -48,8 +48,8 @@ Download helpers: `scripts/setup/download_coco.sh`, `scripts/setup/download_flic
 ## Config
 
 - Base: `configs/config_base.yaml`
-- Datasets: `configs/config_coco.yaml`, `configs/config_flickr.yaml`
-- Override example: `python run.py --config configs/config_flickr.yaml --override training.epochs=10`
+- Datasets: `configs/config_coco.yaml`, `configs/config_flickr30k.yaml`
+- Override example: `python run.py --config configs/config_flickr30k.yaml --override training.epochs=10`
 
 ---
 
@@ -59,7 +59,7 @@ Download helpers: `scripts/setup/download_coco.sh`, `scripts/setup/download_flic
 
 ```bash
 python run.py --config configs/config_coco.yaml
-python run.py --config configs/config_flickr.yaml
+python run.py --config configs/config_flickr30k.yaml
 ```
 
 Resume: `--resume /path/to/checkpoint.pth`
@@ -81,7 +81,7 @@ Extracts top-k neighbors (caption / visual / consensus). Outputs to `datasets/{c
 **Local**
 
 ```bash
-python tools/mine_pairwise_sim.py --modality caption --config configs/config_flickr.yaml --top_k 1000
+python tools/mine_pairwise_sim.py --modality caption --config configs/config_flickr30k.yaml --top_k 1000
 ```
 
 **HPC (wrapper — recommended)**

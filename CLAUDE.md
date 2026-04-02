@@ -16,20 +16,20 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Docker image for HPC: `biremurhan/image-text-contrast:v0.5` (includes PyTorch).
+Docker image for HPC: `biremurhan/image-text-contrast:v0.14` (includes PyTorch).
 
 ## Common Commands
 
 **Training (local)**
 ```bash
-python run.py --config configs/config_flickr.yaml
+python run.py --config configs/config_flickr30k.yaml
 python run.py --config configs/config_coco.yaml
 
 # With config overrides
-python run.py --config configs/config_flickr.yaml --override training.epochs=10 loss.temperature=0.07
+python run.py --config configs/config_flickr30k.yaml --override training.epochs=10 loss.temperature=0.07
 
 # Resume from checkpoint
-python run.py --config configs/config_flickr.yaml --resume checkpoints/last_model.pth
+python run.py --config configs/config_flickr30k.yaml --resume checkpoints/best_model.pth
 ```
 
 **Training (HPC/SLURM)**
@@ -40,13 +40,13 @@ python run.py --config configs/config_flickr.yaml --resume checkpoints/last_mode
 **Pairwise similarity mining (required before training with hard negatives)**
 ```bash
 # Text-text caption similarity (most common — used for FNE in training)
-python tools/mine_pairwise_sim.py --modality caption --config configs/config_flickr.yaml --top_k 1000
+python tools/mine_pairwise_sim.py --modality caption --config configs/config_flickr30k.yaml --top_k 1000
 
 # Image-image visual similarity
-python tools/mine_pairwise_sim.py --modality visual --config configs/config_flickr.yaml
+python tools/mine_pairwise_sim.py --modality visual --config configs/config_flickr30k.yaml
 
 # Image-image caption consensus (saves mean/min/max variants)
-python tools/mine_pairwise_sim.py --modality consensus --config configs/config_flickr.yaml
+python tools/mine_pairwise_sim.py --modality consensus --config configs/config_flickr30k.yaml
 
 # HPC wrapper
 ./scripts/start_mining.sh flickr30k   # or coco
@@ -54,7 +54,7 @@ python tools/mine_pairwise_sim.py --modality consensus --config configs/config_f
 
 **Debug mode (fast iteration, uses train set for val)**
 ```bash
-python run.py --config configs/config_flickr.yaml --override debug.debug_mode=true debug.debug_samples=100
+python run.py --config configs/config_flickr30k.yaml --override debug.debug_mode=true debug.debug_samples=100
 ```
 
 ## Config System
@@ -99,7 +99,7 @@ scripts/
 
 **False Negative Elimination (FNE):** During training, the dataset samples hard negatives from pre-mined caption neighbors. Neighbors with similarity > `mining.fne_threshold` are treated as false negatives and excluded. Requires mining to be run first and paths set in `mining.indices_path` / `mining.values_path`. Hard negatives are only used when `loss.use_clip_loss: false`.
 
-**Checkpointing:** Only two files are ever written — `last_model.pth` (every epoch, for resume) and `best_model.pth` (when T2I R@1 improves). After training, the best model is loaded and evaluated on the test split.
+**Checkpointing:** Single file `best_model.pth`, written every `save_freq` epochs (and at the final epoch). After training, this file is loaded and evaluated on the test split.
 
 **Mixed Precision:** AMP is automatically enabled when CUDA is available.
 
