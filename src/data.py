@@ -426,6 +426,12 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         np.random.seed(worker_seed)
         random.seed(worker_seed)
 
+    if split == 'train':
+        g = torch.Generator()
+        g.manual_seed(seed)
+    else:
+        g = None
+
     loader = DataLoader(
         dataset,
         batch_size=config['training']['batch_size'],  # defined in config_base.yaml
@@ -434,6 +440,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         pin_memory=True,
         drop_last=(split == 'train'),
         worker_init_fn=_worker_init_fn,
+        generator=g,
     )
 
     return loader

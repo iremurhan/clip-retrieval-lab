@@ -25,6 +25,7 @@ def setup_seed(seed=42):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
 
 
 def deep_merge_dicts(base, override):
@@ -174,7 +175,14 @@ def setup_tracker(config):
         # Otherwise allow WandB to create a new run or resume heuristically
         init_kwargs["resume"] = "allow"
 
-    wandb.init(**init_kwargs)
+    try:
+        wandb.init(**init_kwargs)
+    except Exception as e:
+        logger.error(
+            f"WandB init failed (non-fatal): {e}. "
+            "Training will proceed without WandB logging."
+        )
+        return
 
     slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
     wandb.config.update(

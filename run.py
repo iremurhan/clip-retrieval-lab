@@ -7,6 +7,7 @@ Handles configuration setup, tracker initialization, and triggers the training e
 
 import argparse
 import os
+import signal
 import sys
 import logging
 import warnings
@@ -178,9 +179,24 @@ def main():
             log.error(f"Checkpoint not found: {args.resume}")
             raise FileNotFoundError(args.resume)
 
+    signal.signal(signal.SIGTERM, lambda s, f: setattr(trainer, '_sigterm_received', True))
+
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    run_name = f"{args.run or 'unnamed'}_{config['data']['dataset']}_s{config['training']['seed']}"
+
     try:
         log.info(f"Starting training from epoch {start_epoch}...")
         trainer.fit(start_epoch=start_epoch)
+        if wandb.run is not None:
+            wandb.alert(
+                title=f"Job done: {run_name}",
+                text=(
+                    f"Job ID: {job_id}\n"
+                    f"Run: {run_name}\n"
+                    f"Checkpoint: {config['logging']['checkpoint_dir']}"
+                ),
+                level=wandb.AlertLevel.INFO,
+            )
     except KeyboardInterrupt:
         log.info("Training interrupted manually.")
     except Exception as e:
@@ -188,14 +204,23 @@ def main():
             wandb.run.summary["status"] = "failed"
             wandb.run.summary["error_type"] = type(e).__name__
             wandb.run.summary["error_message"] = str(e)
+            wandb.alert(
+                title=f"Job FAILED: {run_name}",
+                text=(
+                    f"Job ID: {job_id}\n"
+                    f"Run: {run_name}\n"
+                    f"Error: {type(e).__name__}: {e}"
+                ),
+                level=wandb.AlertLevel.ERROR,
+            )
         log.error(f"Training failed: {e}", exc_info=True)
         raise
     finally:
         if wandb.run is not None:
             try:
-                wandb.finish()
+                wandb.finish(timeout=30)
             except Exception as e:
-                log.warning(f"W&B finish failed: {e}")
+                log.warning(f"wandb.finish() failed: {e}")
 
 
 if __name__ == "__main__":

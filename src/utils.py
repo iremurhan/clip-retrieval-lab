@@ -5,7 +5,11 @@ Utility functions for training and model monitoring.
 Provides gradient norm computation for training stability checks.
 """
 
+import math
+import logging
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def compute_grad_norm(model):
@@ -19,6 +23,8 @@ def compute_grad_norm(model):
             param_norm = p.grad.data.norm(2)
             total_norm += param_norm.item() ** 2
     total_norm = total_norm ** 0.5
+    if not math.isfinite(total_norm):
+        logger.critical(f"Non-finite grad norm detected: {total_norm}")
     return total_norm
 
 

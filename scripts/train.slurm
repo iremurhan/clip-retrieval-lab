@@ -86,6 +86,8 @@ if [ -f /env/wandb.env ]; then
     set -a; source /env/wandb.env; set +a
 fi
 
+HPC_HOSTNAME="${HPC_HOSTNAME:-}"
+
 if [ -n "${WANDB_API_KEY:-}" ]; then
     export WANDB_MODE=online
     export WANDB_PROJECT="$WANDB_PROJECT_AUTO"

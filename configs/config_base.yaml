@@ -36,7 +36,7 @@ training:
 
 data:
   max_length: 77
-  num_workers: 8
+  num_workers: 4
   image_size: 336
 
 augment:

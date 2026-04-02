@@ -16,6 +16,7 @@ Usage:
 """
 
 import gc
+import math
 import torch
 import logging
 import wandb
@@ -112,6 +113,9 @@ class Trainer:
         else:
             self.hard_neg_generator = None
 
+        # SIGTERM flag — set externally via signal handler in run.py
+        self._sigterm_received = False
+
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         
@@ -190,8 +194,14 @@ class Trainer:
             torch.save(checkpoint, tmp_path)
             os.replace(tmp_path, path)
             logger.info(f"Checkpoint saved: best_model.pth (epoch {epoch})")
+            return True
         except (OSError, RuntimeError) as e:
             logger.error(f"DISK ERROR: Could not save best_model.pth at Epoch {epoch}. {e}")
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
         finally:
             del checkpoint, cpu_model_sd
             gc.collect()
@@ -283,11 +293,23 @@ class Trainer:
                 if self.use_amp:
                     self.scaler.unscale_(self.optimizer)
                     grad_norm = compute_grad_norm(self.model)
-                    self.scaler.step(self.optimizer)
+                    if math.isfinite(grad_norm):
+                        self.scaler.step(self.optimizer)
+                    else:
+                        logger.critical(
+                            f"Skipping optimizer step at epoch {epoch} step {step}: "
+                            f"grad_norm={grad_norm}. Weights not updated."
+                        )
                     self.scaler.update()
                 else:
                     grad_norm = compute_grad_norm(self.model)
-                    self.optimizer.step()
+                    if math.isfinite(grad_norm):
+                        self.optimizer.step()
+                    else:
+                        logger.critical(
+                            f"Skipping optimizer step at epoch {epoch} step {step}: "
+                            f"grad_norm={grad_norm}. Weights not updated."
+                        )
             
             else:
                 # STANDARD MODE (Original Implementation)
@@ -379,8 +401,13 @@ class Trainer:
                     # Unscale gradients to compute true grad norm
                     self.scaler.unscale_(self.optimizer)
                     grad_norm = compute_grad_norm(self.model)
-                    
-                    self.scaler.step(self.optimizer)
+                    if math.isfinite(grad_norm):
+                        self.scaler.step(self.optimizer)
+                    else:
+                        logger.critical(
+                            f"Skipping optimizer step at epoch {epoch} step {step}: "
+                            f"grad_norm={grad_norm}. Weights not updated."
+                        )
                     self.scaler.update()
                 else:
                     # Standard precision training
@@ -465,8 +492,13 @@ class Trainer:
 
                     # Compute grad norm before optimizer step
                     grad_norm = compute_grad_norm(self.model)
-
-                    self.optimizer.step()
+                    if math.isfinite(grad_norm):
+                        self.optimizer.step()
+                    else:
+                        logger.critical(
+                            f"Skipping optimizer step at epoch {epoch} step {step}: "
+                            f"grad_norm={grad_norm}. Weights not updated."
+                        )
             
             self.scheduler.step()
             
@@ -651,7 +683,8 @@ class Trainer:
         """
         num_samples = len(txt_embeds)
         sample_count = min(5, num_samples)
-        indices = random.sample(range(num_samples), sample_count)
+        rng = random.Random(epoch if isinstance(epoch, int) else 0)
+        indices = rng.sample(range(num_samples), sample_count)
 
         columns = ["Caption", "Ground Truth", "Rank 1", "Rank 2", "Rank 3"]
         table = wandb.Table(columns=columns)
@@ -729,8 +762,13 @@ class Trainer:
             # Save only when save_freq is hit AND there has been improvement since last save
             is_save_time = (epoch + 1) % save_freq == 0 or (epoch + 1) == self.config['training']['epochs']
             if is_save_time and improved_since_last_save:
+                if self.save_checkpoint(epoch + 1):
+                    improved_since_last_save = False
+
+            if self._sigterm_received:
+                logger.critical("SIGTERM: Emergency checkpoint save and exit.")
                 self.save_checkpoint(epoch + 1)
-                improved_since_last_save = False
+                raise SystemExit(0)
 
         # --- TEST EVALUATION ---
         logger.info("Training complete. Running final test evaluation...")
@@ -778,22 +816,54 @@ class Trainer:
                 dataset='coco',
             )
             if eccv_scores:
+                # Validate expected keys exist before extraction
+                _expected_keys = [
+                    'coco_5k_r1', 'coco_5k_r5', 'coco_5k_r10',
+                    'coco_1k_r1', 'coco_1k_r5', 'coco_1k_r10',
+                    'cxc_r1', 'cxc_r5', 'cxc_r10',
+                    'eccv_map_at_r', 'eccv_rprecision',
+                ]
+                _missing = [k for k in _expected_keys if k not in eccv_scores]
+                if _missing:
+                    raise RuntimeError(
+                        f"eccv_caption returned unexpected format. "
+                        f"Missing keys: {_missing}. "
+                        f"Got keys: {sorted(eccv_scores.keys())}"
+                    )
+                logger.info(f"ECCV scores keys validated: {sorted(eccv_scores.keys())}")
                 test_metrics = {
+                    # COCO 5K
                     "test/coco_5k_r1_i2t":      eccv_scores.get('coco_5k_r1', {}).get('i2t', 0),
                     "test/coco_5k_r1_t2i":      eccv_scores.get('coco_5k_r1', {}).get('t2i', 0),
-                    "test/coco_5k_r5_i2t":      eccv_scores.get('coco_5k_recalls', {}).get('i2t', {}).get(5, 0),
-                    "test/coco_5k_r5_t2i":      eccv_scores.get('coco_5k_recalls', {}).get('t2i', {}).get(5, 0),
-                    "test/coco_5k_r10_i2t":     eccv_scores.get('coco_5k_recalls', {}).get('i2t', {}).get(10, 0),
-                    "test/coco_5k_r10_t2i":     eccv_scores.get('coco_5k_recalls', {}).get('t2i', {}).get(10, 0),
+                    "test/coco_5k_r5_i2t":      eccv_scores.get('coco_5k_r5', {}).get('i2t', 0),
+                    "test/coco_5k_r5_t2i":      eccv_scores.get('coco_5k_r5', {}).get('t2i', 0),
+                    "test/coco_5k_r10_i2t":     eccv_scores.get('coco_5k_r10', {}).get('i2t', 0),
+                    "test/coco_5k_r10_t2i":     eccv_scores.get('coco_5k_r10', {}).get('t2i', 0),
+                    # COCO 1K
                     "test/coco_1k_r1_i2t":      eccv_scores.get('coco_1k_r1', {}).get('i2t', 0),
                     "test/coco_1k_r1_t2i":      eccv_scores.get('coco_1k_r1', {}).get('t2i', 0),
+                    "test/coco_1k_r5_i2t":      eccv_scores.get('coco_1k_r5', {}).get('i2t', 0),
+                    "test/coco_1k_r5_t2i":      eccv_scores.get('coco_1k_r5', {}).get('t2i', 0),
+                    "test/coco_1k_r10_i2t":     eccv_scores.get('coco_1k_r10', {}).get('i2t', 0),
+                    "test/coco_1k_r10_t2i":     eccv_scores.get('coco_1k_r10', {}).get('t2i', 0),
+                    # ECCV
                     "test/eccv_map_at_r_i2t":   eccv_scores.get('eccv_map_at_r', {}).get('i2t', 0),
                     "test/eccv_map_at_r_t2i":   eccv_scores.get('eccv_map_at_r', {}).get('t2i', 0),
                     "test/eccv_rprecision_i2t":  eccv_scores.get('eccv_rprecision', {}).get('i2t', 0),
                     "test/eccv_rprecision_t2i":  eccv_scores.get('eccv_rprecision', {}).get('t2i', 0),
-                    "test/cxc_r1_i2t":          eccv_scores.get('cxc_recalls', {}).get('i2t', {}).get(1, 0),
-                    "test/cxc_r1_t2i":          eccv_scores.get('cxc_recalls', {}).get('t2i', {}).get(1, 0),
+                    # CxC
+                    "test/cxc_r1_i2t":          eccv_scores.get('cxc_r1', {}).get('i2t', 0),
+                    "test/cxc_r1_t2i":          eccv_scores.get('cxc_r1', {}).get('t2i', 0),
+                    "test/cxc_r5_i2t":          eccv_scores.get('cxc_r5', {}).get('i2t', 0),
+                    "test/cxc_r5_t2i":          eccv_scores.get('cxc_r5', {}).get('t2i', 0),
+                    "test/cxc_r10_i2t":         eccv_scores.get('cxc_r10', {}).get('i2t', 0),
+                    "test/cxc_r10_t2i":         eccv_scores.get('cxc_r10', {}).get('t2i', 0),
                 }
+                # Also compute standard R@K metrics (matches Flickr test behavior)
+                standard = self._compute_standard_metrics(
+                    img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims, prefix="test"
+                )
+                test_metrics.update(standard)
             else:
                 logger.warning("ECCV metrics returned empty. Falling back to standard R@K for test.")
                 test_metrics = self._compute_standard_metrics(
