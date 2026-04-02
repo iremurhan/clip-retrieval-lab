@@ -2,14 +2,29 @@
 # =============================================================================
 # launch_run.sh — Batch SLURM submission for cross-modal retrieval experiments
 # =============================================================================
-# Submits one training job per (dataset, seed) pair. For COCO jobs, automatically
-# chains a WiSE-FT evaluation job via --dependency=afterok.
+# Submits one training job per (dataset, seed) combination. Each job runs
+# train.slurm, which forwards --run and --seed to run.py. Registry overrides
+# from configs/registry.yaml are applied automatically by run.py via --run.
+# For COCO jobs, a WiSE-FT evaluation job is chained via --dependency=afterok.
+#
+# Arguments:
+#   --run      RUN_ID     Registry entry to use (required). Must exist in
+#                         configs/registry.yaml. E.g.: B0, B0plus, B1, B2, B3, FULL
+#   --datasets DATASETS   Space-separated list of datasets (default: "coco flickr")
+#                         Supported: coco, flickr
+#   --seeds    SEEDS      Space-separated list of seeds (default: "42 123 456")
 #
 # Usage:
-#   bash scripts/launch_run.sh --run B0 [--datasets "coco flickr"] [--seeds "42 123 456"]
+#   bash scripts/launch_run.sh --run RUN_ID [--datasets "..."] [--seeds "..."]
 #
 # Examples:
-#   bash scripts/launch_run.sh --run B0
+#   # Single run: B0 on COCO, seed 42 only
+#   bash scripts/launch_run.sh --run B0 --datasets "coco" --seeds "42"
+#
+#   # Full ablation: B0plus on both datasets, all seeds
+#   bash scripts/launch_run.sh --run B0plus
+#
+#   # FULL config on COCO only, two seeds
 #   bash scripts/launch_run.sh --run FULL --datasets "coco" --seeds "42 123"
 # =============================================================================
 
@@ -56,9 +71,11 @@ if [ ! -f "$TRAIN_SLURM" ]; then
     echo "ERROR: ${TRAIN_SLURM} not found."
     exit 1
 fi
-if [ ! -f "$WISE_FT_SLURM" ]; then
-    echo "ERROR: ${WISE_FT_SLURM} not found."
-    exit 1
+WISE_FT_AVAILABLE=false
+if [ -f "$WISE_FT_SLURM" ]; then
+    WISE_FT_AVAILABLE=true
+else
+    echo "WARNING: ${WISE_FT_SLURM} not found — WiSE-FT jobs will be skipped."
 fi
 
 # --------------------------------------------------------------------------
@@ -80,7 +97,7 @@ for DATASET in $DATASETS; do
     # Map dataset name to config file
     case "$DATASET" in
         coco)    CONFIG="configs/config_coco.yaml" ;;
-        flickr)  CONFIG="configs/config_flickr.yaml" ;;
+        flickr)  CONFIG="configs/config_flickr30k.yaml" ;;
         *)
             echo "WARNING: Unknown dataset '${DATASET}'; skipping."
             continue
@@ -97,29 +114,30 @@ for DATASET in $DATASETS; do
         RUN_NAME="${RUN_ID}_${DATASET}_s${SEED}"
 
         # Submit training job
-        # train.slurm positional args: <EXPERIMENT_NAME> <CONFIG_PATH>
-        # Additional named args forwarded via --override in run.py
+        # train.slurm positional args: <EXPERIMENT_NAME> <CONFIG_PATH> [extra args forwarded to run.py]
         TRAIN_JOB_ID=$(sbatch \
             --parsable \
             --job-name="${RUN_NAME}" \
             "$TRAIN_SLURM" \
             "$RUN_NAME" \
             "$CONFIG" \
-            --override \
-                "logging.run_id=${RUN_ID}" \
-                "training.seed=${SEED}" \
+            --run "${RUN_ID}" \
+            --seed "${SEED}" \
         )
 
         CKPT_DIR="/output/results/${DATASET}/${TRAIN_JOB_ID}"
 
-        WISE_JOB_ID=$(sbatch \
-            --parsable \
-            --job-name="${RUN_NAME}_wise" \
-            --dependency="afterok:${TRAIN_JOB_ID}" \
-            "$WISE_FT_SLURM" \
-            --checkpoint "$CKPT_DIR" \
-            --config     "$CONFIG" \
-        )
+        WISE_JOB_ID="-"
+        if [ "$WISE_FT_AVAILABLE" = true ]; then
+            WISE_JOB_ID=$(sbatch \
+                --parsable \
+                --job-name="${RUN_NAME}_wise" \
+                --dependency="afterok:${TRAIN_JOB_ID}" \
+                "$WISE_FT_SLURM" \
+                --checkpoint "$CKPT_DIR" \
+                --config     "$CONFIG" \
+            )
+        fi
 
         printf "  %-20s  %-10s  %-6s  %-14s  %-14s\n" \
             "$RUN_NAME" "$DATASET" "$SEED" "$TRAIN_JOB_ID" "$WISE_JOB_ID"

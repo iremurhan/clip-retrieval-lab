@@ -1,3 +1,4 @@
 data:
+  dataset: "flickr30k"
   images_path: "datasets/flickr30k/flickr30k_images"
   captions_path: "datasets/flickr30k/caption_datasets/dataset_flickr30k.json"

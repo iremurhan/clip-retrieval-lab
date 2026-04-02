@@ -38,8 +38,12 @@ class DualEncoder(nn.Module):
         if not clip_model_name:
             raise ValueError("config['model']['image_model_name'] must be specified in config file.")
         logger.info(f"Loading CLIP Model: {clip_model_name}...")
-        # Use safetensors to avoid torch.load security vulnerability (CVE-2025-32434)
+        # Use safetensors to avoid torch.load security vulnerability (CVE-2025-32434).
         self.clip = CLIPModel.from_pretrained(clip_model_name, use_safetensors=True)
+        # Cast all weights to float32 so no fp16 residuals remain in the model.
+        # autocast(bfloat16) will then downcast cleanly from fp32 during the forward pass,
+        # avoiding the at::Half overflow caused by fp16 causal mask fill values (-3.4e38).
+        self.clip = self.clip.float()
         
         # Get CLIP's native projection dimension
         self.clip_embed_dim = self.clip.config.projection_dim
@@ -77,6 +81,12 @@ class DualEncoder(nn.Module):
         
         # 3. Freezing Strategy - Freeze backbone, train projections
         self._apply_freezing_strategy()
+
+        # 4. Reset logit_scale to fine-tuning starting value
+        # Pretrained CLIP has logit_scale ~4.6 (τ≈0.01), too high for fine-tuning.
+        with torch.no_grad():
+            self.clip.logit_scale.fill_(2.6593)  # ln(1/0.07) = 2.6593
+        logger.info("logit_scale reset to 2.6593 (τ=0.07)")
     
     def _apply_freezing_strategy(self):
         """
@@ -194,6 +204,19 @@ class DualEncoder(nn.Module):
                         if m.bias is not None:
                             nn.init.constant_(m.bias, 0)
 
+    def _get_image_features(self, images):
+        """Extract image features and standardize embeddings to float32."""
+        image_embeds = self.clip.get_image_features(pixel_values=images)
+        return image_embeds.float()
+
+    def _get_text_features(self, input_ids, attention_mask):
+        """Extract text features and standardize embeddings to float32."""
+        text_embeds = self.clip.get_text_features(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        return text_embeds.float()
+
     def forward(self, images, input_ids, attention_mask):
         """
         Forward pass returning L2-normalized embeddings.
@@ -209,8 +232,8 @@ class DualEncoder(nn.Module):
         """
         # Get CLIP embeddings (already projected)
         # Note: CLIP expects 'pixel_values' for images
-        image_embeds = self.clip.get_image_features(pixel_values=images)
-        text_embeds = self.clip.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
+        image_embeds = self._get_image_features(images)
+        text_embeds = self._get_text_features(input_ids, attention_mask)
         
         # Optional: Additional projection to match target embed_dim
         if self.image_proj is not None:
@@ -225,14 +248,14 @@ class DualEncoder(nn.Module):
 
     def encode_image(self, images):
         """Encode images only (L2-normalized). For use with separate text encoding (e.g. negatives)."""
-        image_embeds = self.clip.get_image_features(pixel_values=images)
+        image_embeds = self._get_image_features(images)
         if self.image_proj is not None:
             image_embeds = self.image_proj(image_embeds)
         return F.normalize(image_embeds, p=2, dim=1)
 
     def encode_text(self, input_ids, attention_mask):
         """Encode text only (L2-normalized). For use with separate image encoding (e.g. hard negatives)."""
-        text_embeds = self.clip.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
+        text_embeds = self._get_text_features(input_ids, attention_mask)
         if self.text_proj is not None:
             text_embeds = self.text_proj(text_embeds)
         return F.normalize(text_embeds, p=2, dim=1)

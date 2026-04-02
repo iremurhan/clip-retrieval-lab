@@ -7,8 +7,10 @@ Handles configuration setup, tracker initialization, and triggers the training e
 
 import argparse
 import os
+import signal
 import sys
 import logging
+import warnings
 import torch
 import wandb
 from transformers import CLIPTokenizer, get_cosine_schedule_with_warmup
@@ -16,7 +18,7 @@ from transformers import CLIPTokenizer, get_cosine_schedule_with_warmup
 from src.setup import setup_config, setup_seed, setup_tracker, load_registry_overrides
 from src.data import create_image_text_dataloader
 from src.model import DualEncoder
-from src.loss import SymmetricInfoNCELoss
+from src.loss import build_loss
 from src.train import Trainer
 
 
@@ -79,7 +81,13 @@ def create_lr_scheduler(optimizer, config, num_training_steps):
     """Create learning rate scheduler (cosine with warmup)."""
     warmup = int(config["training"].get("warmup_epochs", 2))
     warmup_steps = min(warmup * (num_training_steps // config["training"]["epochs"]), num_training_steps)
-    return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
+    # Suppress the spurious "scheduler.step() before optimizer.step()" warning that
+    # transformers' get_cosine_schedule_with_warmup triggers internally during __init__.
+    # The training loop calls optimizer.step() before scheduler.step() correctly.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*before.*optimizer.step.*")
+        warnings.filterwarnings("ignore", message=".*Detected call of.*lr_scheduler.step.*")
+        return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
 
 
 def main():
@@ -110,19 +118,11 @@ def main():
     # Build checkpoint dir: checkpoints/{SLURM_JOB_ID}_{run_id}_{dataset}_s{seed}/
     # Only when checkpoint_dir has not already been set via --override
     if not any("logging.checkpoint_dir" in o for o in (args.override or [])):
-        from src.setup import _infer_dataset_name
         job_id = os.environ.get("SLURM_JOB_ID", "local")
         run_id = config.get("logging", {}).get("run_id", "unnamed")
-        dataset = _infer_dataset_name(config)
-        seed = config.get("training", {}).get("seed", 42)
+        dataset = config["data"]["dataset"]
+        seed = config["training"]["seed"]
         config["logging"]["checkpoint_dir"] = f"checkpoints/{job_id}_{run_id}_{dataset}_s{seed}"
-
-    # Ensure data has required keys; use literal defaults only (no config-as-fallback)
-    config.setdefault("data", {})
-    config["data"].setdefault("max_length", 77)
-    config["data"].setdefault("num_workers", 8)
-    config["data"].setdefault("batch_size", 256)
-    config["data"].setdefault("image_size", 336)
 
     # 2. Logging and seed
     setup_logging()
@@ -130,10 +130,7 @@ def main():
     setup_seed(config["training"]["seed"])
 
     # 3. WandB
-    debug_mode = config["debug"]["debug_mode"]
-    if debug_mode:
-        log.info("Debug mode: using train set as validation set.")
-    setup_tracker(config, debug_mode=debug_mode)
+    setup_tracker(config)
 
     # 4. Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -143,15 +140,19 @@ def main():
     model_name = config["model"]["image_model_name"]
     tokenizer = CLIPTokenizer.from_pretrained(model_name)
     train_loader = create_image_text_dataloader(config, tokenizer, split="train")
-    if debug_mode:
-        val_loader = train_loader
-    else:
-        val_loader = create_image_text_dataloader(config, tokenizer, split="val")
+    val_loader = create_image_text_dataloader(config, tokenizer, split="val")
 
     # 6. Model, loss, optimizer, scheduler
     model = DualEncoder(config).to(device)
-    criterion = SymmetricInfoNCELoss(config)
+    criterion = build_loss(config)
     optimizer = create_clip_optimizer(model, config)
+    if hasattr(criterion, 'bias') and isinstance(criterion.bias, torch.nn.Parameter):
+        optimizer.add_param_group({
+            'params': [criterion.bias],
+            'lr': config['training']['clip_projection_lr'],
+            'name': 'siglip_bias',
+        })
+        log.info(f"SigLIP bias added to optimizer (lr={config['training']['clip_projection_lr']})")
     num_batches = len(train_loader) * config["training"]["epochs"]
     scheduler = create_lr_scheduler(optimizer, config, num_batches)
 
@@ -178,37 +179,48 @@ def main():
             log.error(f"Checkpoint not found: {args.resume}")
             raise FileNotFoundError(args.resume)
 
+    signal.signal(signal.SIGTERM, lambda s, f: setattr(trainer, '_sigterm_received', True))
+
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    run_name = f"{args.run or 'unnamed'}_{config['data']['dataset']}_s{config['training']['seed']}"
+
     try:
         log.info(f"Starting training from epoch {start_epoch}...")
         trainer.fit(start_epoch=start_epoch)
-
-        # 9. Final test evaluation (load best model, run on test set)
-        log.info("Training finished. Loading best model for test evaluation...")
-        best_path = os.path.join(config["logging"]["checkpoint_dir"], "best_model.pth")
-        if os.path.isfile(best_path):
-            ckpt = torch.load(best_path, map_location=device)
-            model.load_state_dict(ckpt["model_state_dict"])
-            log.info("Best model loaded.")
-            try:
-                test_loader = create_image_text_dataloader(config, tokenizer, split="test")
-                trainer.val_loader = test_loader
-                log.info("Running evaluation on TEST set...")
-                trainer.evaluate(epoch="TEST_FINAL")
-            except Exception as e:
-                log.warning(f"Test evaluation skipped: {e}")
-        else:
-            log.warning("Best model checkpoint not found; skipping test evaluation.")
+        if wandb.run is not None:
+            wandb.alert(
+                title=f"Job done: {run_name}",
+                text=(
+                    f"Job ID: {job_id}\n"
+                    f"Run: {run_name}\n"
+                    f"Checkpoint: {config['logging']['checkpoint_dir']}"
+                ),
+                level=wandb.AlertLevel.INFO,
+            )
     except KeyboardInterrupt:
         log.info("Training interrupted manually.")
     except Exception as e:
+        if wandb.run is not None:
+            wandb.run.summary["status"] = "failed"
+            wandb.run.summary["error_type"] = type(e).__name__
+            wandb.run.summary["error_message"] = str(e)
+            wandb.alert(
+                title=f"Job FAILED: {run_name}",
+                text=(
+                    f"Job ID: {job_id}\n"
+                    f"Run: {run_name}\n"
+                    f"Error: {type(e).__name__}: {e}"
+                ),
+                level=wandb.AlertLevel.ERROR,
+            )
         log.error(f"Training failed: {e}", exc_info=True)
         raise
     finally:
         if wandb.run is not None:
             try:
-                wandb.finish()
+                wandb.finish(timeout=30)
             except Exception as e:
-                log.warning(f"W&B finish failed: {e}")
+                log.warning(f"wandb.finish() failed: {e}")
 
 
 if __name__ == "__main__":

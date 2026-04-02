@@ -22,9 +22,127 @@ Additionally supports optional intra-modal consistency terms that enforce struct
 preservation within each modality (image↔augmented_image, text↔augmented_text).
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
+
+
+class SigLIPLoss(nn.Module):
+    """
+    Pairwise Sigmoid Loss for Language-Image Pre-training (SigLIP).
+
+    Unlike InfoNCE, which uses softmax normalization across the batch, SigLIP treats
+    each image-text pair as an independent binary classification:
+
+        z_ij = logit_scale * sim(image_i, text_j) + bias
+        y_ij = +1 if i == j (positive pair), -1 otherwise (negative pair)
+        L = -mean_ij [ log sigmoid(y_ij * z_ij) ]
+
+    Equivalently, using the identity  log sigmoid(y*z) = log_sigmoid(y*z):
+        L = -mean( F.logsigmoid(labels * logits) )
+
+    Key differences from InfoNCE:
+    - No softmax denominator: each pair is scored independently.
+    - A learnable bias term (initialized to -10) shifts all logits negative at the
+      start, so the model is not overconfident on the N^2 - N negatives.
+    - Gradients do NOT vanish when the temperature is very sharp (no softmax).
+
+    Reference: Zhai et al., "Sigmoid Loss for Language Image Pre-Training" (ICCV 2023).
+
+    Args:
+        config (dict): Configuration dict. Reads:
+                       - loss.intra_img_weight (default: 0.0)
+                       - loss.intra_txt_weight (default: 0.0)
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        # Learnable bias initialized to -10 so that sigmoid(-10) ≈ 0 at step 0,
+        # preventing the model from being overconfident on the N²-N negatives.
+        self.bias = nn.Parameter(torch.tensor(-10.0))
+        self.w_img = config['loss']['intra_img_weight']
+        self.w_txt = config['loss']['intra_txt_weight']
+
+    def _compute_siglip(self, embeds_a, embeds_b, logit_scale):
+        """Pairwise sigmoid loss between two sets of L2-normalized embeddings."""
+        n = embeds_a.shape[0]
+        sim = embeds_a @ embeds_b.T                              # [N, N]
+        ls = logit_scale.exp().clamp(max=100)                    # scalar
+        if ls.item() >= 99.0:
+            logger.warning(f"logit_scale.exp()={ls.item():.2f} hit clamp ceiling")
+        logits = ls * sim + self.bias                            # [N, N]
+        labels = 2 * torch.eye(n, device=embeds_a.device) - 1   # [N, N]
+        return -F.logsigmoid(labels * logits).mean()             # scalar
+
+    def _compute_siglip_with_hard_negatives(self, img_embeds, txt_embeds, neg_txt_embeds, logit_scale):
+        """
+        SigLIP variant with hard negatives.
+        Hard negatives are treated as additional negative pairs with label -1.
+
+        img_embeds:     [N, D]
+        txt_embeds:     [N, D] — original captions (positives on diagonal)
+        neg_txt_embeds: [N, D] — hard negative captions (never positive)
+        """
+        n = img_embeds.shape[0]
+        ls = logit_scale.exp().clamp(max=100)                    # scalar
+
+        # Similarity with original captions: [N, N]
+        sim_pos = img_embeds @ txt_embeds.T                      # [N, N]
+        logits_pos = ls * sim_pos + self.bias                    # [N, N]
+        labels_pos = 2 * torch.eye(n, device=img_embeds.device) - 1  # [N, N]
+        loss_pos = -F.logsigmoid(labels_pos * logits_pos).mean() # scalar
+
+        # Similarity with hard negatives: [N, N] — all negative pairs
+        sim_neg = img_embeds @ neg_txt_embeds.T                  # [N, N]
+        logits_neg = ls * sim_neg + self.bias                    # [N, N]
+        labels_neg = -torch.ones(n, n, device=img_embeds.device) # [N, N]
+        loss_neg = -F.logsigmoid(labels_neg * logits_neg).mean() # scalar
+
+        return (loss_pos + loss_neg) / 2
+
+    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
+        """
+        Compute SigLIP loss with optional intra-modal consistency terms.
+
+        Args:
+            img_embeds: [N, D] L2-normalized image embeddings
+            txt_embeds: [N, D] L2-normalized text embeddings
+            logit_scale: scalar nn.Parameter — model.clip.logit_scale (log scale)
+            img_aug_embeds: [N, D] optional — augmented image embeddings for intra-modal loss
+            txt_aug_embeds: [N, D] optional — paraphrase text embeddings for intra-modal loss
+
+        Returns:
+            dict with keys: loss_total, loss_inter, loss_intra_img, loss_intra_txt
+        """
+        if neg_txt_embeds is not None:
+            loss_inter = self._compute_siglip_with_hard_negatives(
+                img_embeds, txt_embeds, neg_txt_embeds, logit_scale)
+        else:
+            loss_inter = self._compute_siglip(img_embeds, txt_embeds, logit_scale)
+
+        loss_img = torch.tensor(0.0, device=img_embeds.device)
+        if self.w_img > 0 and img_aug_embeds is not None:
+            loss_img = self._compute_siglip(img_embeds, img_aug_embeds, logit_scale)
+
+        loss_txt = torch.tensor(0.0, device=img_embeds.device)
+        if self.w_txt > 0 and txt_aug_embeds is not None:
+            loss_txt = self._compute_siglip(txt_embeds, txt_aug_embeds, logit_scale)
+
+        loss_total = loss_inter + self.w_img * loss_img + self.w_txt * loss_txt
+
+        assert not torch.isnan(loss_total), "SigLIP loss_total is NaN"
+        assert not torch.isinf(loss_total), "SigLIP loss_total is Inf"
+
+        return {
+            "loss_total": loss_total,
+            "loss_inter": loss_inter,
+            "loss_intra_img": loss_img,
+            "loss_intra_txt": loss_txt,
+        }
 
 
 class SymmetricInfoNCELoss(nn.Module):
@@ -63,8 +181,8 @@ class SymmetricInfoNCELoss(nn.Module):
         super().__init__()
         # Separate weights for Intra-Modal Image and Text consistency
         # Set to 0.0 to disable intra-modal regularization
-        self.w_img = config['loss'].get('intra_img_weight', 0.0)
-        self.w_txt = config['loss'].get('intra_txt_weight', 0.0)
+        self.w_img = config['loss']['intra_img_weight']
+        self.w_txt = config['loss']['intra_txt_weight']
 
         self.criterion = nn.CrossEntropyLoss()
 
@@ -107,7 +225,38 @@ class SymmetricInfoNCELoss(nn.Module):
         # Return average of both directions
         return (loss_a2b + loss_b2a) / 2
 
-    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None):
+    def _compute_contrastive_with_hard_negatives(self, img_embeds, txt_embeds, neg_txt_embeds, scale):
+        """
+        Extends the N×N similarity matrix to N×(2N) by appending hard negatives.
+        Hard negatives are additional text negatives — never treated as positives.
+
+        img_embeds:     [N, D]
+        txt_embeds:     [N, D] — original captions (positives on diagonal)
+        neg_txt_embeds: [N, D] — hard negative captions (never positive)
+        scale:          scalar — logit_scale.exp().clamp(max=100)
+
+        Returns scalar loss (i2t uses N×2N, t2i uses N×N only).
+        """
+        n = img_embeds.shape[0]
+
+        # [N, 2N] similarity matrix: positives in columns [0..N-1], hard negs in [N..2N-1]
+        all_txt = torch.cat([txt_embeds, neg_txt_embeds], dim=0)  # [2N, D]
+        logits_i2t = torch.matmul(img_embeds, all_txt.t()) * scale  # [N, 2N]
+
+        # Labels: for image i, the positive is text i (index i in [0..N-1])
+        labels = torch.arange(n, device=img_embeds.device)
+
+        # i2t: each image finds its caption among 2N candidates
+        loss_i2t = self.criterion(logits_i2t, labels)
+
+        # t2i: each original caption finds its image among N candidates
+        # Use only the N×N submatrix (hard negs don't have matching images)
+        logits_t2i = torch.matmul(txt_embeds, img_embeds.t()) * scale  # [N, N]
+        loss_t2i = self.criterion(logits_t2i, labels)
+
+        return (loss_i2t + loss_t2i) / 2
+
+    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
         """
         Computes the complete retrieval loss with optional intra-modal regularization.
 
@@ -126,9 +275,19 @@ class SymmetricInfoNCELoss(nn.Module):
                 - "loss_intra_txt": Text-Text intra-modal loss
         """
         scale = logit_scale.exp().clamp(max=100)  # scalar
+        ls_val = logit_scale.exp().item()
+        if ls_val >= 99.0:
+            logger.warning(
+                f"logit_scale.exp()={ls_val:.2f} has hit the clamp ceiling (100). "
+                "This indicates temperature instability."
+            )
 
         # Inter-Modal Loss (Image <-> Text)
-        loss_inter = self._compute_contrastive(img_embeds, txt_embeds, scale)
+        if neg_txt_embeds is not None:
+            loss_inter = self._compute_contrastive_with_hard_negatives(
+                img_embeds, txt_embeds, neg_txt_embeds, scale)
+        else:
+            loss_inter = self._compute_contrastive(img_embeds, txt_embeds, scale)
 
         loss_img = torch.tensor(0.0, device=img_embeds.device)
         if self.w_img > 0 and img_aug_embeds is not None:
@@ -139,10 +298,37 @@ class SymmetricInfoNCELoss(nn.Module):
             loss_txt = self._compute_contrastive(txt_embeds, txt_aug_embeds, scale)
 
         total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
-        
+
+        if torch.isnan(total_loss):
+            raise RuntimeError("SymmetricInfoNCELoss is NaN. Check embeddings and logit_scale.")
+        if torch.isinf(total_loss):
+            raise RuntimeError("SymmetricInfoNCELoss is Inf. Check embeddings and logit_scale.")
+
         return {
             "loss_total": total_loss,
             "loss_inter": loss_inter,
             "loss_intra_img": loss_img,
             "loss_intra_txt": loss_txt
         }
+
+
+def build_loss(config):
+    """Factory function to instantiate the correct loss from config['loss']['type']."""
+    if 'loss' not in config:
+        raise KeyError("Config missing 'loss' section")
+    for required_key in ['type', 'intra_img_weight', 'intra_txt_weight']:
+        if required_key not in config['loss']:
+            raise KeyError(
+                f"Config missing 'loss.{required_key}'. "
+                f"Add it to config_base.yaml."
+            )
+    loss_type = config['loss']['type'].lower()
+    if loss_type == 'siglip':
+        return SigLIPLoss(config)
+    elif loss_type == 'infonce':
+        return SymmetricInfoNCELoss(config)
+    else:
+        raise ValueError(
+            f"Unknown loss type: '{loss_type}'. "
+            f"Valid options: 'infonce', 'siglip'"
+        )
