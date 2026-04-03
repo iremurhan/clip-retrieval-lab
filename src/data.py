@@ -20,6 +20,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import json
 import os
+import time
 import logging
 import random
 from PIL import Image
@@ -324,7 +325,7 @@ class CaptionImageDataset(Dataset):
         image_id = sample['image_id']
         caption = sample['caption']
 
-        # Load Image
+        # Load Image (retry on transient enroot/pyxis mount visibility issues)
         filepath = sample.get('filepath', '').strip()
         filename = sample['filename']
 
@@ -335,9 +336,12 @@ class CaptionImageDataset(Dataset):
         else:
             image_path = os.path.join(self.images_root_path, filename)
 
-        # Fail fast on missing images
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found: {image_path}")
+        for _attempt in range(3):
+            if os.path.exists(image_path):
+                break
+            time.sleep(0.5)
+        else:
+            raise FileNotFoundError(f"Image not found after 3 retries: {image_path}")
 
         image = Image.open(image_path).convert('RGB')
 
