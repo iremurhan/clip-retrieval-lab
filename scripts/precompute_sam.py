@@ -257,8 +257,12 @@ def main() -> None:
             seg_map = masks_to_segmap(masks, h, w)  # (H, W) int32
 
             # Atomic write: .tmp -> rename. Prevents half-written files on crash.
+            # NOTE: np.savez_compressed auto-appends ".npz" when passed a PATH,
+            # turning "foo.npz.tmp" into "foo.npz.tmp.npz" and breaking the
+            # subsequent os.replace. Passing a file object suppresses that.
             tmp_path = out_path + ".tmp"
-            np.savez_compressed(tmp_path, seg=seg_map)
+            with open(tmp_path, "wb") as f:
+                np.savez_compressed(f, seg=seg_map)
             os.replace(tmp_path, out_path)
 
             n_done += 1
