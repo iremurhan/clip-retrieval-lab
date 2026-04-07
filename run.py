@@ -48,6 +48,7 @@ def create_clip_optimizer(model, config):
     trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
     clip_proj_params = []
     custom_head_params = []
+    cls_head_params = []
     backbone_params = []
 
     for n, p in trainable:
@@ -55,6 +56,8 @@ def create_clip_optimizer(model, config):
             clip_proj_params.append(p)
         elif "image_proj" in n or "text_proj" in n:
             custom_head_params.append(p)
+        elif "cls_head" in n:
+            cls_head_params.append(p)
         else:
             backbone_params.append(p)
 
@@ -67,6 +70,8 @@ def create_clip_optimizer(model, config):
             "This indicates image_proj/text_proj layers exist unexpectedly. "
             "Check config['model']['embed_dim']."
         )
+    if cls_head_params:
+        param_groups.append({"name": "cls_head", "params": cls_head_params, "lr": lr_clip_proj})
     if backbone_params:
         param_groups.append({"name": "backbone", "params": backbone_params, "lr": lr_backbone})
 
