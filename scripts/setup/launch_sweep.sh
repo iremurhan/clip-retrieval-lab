@@ -45,7 +45,7 @@ fi
 
 # 1. Launch the W&B sweep inside the container and capture the SWEEP_ID
 echo ">>> Launching W&B sweep inside container and capturing SWEEP_ID..."
-SWEEP_OUTPUT=$(srun --container-image=biremurhan/image-text-contrast:v0.14 \
+SWEEP_OUTPUT=$(srun --container-image=biremurhan/image-text-contrast:b5 \
      --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/env:/env \
      --container-env=WANDB_API_KEY \
      bash -c "source /env/wandb.env 2>/dev/null || true && cd /workspace && wandb sweep $CONFIG_PATH 2>&1")
