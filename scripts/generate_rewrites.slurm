@@ -6,7 +6,7 @@
 #   $1  DATASET     "coco" or "flickr" (default: coco)
 #   $2  MODEL       HuggingFace model ID (default: mistralai/Mistral-7B-Instruct-v0.2)
 #
-# Requires Docker image v0.16+ (with vllm and gcc baked in).
+# Uses HuggingFace Transformers (AutoModelForCausalLM, bfloat16, device_map="auto").
 #
 # Usage:
 #   sbatch scripts/generate_rewrites.slurm coco

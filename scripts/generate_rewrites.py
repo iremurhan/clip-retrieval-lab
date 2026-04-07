@@ -1,13 +1,13 @@
 """
 scripts/generate_rewrites.py
 -----------------------------
-Offline caption rewriting using a local LLM via vllm (LaCLIP-style).
+Offline caption rewriting using a local LLM via HuggingFace Transformers.
 
 For each caption in the Karpathy JSON (train + restval splits), generates
 N diverse rewrites via a local instruction-tuned LLM. Output JSON:
 {sentid: [rewrite1, ..., rewriteN]}.
 
-Requires vllm (installed in the Docker image).
+Uses AutoModelForCausalLM with bfloat16 and device_map="auto".
 
 Supports --resume to continue from a partial output file.
 
@@ -32,10 +32,9 @@ import argparse
 import json
 import logging
 import os
-import re
 
-from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,23 +45,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
 SYSTEM_PROMPT = (
-    "You are a caption rewriting assistant. You will receive a batch of "
-    "numbered image captions. For each caption, produce exactly {n} diverse "
-    "rewrites that use different sentence structures while preserving ALL "
-    "objects, attributes, relationships, and actions. Do not add or remove "
-    "any visual information.\n\n"
-    "Output ONLY a valid JSON object — no markdown fences, no commentary, "
-    "no text before or after the JSON. Format:\n"
-    '{{"results": [{{"id": 1, "rewrites": ["rewrite1", ...]}}, '
-    '{{"id": 2, "rewrites": ["rewrite1", ...]}}]}}'
+    "You are a caption rewriting assistant. Rewrite image captions with "
+    "different sentence structure while preserving ALL objects, attributes, "
+    "relationships, and actions. Do not add or remove any visual information. "
+    "Output only the rewritten caption, nothing else."
 )
 
-USER_TEMPLATE = (
-    "Rewrite each of the {count} captions below exactly {n} times. "
-    "Vary sentence structure (passive voice, fronted adverbials, relative "
-    "clauses, etc.). Output ONLY valid JSON.\n\n"
-    "{numbered_captions}"
-)
+NUM_CANDIDATES = 6  # generate this many candidates, then pick the most distinct
 
 
 # ============================================================================
@@ -93,101 +82,104 @@ def load_captions(captions_path: str) -> list[dict]:
 
 
 # ============================================================================
-# Prompt building & response parsing
+# Prompt building & rewrite selection
 # ============================================================================
 
-def build_chat_messages(batch: list[dict], num_rewrites: int) -> list[dict]:
-    """Build chat messages (system + user) for a batch of captions."""
-    numbered = "\n".join(
-        f"{i+1}. {item['caption']}" for i, item in enumerate(batch)
-    )
-    system = SYSTEM_PROMPT.format(n=num_rewrites)
-    user = USER_TEMPLATE.format(
-        n=num_rewrites, count=len(batch), numbered_captions=numbered,
-    )
+def build_chat_messages(caption: str) -> list[dict]:
+    """Build chat messages (system + user) for a single caption."""
     return [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Rewrite this caption:\n{caption}"},
     ]
 
 
-def parse_response(response_text: str, batch: list[dict], num_rewrites: int) -> dict:
-    """Parse LLM JSON response into {sentid: [rewrites]} dict.
+def select_unique_rewrites(
+    candidates: list[str], original: str, num_rewrites: int,
+) -> list[str]:
+    """Pick the most distinct rewrites from candidates.
 
-    Raises ValueError on malformed output.
+    Deduplicates by lowercased text. If fewer than num_rewrites unique
+    candidates remain, pads with whatever was found, then fills remaining
+    slots with the original caption.
     """
-    text = response_text.strip()
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]
-        if text.endswith("```"):
-            text = text[: text.rfind("```")]
+    seen = set()
+    unique = []
+    for c in candidates:
+        c_stripped = c.strip()
+        if not c_stripped:
+            continue
+        key = c_stripped.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c_stripped)
 
-    # Extract the outermost JSON object
-    json_match = re.search(r'\{.*\}', text, re.DOTALL)
-    if not json_match:
-        raise ValueError("No JSON object found in response")
-    text = json_match.group()
-
-    parsed = json.loads(text)
-    results = parsed["results"]
-
-    if len(results) != len(batch):
-        raise ValueError(
-            f"Expected {len(batch)} results, got {len(results)}"
+    if len(unique) < num_rewrites:
+        logger.warning(
+            f"Only {len(unique)}/{num_rewrites} unique rewrites for: "
+            f"{original[:80]!r}. Padding with original."
         )
+        while len(unique) < num_rewrites:
+            unique.append(original)
 
-    rewrites_map = {}
-    for i, entry in enumerate(results):
-        sentid = batch[i]["sentid"]
-        rw = entry["rewrites"]
-        if len(rw) != num_rewrites:
-            raise ValueError(
-                f"sentid {sentid}: expected {num_rewrites} rewrites, got {len(rw)}"
-            )
-        rewrites_map[sentid] = rw
-
-    return rewrites_map
+    return unique[:num_rewrites]
 
 
 # ============================================================================
-# vllm inference
+# HuggingFace Transformers inference
 # ============================================================================
 
 def load_model(model_name: str) -> tuple:
-    """Load model via vllm and its tokenizer."""
+    """Load model and tokenizer via HuggingFace Transformers."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    llm = LLM(
-        model=model_name,
-        dtype="float16",
-        max_model_len=4096,
-        gpu_memory_utilization=0.90,
-        enforce_eager=True,
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
     )
-    logger.info(f"vllm model loaded: {model_name}")
-    return llm, tokenizer
+    model.eval()
+    logger.info(f"Model loaded: {model_name}")
+    return model, tokenizer
 
 
-def generate_batch(
-    llm: LLM, tokenizer, batch: list[dict], num_rewrites: int,
-) -> str:
-    """Generate rewrites for a batch of captions."""
-    messages = build_chat_messages(batch, num_rewrites)
+def generate_for_caption(
+    model, tokenizer, caption: str, num_candidates: int,
+) -> list[str]:
+    """Generate multiple rewrite candidates for a single caption.
+
+    Returns list of decoded candidate strings (may contain duplicates).
+    Raises torch.cuda.OutOfMemoryError on CUDA OOM (caller handles retry).
+    """
+    messages = build_chat_messages(caption)
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True,
     )
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    prompt_len = inputs["input_ids"].shape[1]  # [1, seq_len]
 
-    # max_tokens scales with batch size: ~80 tokens per caption × num_rewrites
-    max_tokens = min(8192, len(batch) * num_rewrites * 80 + 256)
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=128,
+            num_return_sequences=num_candidates,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+        )  # [num_candidates, seq_len + new_tokens]
 
-    params = SamplingParams(
-        temperature=0.7,
-        top_p=0.9,
-        max_tokens=max_tokens,
-    )
-    outputs = llm.generate([prompt], params)
-    return outputs[0].outputs[0].text
+    candidates = []
+    for seq in outputs:
+        decoded = tokenizer.decode(
+            seq[prompt_len:], skip_special_tokens=True,  # [new_tokens]
+        ).strip()
+        # Take only the first line — the prompt asks for a single caption
+        first_line = decoded.split("\n")[0].strip()
+        if first_line:
+            candidates.append(first_line)
+
+    return candidates
 
 
 # ============================================================================
@@ -210,9 +202,8 @@ def generate_rewrites(
     num_rewrites: int = 3,
     batch_size: int = 16,
     resume: bool = False,
-    max_retries: int = 3,
 ) -> None:
-    """Main generation loop with batching, checkpointing, and resume support."""
+    """Main generation loop with per-caption inference, checkpointing, and resume."""
 
     # Load existing progress if resuming
     existing = {}
@@ -229,7 +220,7 @@ def generate_rewrites(
         logger.info("All captions already processed. Nothing to do.")
         return
 
-    llm, tokenizer = load_model(model_name)
+    model, tokenizer = load_model(model_name)
 
     all_rewrites = dict(existing)
     total_batches = (len(remaining) + batch_size - 1) // batch_size
@@ -240,24 +231,36 @@ def generate_rewrites(
         end = min(start + batch_size, len(remaining))
         batch = remaining[start:end]
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                response_text = generate_batch(llm, tokenizer, batch, num_rewrites)
-                batch_rewrites = parse_response(response_text, batch, num_rewrites)
-                all_rewrites.update(batch_rewrites)
-                break
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
-                logger.warning(
-                    f"Batch {batch_idx+1}/{total_batches} attempt {attempt}: "
-                    f"parse error: {e}"
-                )
-                if attempt == max_retries:
-                    batch_sids = [c['sentid'] for c in batch]
-                    skipped_sentids.extend(batch_sids)
-                    logger.error(
-                        f"Batch {batch_idx+1} failed after {max_retries} attempts. "
-                        f"Skipping sentids: {batch_sids}"
+        for item in batch:
+            sentid = item["sentid"]
+            caption = item["caption"]
+
+            success = False
+            for attempt in range(2):  # at most 2 attempts (initial + 1 OOM retry)
+                try:
+                    candidates = generate_for_caption(
+                        model, tokenizer, caption, NUM_CANDIDATES,
                     )
+                    rewrites = select_unique_rewrites(
+                        candidates, caption, num_rewrites,
+                    )
+                    all_rewrites[sentid] = rewrites
+                    success = True
+                    break
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    if attempt == 0:
+                        logger.warning(
+                            f"CUDA OOM for sentid {sentid}, retrying after cache clear..."
+                        )
+                    else:
+                        logger.error(
+                            f"CUDA OOM for sentid {sentid} on retry. "
+                            f"Skipping (resume will catch it later)."
+                        )
+
+            if not success:
+                skipped_sentids.append(sentid)
 
         # Checkpoint every 50 batches
         if (batch_idx + 1) % 50 == 0 or batch_idx == total_batches - 1:
@@ -278,7 +281,7 @@ def generate_rewrites(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate LLM caption rewrites (LaCLIP-style) using local vllm"
+        description="Generate LLM caption rewrites (LaCLIP-style) using HuggingFace Transformers"
     )
     parser.add_argument(
         "--captions_path", type=str, required=True,
@@ -298,7 +301,7 @@ def main():
     )
     parser.add_argument(
         "--batch_size", type=int, default=16,
-        help="Captions per LLM call (default: 16)",
+        help="Checkpoint interval in captions (default: 16)",
     )
     parser.add_argument(
         "--resume", action="store_true",
