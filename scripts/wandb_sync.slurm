@@ -15,7 +15,7 @@
 #SBATCH --time=00:10:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.14
+#SBATCH --container-image=biremurhan/image-text-contrast:b5
 #SBATCH --container-mounts=/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/wandb_sync_%j.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/wandb_sync_%j.out

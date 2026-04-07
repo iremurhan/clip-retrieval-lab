@@ -14,7 +14,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=4
 #SBATCH --mem-per-gpu=24G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.14
+#SBATCH --container-image=biremurhan/image-text-contrast:b5
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/%j/wise_ft.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/%j/wise_ft.out
