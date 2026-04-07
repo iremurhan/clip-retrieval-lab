@@ -10,6 +10,9 @@ model:
   embed_dim: null
   unfreeze_vision_layers: 4
   unfreeze_strategy: "full"
+  # B5_seg only: size of the SAM segment-embedding table. Leave null to
+  # disable the variant entirely (zero overhead for B0/B0+/B1/B2/B3/FULL).
+  seg_embed_size: null
 
 loss:
   type: infonce

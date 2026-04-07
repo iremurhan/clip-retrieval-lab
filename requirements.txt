@@ -5,3 +5,4 @@ wandb==0.25.1
 eccv-caption
 nltk
 spacy
+segment-anything==1.0

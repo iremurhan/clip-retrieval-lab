@@ -69,8 +69,13 @@ def apply_overrides(config, overrides):
 def load_registry_overrides(run_id, registry_path="configs/registry.yaml"):
     """
     Load the overrides list for a named run from the registry.
+
+    Supports an optional `parent` field per entry: parents are resolved
+    recursively, depth-first, and the resulting kv pairs are concatenated
+    parent-first → child-last so that child overrides win on conflict.
+    Cycles raise ValueError; missing parents raise KeyError.
+
     Returns a list of 'key=value' strings compatible with apply_overrides().
-    Raises KeyError if run_id is not found in the registry.
     """
     if not os.path.isfile(registry_path):
         raise FileNotFoundError(f"Registry not found: {registry_path}")
@@ -79,8 +84,28 @@ def load_registry_overrides(run_id, registry_path="configs/registry.yaml"):
     runs = registry.get("runs", {})
     if run_id not in runs:
         raise KeyError(f"Run '{run_id}' not found in registry. Available: {list(runs.keys())}")
-    overrides_dict = runs[run_id].get("overrides") or {}
-    return [f"{k}={v}" for k, v in overrides_dict.items()]
+
+    def _collect(name, seen):
+        if name in seen:
+            raise ValueError(
+                f"Registry parent cycle detected: {' -> '.join(list(seen) + [name])}"
+            )
+        if name not in runs:
+            raise KeyError(
+                f"Registry parent '{name}' (referenced by '{run_id}') not found. "
+                f"Available: {list(runs.keys())}"
+            )
+        seen = seen | {name}
+        entry = runs[name]
+        result: list[str] = []
+        parent = entry.get("parent")
+        if parent:
+            result.extend(_collect(parent, seen))
+        own = entry.get("overrides") or {}
+        result.extend(f"{k}={v}" for k, v in own.items())
+        return result
+
+    return _collect(run_id, set())
 
 
 def setup_config(base_path=None, config_path=None, overrides=None):
