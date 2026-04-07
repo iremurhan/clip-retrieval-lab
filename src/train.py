@@ -102,6 +102,30 @@ class Trainer:
         else:
             logger.info("Paraphraser disabled (intra_txt_weight=0).")
 
+        # B5_seg gating: pulled once at init so the hot loop is a single
+        # branch. None for every other variant.
+        self.use_seg_ids = config.get('model', {}).get('seg_embed_size') is not None
+        if self.use_seg_ids:
+            logger.info(
+                f"B5_seg active in Trainer: model.seg_embed_size="
+                f"{config['model']['seg_embed_size']}"
+            )
+            if config['training']['use_grad_cache']:
+                # GradCache does not currently thread seg_ids through its
+                # cache/grad phases. Fail loud rather than silently dropping
+                # the segment-aware path mid-training.
+                raise RuntimeError(
+                    "B5_seg (model.seg_embed_size set) is incompatible with "
+                    "training.use_grad_cache=true. GradCache does not yet "
+                    "thread seg_ids; either disable grad_cache or extend "
+                    "src/grad_cache.py to forward seg_ids."
+                )
+        # B5_seg: running mean/std of unique-segment-count-per-image, only
+        # accumulated during the first epoch as a sanity check.
+        self._seg_unique_count_sum = 0.0
+        self._seg_unique_count_sq_sum = 0.0
+        self._seg_unique_count_n = 0
+
         # Initialize hard negative generator for B2 (POS-tag swapping)
         self.use_hard_negatives = config.get('loss', {}).get('hard_negatives', False)
         if self.use_hard_negatives:
@@ -225,6 +249,28 @@ class Trainer:
             input_ids = batch['input_ids'].to(self.device, non_blocking=True)
             attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
+            # B5_seg only: pull per-patch SAM segment IDs from the batch.
+            # Strict gating — fail loud if the variant is active but the
+            # collated batch is missing seg_ids.
+            seg_ids = None
+            if self.use_seg_ids:
+                if 'seg_ids' not in batch:
+                    raise KeyError(
+                        "B5_seg active (model.seg_embed_size set) but batch is "
+                        "missing 'seg_ids'. Check the dataloader factory."
+                    )
+                seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
+                # First-epoch sanity stat: number of unique segment IDs per
+                # image. Cheap (one set per row of a 576-long tensor on CPU).
+                if epoch == 0:
+                    # seg_ids: [B, 576] LongTensor on device
+                    seg_ids_cpu = seg_ids.detach().to('cpu')
+                    for row in seg_ids_cpu:
+                        n_unique = int(torch.unique(row).numel())
+                        self._seg_unique_count_sum += n_unique
+                        self._seg_unique_count_sq_sum += n_unique * n_unique
+                        self._seg_unique_count_n += 1
+
             neg_input_ids = batch.get('negative_input_ids')
             neg_attention_mask = batch.get('negative_attention_mask')
             if neg_input_ids is not None:
@@ -317,15 +363,22 @@ class Trainer:
                     # Zero gradients before forward to avoid stale gradient accumulation
                     self.optimizer.zero_grad()
                     with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
-                        img_embeds = self.model.encode_image(images)
+                        img_embeds = self.model.encode_image(images, seg_ids=seg_ids)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
                         neg_txt_embeds = None
                         if intra_img_weight > 0:
                             with torch.no_grad():
+                                # B5_seg: the augmented view uses RandomResizedCrop
+                                # scale=(0.4, 1.0), which breaks spatial alignment
+                                # with the precomputed segment map. Pass seg_ids=None
+                                # so this branch runs through standard CLIP — segment
+                                # enrichment is anchor-view-only, by design.
                                 img_aug_embeds = self.model.encode_image(
-                                    batch['image_aug'].to(self.device, non_blocking=True))
+                                    batch['image_aug'].to(self.device, non_blocking=True),
+                                    seg_ids=None,
+                                )
                         if intra_txt_weight > 0 and self.paraphraser is not None:
                             with torch.no_grad():
                                 para_ids, para_mask = self.paraphraser.generate(
@@ -412,14 +465,19 @@ class Trainer:
                 else:
                     # Standard precision training
                     self.optimizer.zero_grad()
-                    img_embeds = self.model.encode_image(images)
+                    img_embeds = self.model.encode_image(images, seg_ids=seg_ids)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
                     neg_txt_embeds = None
                     if intra_img_weight > 0:
                         with torch.no_grad():
-                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
+                            # B5_seg: augmented view skips seg enrichment — see
+                            # the AMP branch above for the full rationale.
+                            img_aug_embeds = self.model.encode_image(
+                                batch['image_aug'].to(self.device, non_blocking=True),
+                                seg_ids=None,
+                            )
                     if intra_txt_weight > 0 and self.paraphraser is not None:
                         with torch.no_grad():
                             para_ids, para_mask = self.paraphraser.generate(batch['caption'])
@@ -544,7 +602,28 @@ class Trainer:
                         wandb.log(log_dict)
                     except Exception as e:
                         logger.warning(f"Failed to log to W&B: {e}")
-        
+
+        # B5_seg first-epoch sanity check: log mean/std of unique segment
+        # IDs per image, accumulated across the entire epoch 0.
+        if self.use_seg_ids and epoch == 0 and self._seg_unique_count_n > 0:
+            n = self._seg_unique_count_n
+            mean = self._seg_unique_count_sum / n
+            var = max(self._seg_unique_count_sq_sum / n - mean * mean, 0.0)
+            std = var ** 0.5
+            logger.info(
+                f"[B5_seg] Unique segments per image (epoch 0, n={n}): "
+                f"mean={mean:.2f}, std={std:.2f}"
+            )
+            if self.use_wandb:
+                try:
+                    wandb.log({
+                        "b5_seg/unique_per_image_mean": mean,
+                        "b5_seg/unique_per_image_std": std,
+                        "epoch": epoch + 1,
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to log to W&B: {e}")
+
         return losses.avg
 
     @torch.no_grad()
@@ -565,8 +644,17 @@ class Trainer:
             input_ids = batch['input_ids'].to(self.device, non_blocking=True)
             attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
+            seg_ids = None
+            if self.use_seg_ids:
+                if 'seg_ids' not in batch:
+                    raise KeyError(
+                        "B5_seg active (model.seg_embed_size set) but eval batch is "
+                        "missing 'seg_ids'. Check the dataloader factory."
+                    )
+                seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
+
             with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
-                img_emb, txt_emb = self.model(images, input_ids, attention_mask)
+                img_emb, txt_emb = self.model(images, input_ids, attention_mask, seg_ids=seg_ids)
             img_embeds_list.append(img_emb.cpu())
             txt_embeds_list.append(txt_emb.cpu())
             image_ids_list.append(batch['image_id'].cpu())
@@ -649,6 +737,16 @@ class Trainer:
             f"  T2I: R@1: {metrics['val/r1_t2i']:.2f} | R@5: {metrics['val/r5_t2i']:.2f} | R@10: {metrics['val/r10_t2i']:.2f} | "
             f"mAP@R: {metrics['val/mapr_t2i']:.2f} | R-Prec: {metrics['val/rprecision_t2i']:.2f}"
         )
+
+        # B5_seg only: track Frobenius norm of the segment embedding table.
+        # Useful as a sanity check that the table is actually learning
+        # (it starts at 0 due to zero-init).
+        if self.use_seg_ids and self.model.seg_embedding is not None:
+            with torch.no_grad():
+                seg_w = self.model.seg_embedding.weight  # [n_seg, d_model]
+                seg_norm = float(torch.linalg.norm(seg_w).item())
+            metrics["val/seg_embedding_norm"] = seg_norm
+            logger.info(f"[B5_seg] seg_embedding_norm={seg_norm:.6f}")
 
         if self.use_wandb:
             log_data = dict(metrics)

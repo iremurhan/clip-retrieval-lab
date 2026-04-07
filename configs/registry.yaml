@@ -34,3 +34,10 @@ runs:
       loss.hard_negatives: true
       model.lora_rank: 8
       model.unfreeze_vision_layers: 0
+
+  B5_seg:
+    description: "B0 + segment-aware patch enrichment via SAM masks"
+    parent: B0
+    overrides:
+      model.seg_embed_size: 64
+      data.seg_map_dir: "precomputed/sam_masks/"

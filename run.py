@@ -49,12 +49,17 @@ def create_clip_optimizer(model, config):
     clip_proj_params = []
     custom_head_params = []
     backbone_params = []
+    seg_embed_params = []  # B5_seg only
 
     for n, p in trainable:
         if "visual_projection" in n or "text_projection" in n:
             clip_proj_params.append(p)
         elif "image_proj" in n or "text_proj" in n:
             custom_head_params.append(p)
+        elif "seg_embedding" in n:
+            # B5_seg: zero-initialized SAM segment table. Needs the same LR as
+            # the freshly-warmed projection layers, NOT the tiny backbone LR.
+            seg_embed_params.append(p)
         else:
             backbone_params.append(p)
 
@@ -69,6 +74,8 @@ def create_clip_optimizer(model, config):
         )
     if backbone_params:
         param_groups.append({"name": "backbone", "params": backbone_params, "lr": lr_backbone})
+    if seg_embed_params:
+        param_groups.append({"name": "seg_embedding", "params": seg_embed_params, "lr": lr_clip_proj})
 
     if opt_name == "adamw":
         return torch.optim.AdamW(param_groups, weight_decay=wd)

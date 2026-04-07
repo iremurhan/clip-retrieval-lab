@@ -22,6 +22,7 @@ import json
 import os
 import logging
 import random
+import numpy as np
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -246,6 +247,133 @@ class HardNegativeGenerator:
 
 
 # ============================================================================
+# Segment-Map Loader (B5_seg variant only)
+# ============================================================================
+
+class SegmentMapLoader:
+    """
+    Loads precomputed SAM segment maps and converts them to per-patch segment
+    IDs for the B5_seg variant. Only instantiated when
+    config['model']['seg_embed_size'] is not None.
+
+    Pipeline (per image, deterministic):
+        1. Load <seg_map_dir>/<filename_stem>.npz, key "seg" -> int32 (H_orig, W_orig)
+        2. Nearest-neighbor resize to (image_size, image_size).
+        3. Reshape into (grid, patch, grid, patch) and majority-vote per patch
+           -> (grid * grid,) int64 = 576 for ViT-L/14@336.
+        4. Modular wrap: seg_id = seg_id % n_seg.
+
+    The loader is intentionally I/O strict: a missing .npz raises
+    FileNotFoundError instead of silently substituting zeros.
+
+    Args:
+        seg_map_dir (str): Directory containing per-image .npz files.
+        image_size (int): Target spatial resolution (e.g. 336).
+        patch_size (int): ViT patch size (14 for ViT-L/14).
+        n_seg (int): Modular wrap base (segment embedding table size).
+    """
+
+    def __init__(self, seg_map_dir: str, image_size: int, patch_size: int, n_seg: int):
+        if not os.path.isdir(seg_map_dir):
+            raise FileNotFoundError(
+                f"seg_map_dir does not exist: {seg_map_dir}. "
+                "Run scripts/precompute_sam.py before training the B5_seg variant."
+            )
+        if image_size % patch_size != 0:
+            raise ValueError(
+                f"image_size={image_size} must be divisible by patch_size={patch_size}."
+            )
+        if n_seg < 1:
+            raise ValueError(f"n_seg must be >= 1, got {n_seg}")
+
+        self.seg_map_dir = seg_map_dir
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.grid_size = image_size // patch_size  # 24 for 336/14
+        self.num_patches = self.grid_size * self.grid_size  # 576
+        self.n_seg = n_seg
+
+    def _resolve_path(self, filename: str) -> str:
+        # Key by filename stem so the loader works for both COCO
+        # ("COCO_train2014_000000000009.jpg") and Flickr30k ("1000092795.jpg").
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        return os.path.join(self.seg_map_dir, f"{stem}.npz")
+
+    def load(self, filename: str) -> torch.Tensor:
+        """
+        Load and patchify the segment map for one image.
+
+        Returns:
+            seg_ids: LongTensor of shape (num_patches,) = (576,) for ViT-L/14@336.
+        """
+        path = self._resolve_path(filename)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"Segment map not found: {path}. "
+                "B5_seg requires precomputed SAM masks for every training image."
+            )
+
+        with np.load(path) as npz:
+            if "seg" not in npz.files:
+                raise KeyError(
+                    f"Segment map file {path} missing required key 'seg'. "
+                    f"Available keys: {npz.files}"
+                )
+            seg = npz["seg"]  # (H_orig, W_orig), int32
+
+        if seg.ndim != 2:
+            raise ValueError(
+                f"Segment map at {path} has shape {seg.shape}, expected 2D (H, W)."
+            )
+
+        # Step 1: nearest-neighbor resize to (image_size, image_size).
+        # PIL.Image.resize with NEAREST never blends IDs across boundaries.
+        # We cast to int32 first because PIL only accepts int32 / uint8 / float
+        # for mode='I'; int32 round-trips losslessly through mode='I'.
+        seg_int32 = seg.astype(np.int32, copy=False)
+        seg_pil = Image.fromarray(seg_int32, mode="I")
+        seg_pil = seg_pil.resize(
+            (self.image_size, self.image_size), resample=Image.Resampling.NEAREST
+        )
+        seg_resized = np.asarray(seg_pil, dtype=np.int64)  # (image_size, image_size)
+
+        if seg_resized.shape != (self.image_size, self.image_size):
+            raise RuntimeError(
+                f"Resized segment map has shape {seg_resized.shape}, "
+                f"expected ({self.image_size}, {self.image_size})."
+            )
+
+        # Step 2: Apply modular wrap BEFORE majority vote so patches that span
+        # multiple raw IDs (which would all be wrapped to the same bucket) cast
+        # their votes consistently.
+        seg_resized = seg_resized % self.n_seg
+
+        # Step 3: Reshape into (grid, patch_size, grid, patch_size) and
+        # majority-vote per (grid, grid) cell.
+        g, p = self.grid_size, self.patch_size
+        # (g, p, g, p) -> (g, g, p, p) -> (g*g, p*p)
+        cells = seg_resized.reshape(g, p, g, p).transpose(0, 2, 1, 3).reshape(g * g, p * p)
+
+        # np.bincount along axis=1 with minlength=n_seg, then argmax.
+        # Vectorized: build offsets so each row's bincount is independent.
+        # Shape transformation: (576, 196) -> (576,)
+        offsets = (np.arange(cells.shape[0], dtype=np.int64) * self.n_seg)[:, None]
+        flat = (cells + offsets).reshape(-1)
+        counts = np.bincount(flat, minlength=cells.shape[0] * self.n_seg)
+        counts = counts.reshape(cells.shape[0], self.n_seg)  # (576, n_seg)
+        majority = np.argmax(counts, axis=1).astype(np.int64)  # (576,)
+
+        seg_ids = torch.from_numpy(majority).long()  # (576,)
+        # Bounds check: every ID must lie within [0, n_seg).
+        if seg_ids.min().item() < 0 or seg_ids.max().item() >= self.n_seg:
+            raise ValueError(
+                f"seg_ids out of bounds at {path}: "
+                f"min={seg_ids.min().item()}, max={seg_ids.max().item()}, n_seg={self.n_seg}"
+            )
+        return seg_ids
+
+
+# ============================================================================
 # Dataset
 # ============================================================================
 
@@ -259,6 +387,7 @@ class CaptionImageDataset(Dataset):
         split='train',
         transform=None,
         transform_aug=None,
+        seg_loader=None,
     ):
         """
         Args:
@@ -276,6 +405,8 @@ class CaptionImageDataset(Dataset):
         self.split = split
         self.transform = transform
         self.transform_aug = transform_aug
+        # B5_seg only: per-image SAM segment-map loader. None for all other variants.
+        self.seg_loader = seg_loader
 
         # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
@@ -354,7 +485,7 @@ class CaptionImageDataset(Dataset):
             return_tensors='pt'
         )
 
-        return {
+        out = {
             'image': img_tensor,
             'image_aug': img_aug_tensor,
             'caption': caption,
@@ -363,6 +494,14 @@ class CaptionImageDataset(Dataset):
             'image_id': image_id,
             'sentid': sample['sentid'],
         }
+
+        # B5_seg only: attach per-patch segment IDs alongside the existing
+        # batch entries. Strictly gated by the presence of seg_loader so that
+        # other variants pay zero I/O / collate cost.
+        if self.seg_loader is not None:
+            out['seg_ids'] = self.seg_loader.load(filename)  # LongTensor (576,)
+
+        return out
 
 
 # ============================================================================
@@ -405,6 +544,39 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform = build_eval_transform(image_size)
         transform_aug = transform
 
+    # B5_seg gating: build SegmentMapLoader only if model.seg_embed_size is set.
+    # Every other variant pays zero overhead (no .npz I/O, no extra batch keys).
+    seg_loader = None
+    if config.get('model', {}).get('seg_embed_size') is not None:
+        seg_map_dir = config['data']['seg_map_dir']
+        n_seg = config['model']['seg_embed_size']
+        # patch_size is derived from the CLIP model name, not hardcoded:
+        # 'clip-vit-large-patch14-336' -> patch=14. Matches the only model
+        # supported by this project (see configs/config_base.yaml).
+        model_name = config['model']['image_model_name']
+        if 'patch14' in model_name:
+            patch_size = 14
+        elif 'patch16' in model_name:
+            patch_size = 16
+        elif 'patch32' in model_name:
+            patch_size = 32
+        else:
+            raise ValueError(
+                f"Cannot infer ViT patch size from image_model_name={model_name!r}. "
+                "Add a branch to create_image_text_dataloader for this model."
+            )
+        seg_loader = SegmentMapLoader(
+            seg_map_dir=seg_map_dir,
+            image_size=image_size,
+            patch_size=patch_size,
+            n_seg=n_seg,
+        )
+        logger.info(
+            f"B5_seg seg_loader: dir={seg_map_dir}, image_size={image_size}, "
+            f"patch_size={patch_size}, grid={seg_loader.grid_size}x{seg_loader.grid_size}, "
+            f"n_seg={n_seg}"
+        )
+
     dataset = CaptionImageDataset(
         images_root_path=images_root,
         captions_path=captions_path,
@@ -413,6 +585,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         split=split,
         transform=transform,
         transform_aug=transform_aug,
+        seg_loader=seg_loader,
     )
 
     seed = config['training']['seed']
