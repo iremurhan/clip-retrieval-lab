@@ -1,16 +1,21 @@
 """
 src/paraphraser.py
 ------------------
-Two paraphraser implementations for intra-modal text contrastive loss
+Three paraphraser implementations for intra-modal text contrastive loss
 L_text_text = InfoNCE(T_orig, T_paraphrased):
 
-  NLTKParaphraser      — fast, CPU-only: synonym replacement via WordNet.
-                         No GPU, no LLM, no external API. Default path.
+  NLTKParaphraser           — fast, CPU-only: synonym replacement via WordNet.
+                               No GPU, no LLM, no external API. Default path.
 
-  PrecomputedParaphraser — tokenizes paraphrase strings already embedded
-                           in the dataset JSON (generated offline). Fastest.
+  PrecomputedParaphraser    — tokenizes paraphrase strings already embedded
+                               in the dataset JSON (generated offline). Fastest.
+
+  PrecomputedLLMParaphraser — loads LLM-generated rewrites from a JSON file
+                               ({sentid: [r1, r2, r3]}), picks a random
+                               rewrite per sample. LaCLIP-style.
 """
 
+import json
 import random
 import logging
 
@@ -145,6 +150,82 @@ class PrecomputedParaphraser:
                 f"PrecomputedParaphraser: {empty_count}/{len(texts)} samples "
                 f"({100 * empty_count / len(texts):.1f}%) have empty paraphrases. "
                 f"Intra-text loss contribution will be near zero for these samples."
+            )
+
+        tokenized = self.tokenizer(
+            texts,
+            padding='max_length',
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors='pt',
+        )
+        return (
+            tokenized['input_ids'].to(self.device),       # [N, max_length]
+            tokenized['attention_mask'].to(self.device),  # [N, max_length]
+        )
+
+
+class PrecomputedLLMParaphraser:
+    """
+    Loads LLM-generated caption rewrites from a JSON file produced by
+    scripts/generate_rewrites.py and returns a random rewrite per sample.
+
+    JSON format: {sentid_str: [rewrite1, rewrite2, ...]}
+
+    Args:
+        rewrites_path: str — path to the caption_rewrites.json file.
+        tokenizer:     CLIPTokenizer — tokenizes selected rewrites.
+        device:        torch.device — output tensors placed on this device.
+        max_length:    int — CLIP token sequence length (default: 77).
+        seed:          int — RNG seed for reproducibility.
+    """
+
+    def __init__(self, rewrites_path: str, tokenizer, device: torch.device,
+                 max_length: int = 77, seed: int = 42):
+        if not rewrites_path or not __import__('os').path.exists(rewrites_path):
+            raise FileNotFoundError(
+                f"LLM rewrites file not found: {rewrites_path}. "
+                "Run scripts/generate_rewrites.py first."
+            )
+        with open(rewrites_path, 'r') as f:
+            raw = json.load(f)
+        # Keys in JSON are strings — convert to int
+        self.rewrites = {int(k): v for k, v in raw.items()}
+        self.tokenizer = tokenizer
+        self.device = device
+        self.max_length = max_length
+        self.rng = random.Random(seed)
+        logger.info(
+            f"PrecomputedLLMParaphraser loaded {len(self.rewrites)} sentids "
+            f"from {rewrites_path}"
+        )
+
+    def generate(self, sentids: list) -> tuple:
+        """
+        Pick a random rewrite for each sentid and tokenize for CLIP.
+
+        Args:
+            sentids: list[int] of length N — sentence IDs from the batch.
+
+        Returns:
+            para_input_ids:      [N, max_length] LongTensor on self.device
+            para_attention_mask: [N, max_length] LongTensor on self.device
+        """
+        texts = []
+        missing = 0
+        for sid in sentids:
+            sid_int = int(sid)
+            rw_list = self.rewrites.get(sid_int)
+            if rw_list:
+                texts.append(self.rng.choice(rw_list))
+            else:
+                texts.append("")
+                missing += 1
+
+        if missing > 0:
+            logger.warning(
+                f"PrecomputedLLMParaphraser: {missing}/{len(sentids)} sentids "
+                f"missing from rewrites file. Using empty string fallback."
             )
 
         tokenized = self.tokenizer(

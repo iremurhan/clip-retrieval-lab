@@ -24,6 +24,7 @@ import os
 import time
 import random
 from .metrics import AverageMeter, compute_recall_at_k, compute_eccv_metrics
+import torch.nn.functional as F
 from .utils import compute_grad_norm, chunked_matmul
 from .grad_cache import GradCache
 
@@ -80,11 +81,24 @@ class Trainer:
         
         # Initialize paraphraser for L_text_text = InfoNCE(T_orig, T_paraphrased)
         self.paraphraser = None
+        self._paraphraser_uses_sentids = False
         para_cfg = config['paraphraser']
+        para_type = para_cfg.get('type', 'nltk')
         paraphrase_path = para_cfg['precomputed_path']
         intra_txt_weight = config['loss']['intra_txt_weight']
         if intra_txt_weight > 0:
-            if paraphrase_path and os.path.exists(paraphrase_path):
+            if para_type == 'llm_precomputed':
+                from .paraphraser import PrecomputedLLMParaphraser
+                self.paraphraser = PrecomputedLLMParaphraser(
+                    rewrites_path=paraphrase_path,
+                    tokenizer=clip_tokenizer,
+                    device=device,
+                    max_length=config['data']['max_length'],
+                    seed=config['training']['seed'],
+                )
+                self._paraphraser_uses_sentids = True
+                logger.info("Using LLM pre-computed paraphraser (LaCLIP-style).")
+            elif paraphrase_path and os.path.exists(paraphrase_path):
                 from .paraphraser import PrecomputedParaphraser
                 self.paraphraser = PrecomputedParaphraser(
                     clip_tokenizer, device,
@@ -112,6 +126,25 @@ class Trainer:
             logger.info("Hard negative generator initialized (spaCy POS-tag swapping).")
         else:
             self.hard_neg_generator = None
+
+        # Initialize multi-label classification auxiliary loss
+        self.cls_weight = config['loss'].get('cls_weight', 0.0)
+        if self.cls_weight > 0:
+            cls_label_path = config['loss'].get('cls_label_path')
+            if not cls_label_path or not os.path.isfile(cls_label_path):
+                raise FileNotFoundError(
+                    f"cls_weight={self.cls_weight} but cls_label_path is missing or invalid: "
+                    f"'{cls_label_path}'. Run tools/build_coco_multilabel.py first."
+                )
+            self.cls_label_map = torch.load(cls_label_path, map_location=self.device)
+            num_cls = config['loss']['cls_num_classes']
+            self._cls_zero_vec = torch.zeros(num_cls, dtype=torch.float32, device=self.device)
+            logger.info(
+                f"Multi-label classification enabled: weight={self.cls_weight}, "
+                f"{len(self.cls_label_map)} images loaded from {cls_label_path}"
+            )
+        else:
+            self.cls_label_map = None
 
         # SIGTERM flag — set externally via signal handler in run.py
         self._sigterm_received = False
@@ -268,8 +301,8 @@ class Trainer:
                 # Generate paraphrases for full batch before GradCache phases
                 para_input_ids, para_attention_mask = None, None
                 if intra_txt_weight > 0 and self.paraphraser is not None:
-                    captions = batch['caption']  # list[str], len=N
-                    para_input_ids, para_attention_mask = self.paraphraser.generate(captions)
+                    para_arg = batch['sentid'].tolist() if self._paraphraser_uses_sentids else batch['caption']
+                    para_input_ids, para_attention_mask = self.paraphraser.generate(para_arg)
                     # para_input_ids: [N, 77], para_attention_mask: [N, 77]
 
                 image_aug = (
@@ -317,7 +350,11 @@ class Trainer:
                     # Zero gradients before forward to avoid stale gradient accumulation
                     self.optimizer.zero_grad()
                     with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
-                        img_embeds = self.model.encode_image(images)
+                        cls_logits = None
+                        if self.cls_weight > 0 and self.model.cls_head is not None:
+                            img_embeds, cls_logits = self.model.encode_image_with_cls(images)
+                        else:
+                            img_embeds = self.model.encode_image(images)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
@@ -328,8 +365,8 @@ class Trainer:
                                     batch['image_aug'].to(self.device, non_blocking=True))
                         if intra_txt_weight > 0 and self.paraphraser is not None:
                             with torch.no_grad():
-                                para_ids, para_mask = self.paraphraser.generate(
-                                    batch['caption'])
+                                para_arg = batch['sentid'].tolist() if self._paraphraser_uses_sentids else batch['caption']
+                                para_ids, para_mask = self.paraphraser.generate(para_arg)
                                 txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
                         if self.hard_neg_generator is not None:
                             captions = batch['caption']
@@ -395,6 +432,18 @@ class Trainer:
                         )
                         loss = loss_dict["loss_total"]
 
+                        # Multi-label classification auxiliary loss
+                        if cls_logits is not None:
+                            image_ids = batch['image_id']
+                            label_vecs = torch.stack(
+                                [self.cls_label_map.get(iid.item(), self._cls_zero_vec) for iid in image_ids]
+                            )  # [B, 80]
+                            loss_cls = F.binary_cross_entropy_with_logits(
+                                cls_logits, label_vecs)  # scalar
+                            loss = loss + self.cls_weight * loss_cls
+                            loss_dict["loss_cls"] = loss_cls
+                            loss_dict["loss_total"] = loss
+
                     # Backward with gradient scaling
                     self.scaler.scale(loss).backward()
                     
@@ -412,7 +461,11 @@ class Trainer:
                 else:
                     # Standard precision training
                     self.optimizer.zero_grad()
-                    img_embeds = self.model.encode_image(images)
+                    cls_logits = None
+                    if self.cls_weight > 0 and self.model.cls_head is not None:
+                        img_embeds, cls_logits = self.model.encode_image_with_cls(images)
+                    else:
+                        img_embeds = self.model.encode_image(images)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
@@ -422,7 +475,8 @@ class Trainer:
                             img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
                     if intra_txt_weight > 0 and self.paraphraser is not None:
                         with torch.no_grad():
-                            para_ids, para_mask = self.paraphraser.generate(batch['caption'])
+                            para_arg = batch['sentid'].tolist() if self._paraphraser_uses_sentids else batch['caption']
+                            para_ids, para_mask = self.paraphraser.generate(para_arg)
                             txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
                     if self.hard_neg_generator is not None:
                         captions = batch['caption']
@@ -488,6 +542,18 @@ class Trainer:
                     )
                     loss = loss_dict["loss_total"]
 
+                    # Multi-label classification auxiliary loss
+                    if cls_logits is not None:
+                        image_ids = batch['image_id']
+                        label_vecs = torch.stack(
+                            [self.cls_label_map.get(iid.item(), self._cls_zero_vec) for iid in image_ids]
+                        )  # [B, 80]
+                        loss_cls = F.binary_cross_entropy_with_logits(
+                            cls_logits, label_vecs)  # scalar
+                        loss = loss + self.cls_weight * loss_cls
+                        loss_dict["loss_cls"] = loss_cls
+                        loss_dict["loss_total"] = loss
+
                     loss.backward()
 
                     # Compute grad norm before optimizer step
@@ -540,6 +606,8 @@ class Trainer:
                             "train/samples_per_sec": samples_per_sec,
                             "train/batch_time": batch_time.val,
                         }
+                        if "loss_cls" in loss_dict:
+                            log_dict["train/loss_cls"] = loss_dict["loss_cls"].item()
                         log_dict.update(lr_dict)
                         wandb.log(log_dict)
                     except Exception as e:
