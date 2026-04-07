@@ -218,7 +218,7 @@ def main():
     finally:
         if wandb.run is not None:
             try:
-                wandb.finish(timeout=30)
+                wandb.finish()
             except Exception as e:
                 log.warning(f"wandb.finish() failed: {e}")
 
