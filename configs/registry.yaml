@@ -27,6 +27,12 @@ runs:
       model.lora_rank: 8
       model.unfreeze_vision_layers: 0
 
+  B4:
+    description: "B0+ + multi-label classification auxiliary loss (80 COCO categories)"
+    overrides:
+      loss.cls_weight: 1.0
+      loss.cls_num_classes: 80
+
   FULL:
     description: "B0+ + SigLIP + hard negatives + LoRA"
     overrides:
