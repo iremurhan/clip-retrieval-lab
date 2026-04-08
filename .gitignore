@@ -18,3 +18,5 @@ checkpoints
 
 # Weights & Biases
 wandb/
+
+*.npz
