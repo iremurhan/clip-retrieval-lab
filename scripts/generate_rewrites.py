@@ -17,7 +17,7 @@ Usage (GPU required — submit via sbatch):
         --output_path datasets/coco/caption_rewrites.json \
         --model mistralai/Mistral-7B-Instruct-v0.2 \
         --num_rewrites 3 \
-        --batch_size 16 \
+        --checkpoint_every 200 \
         --resume
 
     python scripts/generate_rewrites.py \
@@ -86,10 +86,17 @@ def load_captions(captions_path: str) -> list[dict]:
 # ============================================================================
 
 def build_chat_messages(caption: str) -> list[dict]:
-    """Build chat messages (system + user) for a single caption."""
+    """Build chat messages for a single caption.
+
+    Prepends the system prompt into the user message because several
+    instruction-tuned models (e.g. Mistral-7B-Instruct-v0.2) do not
+    support a dedicated system role in their chat template.
+    """
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Rewrite this caption:\n{caption}"},
+        {
+            "role": "user",
+            "content": f"{SYSTEM_PROMPT}\n\nRewrite this caption:\n{caption}",
+        },
     ]
 
 
@@ -167,6 +174,7 @@ def generate_for_caption(
             do_sample=True,
             temperature=0.7,
             top_p=0.9,
+            pad_token_id=tokenizer.eos_token_id,
         )  # [num_candidates, seq_len + new_tokens]
 
     candidates = []
@@ -200,10 +208,15 @@ def generate_rewrites(
     output_path: str,
     model_name: str,
     num_rewrites: int = 3,
-    batch_size: int = 16,
+    checkpoint_every: int = 200,
     resume: bool = False,
 ) -> None:
-    """Main generation loop with per-caption inference, checkpointing, and resume."""
+    """Main generation loop with per-caption inference, checkpointing, and resume.
+
+    Note: inference is per-caption (not batched across captions). The
+    ``checkpoint_every`` argument controls how frequently progress is
+    persisted to disk, measured in number of processed captions.
+    """
 
     # Load existing progress if resuming
     existing = {}
@@ -223,51 +236,45 @@ def generate_rewrites(
     model, tokenizer = load_model(model_name)
 
     all_rewrites = dict(existing)
-    total_batches = (len(remaining) + batch_size - 1) // batch_size
     skipped_sentids = []
+    total = len(remaining)
 
-    for batch_idx in range(total_batches):
-        start = batch_idx * batch_size
-        end = min(start + batch_size, len(remaining))
-        batch = remaining[start:end]
+    for i, item in enumerate(remaining):
+        sentid = item["sentid"]
+        caption = item["caption"]
 
-        for item in batch:
-            sentid = item["sentid"]
-            caption = item["caption"]
-
-            success = False
-            for attempt in range(2):  # at most 2 attempts (initial + 1 OOM retry)
-                try:
-                    candidates = generate_for_caption(
-                        model, tokenizer, caption, NUM_CANDIDATES,
+        success = False
+        for attempt in range(2):  # at most 2 attempts (initial + 1 OOM retry)
+            try:
+                candidates = generate_for_caption(
+                    model, tokenizer, caption, NUM_CANDIDATES,
+                )
+                rewrites = select_unique_rewrites(
+                    candidates, caption, num_rewrites,
+                )
+                all_rewrites[sentid] = rewrites
+                success = True
+                break
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if attempt == 0:
+                    logger.warning(
+                        f"CUDA OOM for sentid {sentid}, retrying after cache clear..."
                     )
-                    rewrites = select_unique_rewrites(
-                        candidates, caption, num_rewrites,
+                else:
+                    logger.error(
+                        f"CUDA OOM for sentid {sentid} on retry. "
+                        f"Skipping (resume will catch it later)."
                     )
-                    all_rewrites[sentid] = rewrites
-                    success = True
-                    break
-                except torch.cuda.OutOfMemoryError:
-                    torch.cuda.empty_cache()
-                    if attempt == 0:
-                        logger.warning(
-                            f"CUDA OOM for sentid {sentid}, retrying after cache clear..."
-                        )
-                    else:
-                        logger.error(
-                            f"CUDA OOM for sentid {sentid} on retry. "
-                            f"Skipping (resume will catch it later)."
-                        )
 
-            if not success:
-                skipped_sentids.append(sentid)
+        if not success:
+            skipped_sentids.append(sentid)
 
-        # Checkpoint every 50 batches
-        if (batch_idx + 1) % 50 == 0 or batch_idx == total_batches - 1:
+        # Periodic checkpoint
+        if (i + 1) % checkpoint_every == 0 or (i + 1) == total:
             _save(all_rewrites, output_path)
             logger.info(
-                f"[{batch_idx+1}/{total_batches}] "
-                f"Saved {len(all_rewrites)} sentids to {output_path}"
+                f"[{i+1}/{total}] Saved {len(all_rewrites)} sentids to {output_path}"
             )
 
     _save(all_rewrites, output_path)
@@ -300,8 +307,8 @@ def main():
         help="Number of rewrites per caption (default: 3)",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=16,
-        help="Checkpoint interval in captions (default: 16)",
+        "--checkpoint_every", type=int, default=200,
+        help="Persist progress every N captions (default: 200)",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -315,7 +322,7 @@ def main():
         output_path=args.output_path,
         model_name=args.model,
         num_rewrites=args.num_rewrites,
-        batch_size=args.batch_size,
+        checkpoint_every=args.checkpoint_every,
         resume=args.resume,
     )
 
