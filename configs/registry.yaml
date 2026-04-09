@@ -12,10 +12,9 @@ runs:
     overrides: {}  # current defaults, no changes needed
 
   B0v2:
-    description: "B0+ with improved augmentation: LLM caption rewrites (replacing WordNet), reduced image aug (crop 0.7+, no grayscale), separate aug pipelines for inter/intra-modal"
+    description: "B0+ with improved augmentation: LLM caption rewrites (replacing WordNet), reduced image aug (crop 0.7+, no grayscale), separate aug pipelines for inter/intra-modal. precomputed_path is set per-dataset in config_{coco,flickr30k}.yaml."
     overrides:
       paraphraser.type: "llm_precomputed"
-      paraphraser.precomputed_path: "datasets/coco/caption_rewrites_mistral-7b-instruct-v0.2.json"
       augment.aug_crop_scale_min: 0.7
       augment.color_jitter_strength: 0.2
       augment.use_grayscale: false
