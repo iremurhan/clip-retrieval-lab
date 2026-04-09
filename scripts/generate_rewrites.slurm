@@ -13,6 +13,12 @@
 #   sbatch scripts/generate_rewrites.slurm flickr
 #   sbatch scripts/generate_rewrites.slurm coco meta-llama/Meta-Llama-3-8B-Instruct
 #
+# Smoke test (process only first N captions, e.g. 32):
+#   SMOKE_TEST=32 sbatch scripts/generate_rewrites.slurm coco
+#
+# Override batch size (default: 16):
+#   BATCH_SIZE=8 sbatch scripts/generate_rewrites.slurm coco
+#
 # Resume (safe to resubmit — always appends):
 #   sbatch scripts/generate_rewrites.slurm coco
 #
@@ -34,6 +40,8 @@ set -euo pipefail
 
 DATASET="${1:-coco}"
 MODEL="${2:-mistralai/Mistral-7B-Instruct-v0.2}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+SMOKE_TEST="${SMOKE_TEST:-0}"
 
 case "$DATASET" in
     coco)
@@ -53,7 +61,12 @@ esac
 # Derive output filename from model name:
 #   mistralai/Mistral-7B-Instruct-v0.2 -> caption_rewrites_mistral-7b-instruct-v0.2.json
 MODEL_SLUG=$(echo "$MODEL" | awk -F/ '{print $NF}' | tr '[:upper:]' '[:lower:]')
-OUTPUT_PATH="${OUTPUT_DIR}/caption_rewrites_${MODEL_SLUG}.json"
+if [ "$SMOKE_TEST" -gt 0 ]; then
+    # Smoke test writes to a separate file so it cannot pollute the real run
+    OUTPUT_PATH="${OUTPUT_DIR}/caption_rewrites_${MODEL_SLUG}_smoke${SMOKE_TEST}.json"
+else
+    OUTPUT_PATH="${OUTPUT_DIR}/caption_rewrites_${MODEL_SLUG}.json"
+fi
 
 JOB_DIR="/output/results/rewrites/${SLURM_JOB_ID}"
 mkdir -p "$JOB_DIR"
@@ -64,6 +77,8 @@ echo "Dataset:     ${DATASET}"
 echo "Model:       ${MODEL}"
 echo "Captions:    ${CAPTIONS_PATH}"
 echo "Output:      ${OUTPUT_PATH}"
+echo "Batch size:  ${BATCH_SIZE}"
+echo "Smoke test:  ${SMOKE_TEST} (0 = full run)"
 echo "Log:         ${JOB_DIR}/generate.log"
 echo "=========================================="
 
@@ -72,16 +87,20 @@ export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 
 echo "Starting rewrite generation..."
 
+# Disable errexit around the python call so the failure banner runs even on
+# non-zero exit. tee mirrors output to BOTH the slurm out file and generate.log
+# so you can see progress in either place.
+set +e
 python3 -u scripts/generate_rewrites.py \
     --captions_path "$CAPTIONS_PATH" \
     --output_path "$OUTPUT_PATH" \
     --model "$MODEL" \
     --num_rewrites 3 \
-    --batch_size 16 \
-    --resume \
-    > "$JOB_DIR/generate.log" 2>&1
-
-EXIT_CODE=$?
+    --batch_size "$BATCH_SIZE" \
+    --smoke_test "$SMOKE_TEST" \
+    --resume 2>&1 | tee "$JOB_DIR/generate.log"
+EXIT_CODE=${PIPESTATUS[0]}
+set -e
 
 echo ""
 echo "=========================================="

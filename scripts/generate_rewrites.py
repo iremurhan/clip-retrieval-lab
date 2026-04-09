@@ -32,13 +32,18 @@ import argparse
 import json
 import logging
 import os
+import sys
+import time
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+# Force line-buffered stdout so SLURM logs flush immediately
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
@@ -137,34 +142,56 @@ def select_unique_rewrites(
 
 def load_model(model_name: str) -> tuple:
     """Load model and tokenizer via HuggingFace Transformers."""
+    logger.info(f"Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    # Decoder-only LMs require LEFT padding so generated tokens align across the batch
+    tokenizer.padding_side = "left"
 
+    logger.info(f"Loading model weights (bfloat16, device_map=auto): {model_name}")
+    t0 = time.time()
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.bfloat16,
         device_map="auto",
     )
     model.eval()
-    logger.info(f"Model loaded: {model_name}")
+    logger.info(f"Model loaded in {time.time() - t0:.1f}s")
     return model, tokenizer
 
 
-def generate_for_caption(
-    model, tokenizer, caption: str, num_candidates: int,
-) -> list[str]:
-    """Generate multiple rewrite candidates for a single caption.
+def generate_for_batch(
+    model, tokenizer, captions: list, num_candidates: int,
+) -> list:
+    """Generate rewrite candidates for a BATCH of captions in a single forward pass.
 
-    Returns list of decoded candidate strings (may contain duplicates).
+    Args:
+        model:          loaded HF causal LM
+        tokenizer:      tokenizer with padding_side='left'
+        captions:       list[str] of length B
+        num_candidates: number of candidates per caption (num_return_sequences)
+
+    Returns:
+        list of length B, each entry is a list[str] of candidate rewrites for
+        that caption (after stripping prompt + first-line extraction).
+
     Raises torch.cuda.OutOfMemoryError on CUDA OOM (caller handles retry).
     """
-    messages = build_chat_messages(caption)
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True,
-    )
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    prompt_len = inputs["input_ids"].shape[1]  # [1, seq_len]
+    prompts = [
+        tokenizer.apply_chat_template(
+            build_chat_messages(c), tokenize=False, add_generation_prompt=True,
+        )
+        for c in captions
+    ]
+    inputs = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=512,
+    ).to(model.device)
+    prompt_len = inputs["input_ids"].shape[1]  # [B, prompt_len] after left-padding
 
     with torch.no_grad():
         outputs = model.generate(
@@ -175,19 +202,25 @@ def generate_for_caption(
             temperature=0.7,
             top_p=0.9,
             pad_token_id=tokenizer.eos_token_id,
-        )  # [num_candidates, seq_len + new_tokens]
+        )  # [B * num_candidates, prompt_len + new_tokens]
 
-    candidates = []
-    for seq in outputs:
-        decoded = tokenizer.decode(
-            seq[prompt_len:], skip_special_tokens=True,  # [new_tokens]
-        ).strip()
-        # Take only the first line — the prompt asks for a single caption
-        first_line = decoded.split("\n")[0].strip()
-        if first_line:
-            candidates.append(first_line)
+    # Slice off prompt portion (uniform thanks to left-padding)
+    new_tokens = outputs[:, prompt_len:]  # [B * num_candidates, new_tokens]
+    decoded = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
 
-    return candidates
+    # Group num_candidates outputs per input caption
+    batch_candidates = []
+    for i in range(len(captions)):
+        start = i * num_candidates
+        end = start + num_candidates
+        cands = []
+        for text in decoded[start:end]:
+            first_line = text.strip().split("\n")[0].strip()
+            if first_line:
+                cands.append(first_line)
+        batch_candidates.append(cands)
+
+    return batch_candidates
 
 
 # ============================================================================
@@ -204,18 +237,20 @@ def _save(rewrites: dict, path: str) -> None:
 
 
 def generate_rewrites(
-    captions: list[dict],
+    captions: list,
     output_path: str,
     model_name: str,
     num_rewrites: int = 3,
+    batch_size: int = 8,
     checkpoint_every: int = 200,
     resume: bool = False,
 ) -> None:
-    """Main generation loop with per-caption inference, checkpointing, and resume.
+    """Main generation loop with batched inference, checkpointing, and resume.
 
-    Note: inference is per-caption (not batched across captions). The
-    ``checkpoint_every`` argument controls how frequently progress is
-    persisted to disk, measured in number of processed captions.
+    Inference is batched across captions: ``batch_size`` prompts go through
+    one ``.generate()`` call, producing ``batch_size * NUM_CANDIDATES`` output
+    sequences. ``checkpoint_every`` is measured in number of processed
+    captions (not batches), and is rounded up to the nearest batch boundary.
     """
 
     # Load existing progress if resuming
@@ -238,44 +273,70 @@ def generate_rewrites(
     all_rewrites = dict(existing)
     skipped_sentids = []
     total = len(remaining)
+    processed_since_save = 0
+    t_start = time.time()
 
-    for i, item in enumerate(remaining):
-        sentid = item["sentid"]
-        caption = item["caption"]
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch_items = remaining[batch_start:batch_end]
+        batch_captions = [it["caption"] for it in batch_items]
+        batch_sentids = [it["sentid"] for it in batch_items]
 
+        # Try batched generation; on OOM, halve the batch and retry, falling
+        # back to per-caption inference at batch_size=1.
         success = False
-        for attempt in range(2):  # at most 2 attempts (initial + 1 OOM retry)
+        current_bs = len(batch_captions)
+        sub_batches = [(batch_captions, batch_sentids)]
+        for attempt in range(3):
             try:
-                candidates = generate_for_caption(
-                    model, tokenizer, caption, NUM_CANDIDATES,
-                )
-                rewrites = select_unique_rewrites(
-                    candidates, caption, num_rewrites,
-                )
-                all_rewrites[sentid] = rewrites
+                for sub_caps, sub_sids in sub_batches:
+                    cand_lists = generate_for_batch(
+                        model, tokenizer, sub_caps, NUM_CANDIDATES,
+                    )
+                    for sid, cap, cands in zip(sub_sids, sub_caps, cand_lists):
+                        all_rewrites[sid] = select_unique_rewrites(
+                            cands, cap, num_rewrites,
+                        )
                 success = True
                 break
             except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
-                if attempt == 0:
-                    logger.warning(
-                        f"CUDA OOM for sentid {sentid}, retrying after cache clear..."
-                    )
-                else:
-                    logger.error(
-                        f"CUDA OOM for sentid {sentid} on retry. "
-                        f"Skipping (resume will catch it later)."
-                    )
+                current_bs = max(1, current_bs // 2)
+                logger.warning(
+                    f"CUDA OOM at batch {batch_start}-{batch_end}; "
+                    f"retrying with sub-batch size {current_bs}"
+                )
+                # Re-chunk into smaller pieces
+                sub_batches = []
+                for i in range(0, len(batch_captions), current_bs):
+                    sub_batches.append((
+                        batch_captions[i:i + current_bs],
+                        batch_sentids[i:i + current_bs],
+                    ))
 
         if not success:
-            skipped_sentids.append(sentid)
+            logger.error(
+                f"Batch {batch_start}-{batch_end} failed permanently. "
+                f"Skipping {len(batch_sentids)} sentids."
+            )
+            skipped_sentids.extend(batch_sentids)
+
+        processed = batch_end
+        processed_since_save += (batch_end - batch_start)
+
+        # Throughput log every batch
+        elapsed = time.time() - t_start
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        eta_min = (total - processed) / rate / 60 if rate > 0 else float("inf")
+        logger.info(
+            f"[{processed}/{total}] {rate:.2f} caps/s, ETA {eta_min:.1f} min"
+        )
 
         # Periodic checkpoint
-        if (i + 1) % checkpoint_every == 0 or (i + 1) == total:
+        if processed_since_save >= checkpoint_every or processed == total:
             _save(all_rewrites, output_path)
-            logger.info(
-                f"[{i+1}/{total}] Saved {len(all_rewrites)} sentids to {output_path}"
-            )
+            processed_since_save = 0
+            logger.info(f"Checkpoint: {len(all_rewrites)} sentids → {output_path}")
 
     _save(all_rewrites, output_path)
     logger.info(f"Done. {len(all_rewrites)} sentids written to {output_path}")
@@ -307,8 +368,16 @@ def main():
         help="Number of rewrites per caption (default: 3)",
     )
     parser.add_argument(
+        "--batch_size", type=int, default=8,
+        help="Captions per .generate() call (default: 8). Total seqs per call = batch_size * NUM_CANDIDATES.",
+    )
+    parser.add_argument(
         "--checkpoint_every", type=int, default=200,
         help="Persist progress every N captions (default: 200)",
+    )
+    parser.add_argument(
+        "--smoke_test", type=int, default=0,
+        help="If >0, only process the first N captions (for quick validation).",
     )
     parser.add_argument(
         "--resume", action="store_true",
@@ -317,11 +386,16 @@ def main():
     args = parser.parse_args()
 
     captions = load_captions(args.captions_path)
+    if args.smoke_test > 0:
+        captions = captions[:args.smoke_test]
+        logger.info(f"SMOKE TEST mode: limiting to first {len(captions)} captions")
+
     generate_rewrites(
         captions,
         output_path=args.output_path,
         model_name=args.model,
         num_rewrites=args.num_rewrites,
+        batch_size=args.batch_size,
         checkpoint_every=args.checkpoint_every,
         resume=args.resume,
     )
