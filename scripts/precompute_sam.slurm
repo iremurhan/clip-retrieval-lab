@@ -8,7 +8,10 @@
 #
 # The array index ($SLURM_ARRAY_TASK_ID) is forwarded as --shard_id and the
 # array size as --num_shards, so 8 array tasks process disjoint slices of the
-# image list. Output .npz files land under /workspace/precomputed/sam_masks/.
+# image list. Output .npz files land alongside the source images, under
+# /workspace/datasets/<dataset>/sam_masks/, so they live with the dataset (not
+# inside the code checkout) and become visible to training automatically via
+# the same bind mount used for images.
 # Restartable: existing .npz files are skipped.
 #
 # Image: requires the SAM ViT-B checkpoint baked into /weights/ (see
@@ -31,11 +34,11 @@ DATASET="${1:?Usage: sbatch --array=0-N scripts/precompute_sam.slurm <coco|flick
 case "$DATASET" in
     coco)
         IMAGE_DIR="/workspace/datasets/coco"
-        OUTPUT_DIR="/workspace/precomputed/sam_masks/coco"
+        OUTPUT_DIR="/workspace/datasets/coco/sam_masks"
         ;;
     flickr30k)
         IMAGE_DIR="/workspace/datasets/flickr30k"
-        OUTPUT_DIR="/workspace/precomputed/sam_masks/flickr30k"
+        OUTPUT_DIR="/workspace/datasets/flickr30k/sam_masks"
         ;;
     *)
         echo "Unknown dataset: $DATASET (expected coco or flickr30k)"
