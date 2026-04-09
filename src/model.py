@@ -116,6 +116,19 @@ class DualEncoder(nn.Module):
                 f"d_model={d_model}, num_patches={self._seg_num_patches} "
                 f"(grid {self._seg_grid_size}x{self._seg_grid_size})"
             )
+            # Activation memory: seg_embedding sits BEFORE the 24-layer ViT
+            # encoder, so even though the encoder is frozen, autograd must
+            # retain every layer's activations to backprop into seg_embedding.
+            # Enable gradient checkpointing on the vision encoder to drop them.
+            # Cost is ~one extra forward per step, which is grad-free here
+            # because the encoder weights themselves are frozen.
+            # gradient_checkpointing_enable lives on PreTrainedModel (self.clip),
+            # not on the inner CLIPVisionTransformer. Calling it on self.clip
+            # propagates the flag to vision + text encoders; text is frozen too
+            # so the extra recompute there is also grad-free.
+            self.clip.gradient_checkpointing_enable()
+            self.clip.config.use_cache = False
+            logger.info("B5_seg: enabled gradient checkpointing on CLIPModel")
         else:
             self.seg_embed_size = None
             self.seg_embedding = None

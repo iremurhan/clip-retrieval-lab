@@ -2,4 +2,6 @@ data:
   dataset: "coco"
   images_path: "datasets/coco"
   captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
+  # Used only by B5_seg (gated on model.seg_embed_size). Path is relative to /workspace.
+  seg_map_dir: "datasets/coco/sam_masks"
 

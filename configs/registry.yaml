@@ -40,4 +40,4 @@ runs:
     parent: B0
     overrides:
       model.seg_embed_size: 64
-      data.seg_map_dir: "precomputed/sam_masks/"
+      # data.seg_map_dir is set per-dataset in configs/config_{coco,flickr30k}.yaml
