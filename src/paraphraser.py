@@ -212,21 +212,15 @@ class PrecomputedLLMParaphraser:
             para_attention_mask: [N, max_length] LongTensor on self.device
         """
         texts = []
-        missing = 0
         for sid in sentids:
             sid_int = int(sid)
             rw_list = self.rewrites.get(sid_int)
-            if rw_list:
-                texts.append(self.rng.choice(rw_list))
-            else:
-                texts.append("")
-                missing += 1
-
-        if missing > 0:
-            logger.warning(
-                f"PrecomputedLLMParaphraser: {missing}/{len(sentids)} sentids "
-                f"missing from rewrites file. Using empty string fallback."
-            )
+            if not rw_list:
+                raise KeyError(
+                    f"sentid {sid_int} not found in rewrites file. "
+                    f"Rewrites file is incomplete — re-run scripts/generate_rewrites.py."
+                )
+            texts.append(self.rng.choice(rw_list))
 
         tokenized = self.tokenizer(
             texts,
