@@ -295,7 +295,12 @@ class CaptionImageDataset(Dataset):
 
         # LaCLIP-style caption augmentation: load precomputed LLM rewrites
         self.caption_rewrites = None
-        if caption_rewrites_path and os.path.exists(caption_rewrites_path):
+        if caption_rewrites_path:
+            if not os.path.exists(caption_rewrites_path):
+                raise FileNotFoundError(
+                    f"caption_rewrites_path provided but file not found: "
+                    f"{caption_rewrites_path}. Run scripts/generate_rewrites.py first."
+                )
             import json as _json
             with open(caption_rewrites_path, 'r') as f:
                 raw = _json.load(f)
@@ -344,6 +349,18 @@ class CaptionImageDataset(Dataset):
 
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
 
+        # Validate coverage: every sample sentid must exist in caption_rewrites
+        if self.caption_rewrites is not None:
+            dataset_sids = {s['sentid'] for s in self.samples}
+            missing = dataset_sids - self.caption_rewrites.keys()
+            if missing:
+                sample_ids = sorted(missing)[:10]
+                raise RuntimeError(
+                    f"caption_rewrites is incomplete: {len(missing)}/{len(dataset_sids)} "
+                    f"sentids missing (first 10: {sample_ids}). "
+                    f"Re-run: sbatch scripts/generate_rewrites.slurm --resume"
+                )
+
     def __len__(self):
         return len(self.samples)
 
@@ -354,10 +371,14 @@ class CaptionImageDataset(Dataset):
 
         # LaCLIP-style: uniform random from [original, rewrite1, ..., rewriteN]
         if self.caption_rewrites is not None:
-            rewrites = self.caption_rewrites.get(sample['sentid'])
-            if rewrites:
-                candidates = [caption] + rewrites
-                caption = random.choice(candidates)
+            sentid = sample['sentid']
+            if sentid not in self.caption_rewrites:
+                raise KeyError(
+                    f"sentid {sentid} not found in caption_rewrites. "
+                    f"Rewrites file is incomplete — re-run scripts/generate_rewrites.py."
+                )
+            candidates = [caption] + self.caption_rewrites[sentid]
+            caption = random.choice(candidates)
 
         # Load Image
         filepath = sample.get('filepath', '').strip()
@@ -428,10 +449,10 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
         aug_cfg = config['augment']
         k = aug_cfg['k_photometric_augs']
-        aug_crop_scale_min = aug_cfg.get('aug_crop_scale_min', 0.4)
-        color_jitter_strength = aug_cfg.get('color_jitter_strength', 0.4)
-        use_grayscale = aug_cfg.get('use_grayscale', True)
-        separate_pipelines = aug_cfg.get('separate_pipelines', False)
+        aug_crop_scale_min = aug_cfg['aug_crop_scale_min']
+        color_jitter_strength = aug_cfg['color_jitter_strength']
+        use_grayscale = aug_cfg['use_grayscale']
+        separate_pipelines = aug_cfg['separate_pipelines']
 
         transform = build_anchor_transform(image_size, separate_pipelines=separate_pipelines)
         transform_aug = build_augmented_transform(
@@ -454,9 +475,9 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     # LaCLIP-style caption rewrites: only for train split
     caption_rewrites_path = None
     if split == 'train':
-        para_type = config.get('paraphraser', {}).get('type', 'nltk')
+        para_type = config['paraphraser']['type']
         if para_type == 'llm_precomputed':
-            caption_rewrites_path = config.get('paraphraser', {}).get('precomputed_path')
+            caption_rewrites_path = config['paraphraser']['precomputed_path']
 
     dataset = CaptionImageDataset(
         images_root_path=images_root,

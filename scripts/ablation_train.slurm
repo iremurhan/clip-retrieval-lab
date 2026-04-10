@@ -78,8 +78,6 @@ cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-python -m spacy download en_core_web_sm
-
 set +e
 python3 -u run.py \
     --config "$CONFIG_FILE" \
