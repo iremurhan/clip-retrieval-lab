@@ -41,6 +41,12 @@ data:
   max_length: 77
   num_workers: 4
   image_size: 336
+  # B5_mask_only only: when true, the dataloader replaces each real RGB image
+  # with a colorized render of its SAM segment map (deterministic palette,
+  # nearest-neighbor resize). seg_map_dir is set per-dataset and reused from
+  # the B5_seg pipeline. Leave false for all other variants.
+  use_seg_as_image: false
+  seg_palette_size: 64
 
 augment:
   # Number of photometric transforms sampled from the VLM-safe pool per image.

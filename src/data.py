@@ -110,7 +110,7 @@ class StochasticPhotometricPool:
         )
 
 
-def build_anchor_transform(image_size):
+def build_anchor_transform(image_size, interpolation=InterpolationMode.BILINEAR):
     """
     Build the deterministic anchor transform for training.
     Spatial: Mild RandomResizedCrop + flip, then normalization.
@@ -118,13 +118,16 @@ def build_anchor_transform(image_size):
 
     Args:
         image_size (int): Target spatial resolution.
+        interpolation (InterpolationMode): Resize mode for RandomResizedCrop.
+            Default BILINEAR matches all RGB variants. B5_mask_only passes
+            NEAREST to preserve hard segment boundaries (no color bleeding).
 
     Returns:
         transforms.Compose
     """
     return transforms.Compose([
         # Phase 1 (Spatial) — Mild crop preserving semantic content
-        transforms.RandomResizedCrop(image_size, scale=(0.9, 1.0)),
+        transforms.RandomResizedCrop(image_size, scale=(0.9, 1.0), interpolation=interpolation),
         transforms.RandomHorizontalFlip(),
         # Phase 3 (Normalization)
         transforms.ToTensor(),
@@ -132,7 +135,7 @@ def build_anchor_transform(image_size):
     ])
 
 
-def build_augmented_transform(image_size, k):
+def build_augmented_transform(image_size, k, interpolation=InterpolationMode.BILINEAR):
     """
     Build the Bipartite Augmentation transform for the contrastive view.
 
@@ -143,13 +146,15 @@ def build_augmented_transform(image_size, k):
     Args:
         image_size (int): Target spatial resolution.
         k (int): Number of photometric transforms to sample per image.
+        interpolation (InterpolationMode): Resize mode for RandomResizedCrop.
+            See build_anchor_transform for rationale.
 
     Returns:
         transforms.Compose
     """
     return transforms.Compose([
         # Phase 1 (Spatial) — VLM-safe lower bound at 0.4 to preserve semantics
-        transforms.RandomResizedCrop(image_size, scale=(0.4, 1.0)),
+        transforms.RandomResizedCrop(image_size, scale=(0.4, 1.0), interpolation=interpolation),
         transforms.RandomHorizontalFlip(),
         # Phase 2 (Photometric) — k-selection from VLM-safe pool
         StochasticPhotometricPool(k),
@@ -159,19 +164,22 @@ def build_augmented_transform(image_size, k):
     ])
 
 
-def build_eval_transform(image_size):
+def build_eval_transform(image_size, interpolation=InterpolationMode.BICUBIC):
     """
     Build the deterministic evaluation transform.
     Resize → CenterCrop → ToTensor → CLIP Normalize.
 
     Args:
         image_size (int): Target spatial resolution.
+        interpolation (InterpolationMode): Resize mode. Default BICUBIC matches
+            CLIP's original eval preprocessing. B5_mask_only passes NEAREST
+            to keep segment boundaries hard.
 
     Returns:
         transforms.Compose
     """
     return transforms.Compose([
-        transforms.Resize(image_size, interpolation=InterpolationMode.BICUBIC),
+        transforms.Resize(image_size, interpolation=interpolation),
         transforms.CenterCrop(image_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
@@ -373,6 +381,94 @@ class SegmentMapLoader:
         return seg_ids
 
 
+class SegToRGBRenderer:
+    """
+    B5_mask_only: render a raw SAM segment map into a colorized RGB image
+    using a fixed, deterministic palette. The resulting PIL Image is a drop-in
+    replacement for the dataset's real RGB image, so that CLIP sees ONLY the
+    structural segment layout (no pixel texture, no natural-image appearance).
+
+    This probes the question: can CLIP-based retrieval succeed from pure
+    structure — segment shapes, counts, and relative positions — with all
+    appearance information removed?
+
+    Palette construction:
+        - A NumPy RandomState(seed=42) produces a fixed (palette_size, 3) uint8
+          table once at __init__. Seed is intentionally decoupled from the
+          training seed; the palette is a property of the ablation, not of the
+          run, and must be byte-identical across machines and restarts.
+        - Index 0 is overwritten to pure black (0, 0, 0) to give the model a
+          consistent "background / no segment" signal.
+
+    Per-image rendering:
+        - Load raw int32 segment map (H_orig, W_orig) from .npz.
+        - Apply `% palette_size` to wrap open-vocabulary SAM IDs into the
+          palette's index range. Identical modulo semantics to SegmentMapLoader
+          so the two variants share the same information budget.
+        - Look up each pixel's RGB via palette indexing -> (H_orig, W_orig, 3)
+          uint8 array -> wrap as PIL 'RGB' Image.
+
+    The renderer does NOT resize. Downstream transforms (with NEAREST
+    interpolation enforced by create_image_text_dataloader for this variant)
+    perform the resize/crop to CLIP's 336x336 input. Doing the resize in the
+    transform pipeline keeps augmentation semantics identical to the RGB
+    variants (same RandomResizedCrop params, same flip), with only the
+    interpolation mode swapped.
+    """
+
+    _PALETTE_SEED = 42
+
+    def __init__(self, seg_map_dir: str, palette_size: int):
+        if not os.path.isdir(seg_map_dir):
+            raise FileNotFoundError(
+                f"seg_map_dir does not exist: {seg_map_dir}. "
+                "Precompute SAM masks first (scripts/precompute_sam.slurm)."
+            )
+        if not isinstance(palette_size, int) or palette_size < 2:
+            raise ValueError(
+                f"palette_size must be an int >= 2, got {palette_size!r}. "
+                "Need at least 2 entries (background + one segment)."
+            )
+        self.seg_map_dir = seg_map_dir
+        self.palette_size = palette_size
+
+        rng = np.random.RandomState(self._PALETTE_SEED)
+        palette = rng.randint(0, 256, size=(palette_size, 3), dtype=np.uint8)
+        palette[0] = (0, 0, 0)  # background -> black
+        self.palette = palette  # (palette_size, 3) uint8
+
+    def _path_for(self, filename: str) -> str:
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        return os.path.join(self.seg_map_dir, f"{stem}.npz")
+
+    def render(self, filename: str) -> Image.Image:
+        path = self._path_for(filename)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"Segment map .npz not found: {path}. "
+                "Either precompute SAM masks for this split or disable "
+                "data.use_seg_as_image."
+            )
+        with np.load(path) as npz:
+            if "seg" not in npz.files:
+                raise KeyError(
+                    f".npz at {path} missing key 'seg'. "
+                    f"Available: {npz.files}"
+                )
+            seg = npz["seg"]  # (H_orig, W_orig) int32
+
+        if seg.ndim != 2:
+            raise ValueError(
+                f"Segment map at {path} has shape {seg.shape}, expected 2D."
+            )
+
+        # Wrap open-vocabulary SAM IDs into the palette's index range.
+        # Same modulo semantics as SegmentMapLoader -> identical info budget.
+        idx = (seg.astype(np.int64) % self.palette_size)
+        rgb = self.palette[idx]  # (H_orig, W_orig, 3) uint8
+        return Image.fromarray(rgb, mode="RGB")
+
+
 # ============================================================================
 # Dataset
 # ============================================================================
@@ -388,6 +484,7 @@ class CaptionImageDataset(Dataset):
         transform=None,
         transform_aug=None,
         seg_loader=None,
+        seg_renderer=None,
     ):
         """
         Args:
@@ -398,7 +495,21 @@ class CaptionImageDataset(Dataset):
             split (str): 'train', 'val', or 'test'.
             transform (callable, optional): Anchor image transform.
             transform_aug (callable, optional): Augmented view transform (intra-modal).
+            seg_loader (SegmentMapLoader, optional): B5_seg only. Provides
+                per-patch segment IDs [576] for additive injection into the
+                ViT encoder input. Mutually exclusive with seg_renderer.
+            seg_renderer (SegToRGBRenderer, optional): B5_mask_only only.
+                Replaces the real RGB image with a colorized render of the
+                SAM segment map, so CLIP sees only structural layout. The
+                real image file is NEVER opened in this mode.
         """
+        if seg_loader is not None and seg_renderer is not None:
+            raise ValueError(
+                "seg_loader and seg_renderer are mutually exclusive: "
+                "B5_seg injects segment IDs into the encoder, "
+                "B5_mask_only replaces the image pixels entirely. "
+                "Pick one."
+            )
         self.images_root_path = images_root_path
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -407,6 +518,8 @@ class CaptionImageDataset(Dataset):
         self.transform_aug = transform_aug
         # B5_seg only: per-image SAM segment-map loader. None for all other variants.
         self.seg_loader = seg_loader
+        # B5_mask_only only: renders segment map as colorized RGB image.
+        self.seg_renderer = seg_renderer
 
         # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
@@ -459,18 +572,23 @@ class CaptionImageDataset(Dataset):
         filepath = sample.get('filepath', '').strip()
         filename = sample['filename']
 
-        if filepath:
-            image_path = os.path.join(self.images_root_path, filepath, filename)
-            if not os.path.exists(image_path):
-                image_path = os.path.join(self.images_root_path, filename)
+        if self.seg_renderer is not None:
+            # B5_mask_only: the real image is replaced by a colorized render
+            # of the SAM segment map. We never open the jpg/png file.
+            image = self.seg_renderer.render(filename)
         else:
-            image_path = os.path.join(self.images_root_path, filename)
+            if filepath:
+                image_path = os.path.join(self.images_root_path, filepath, filename)
+                if not os.path.exists(image_path):
+                    image_path = os.path.join(self.images_root_path, filename)
+            else:
+                image_path = os.path.join(self.images_root_path, filename)
 
-        # Fail fast on missing images
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image not found: {image_path}")
+            # Fail fast on missing images
+            if not os.path.exists(image_path):
+                raise FileNotFoundError(f"Image not found: {image_path}")
 
-        image = Image.open(image_path).convert('RGB')
+            image = Image.open(image_path).convert('RGB')
 
         # Transform Image (original anchor and augmented contrastive view)
         img_tensor = self.transform(image)
@@ -528,24 +646,49 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     # Resolve image size from data config (defined in config_base.yaml)
     image_size = config['data']['image_size']
 
+    # B5_mask_only: when the dataset serves colorized segment maps in place of
+    # real images, every resize in the pipeline must be NEAREST — bilinear or
+    # bicubic would interpolate across segment boundaries and produce colors
+    # that do not exist in the palette, injecting signal that is NOT in the
+    # structural segment map. For all other variants (RGB images), we keep the
+    # CLIP-standard BILINEAR (train) / BICUBIC (eval).
+    use_seg_as_image = bool(config.get('data', {}).get('use_seg_as_image', False))
+    if use_seg_as_image:
+        train_interp = InterpolationMode.NEAREST
+        eval_interp = InterpolationMode.NEAREST
+    else:
+        train_interp = InterpolationMode.BILINEAR
+        eval_interp = InterpolationMode.BICUBIC
+
     if split == 'train':
         # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
         k = config['augment']['k_photometric_augs']
 
-        transform = build_anchor_transform(image_size)
-        transform_aug = build_augmented_transform(image_size, k)
+        transform = build_anchor_transform(image_size, interpolation=train_interp)
+        transform_aug = build_augmented_transform(image_size, k, interpolation=train_interp)
 
         logger.info(
             f"Train transforms built: anchor=(crop+flip), "
-            f"augmented=(bipartite, k={k} photometric from pool)"
+            f"augmented=(bipartite, k={k} photometric from pool), "
+            f"interpolation={train_interp.name}"
         )
     else:
         # Validation/Test: deterministic, no augmentation
-        transform = build_eval_transform(image_size)
+        transform = build_eval_transform(image_size, interpolation=eval_interp)
         transform_aug = transform
 
     # B5_seg gating: build SegmentMapLoader only if model.seg_embed_size is set.
     # Every other variant pays zero overhead (no .npz I/O, no extra batch keys).
+    # B5_mask_only gating (below): build SegToRGBRenderer only if
+    # data.use_seg_as_image is true. Strictly mutually exclusive with B5_seg.
+    if config.get('model', {}).get('seg_embed_size') is not None and use_seg_as_image:
+        raise ValueError(
+            "B5_seg (model.seg_embed_size) and B5_mask_only (data.use_seg_as_image) "
+            "are mutually exclusive. B5_seg injects segment IDs into the encoder "
+            "on top of the real image; B5_mask_only replaces the image entirely "
+            "with a colorized segment mask. Pick exactly one."
+        )
+
     seg_loader = None
     if config.get('model', {}).get('seg_embed_size') is not None:
         seg_map_dir = config['data']['seg_map_dir']
@@ -577,6 +720,31 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
             f"n_seg={n_seg}"
         )
 
+    # B5_mask_only gating: build SegToRGBRenderer when data.use_seg_as_image is
+    # true. Both seg_map_dir and seg_palette_size are REQUIRED in this mode.
+    seg_renderer = None
+    if use_seg_as_image:
+        if 'seg_map_dir' not in config['data']:
+            raise KeyError(
+                "data.use_seg_as_image=true requires data.seg_map_dir. "
+                "Set it in the per-dataset config."
+            )
+        if 'seg_palette_size' not in config['data']:
+            raise KeyError(
+                "data.use_seg_as_image=true requires data.seg_palette_size. "
+                "Set it in config_base.yaml or an override."
+            )
+        seg_renderer = SegToRGBRenderer(
+            seg_map_dir=config['data']['seg_map_dir'],
+            palette_size=config['data']['seg_palette_size'],
+        )
+        logger.info(
+            f"B5_mask_only seg_renderer: dir={config['data']['seg_map_dir']}, "
+            f"palette_size={config['data']['seg_palette_size']}, "
+            f"seed={SegToRGBRenderer._PALETTE_SEED}, "
+            f"interpolation={train_interp.name}/{eval_interp.name}"
+        )
+
     dataset = CaptionImageDataset(
         images_root_path=images_root,
         captions_path=captions_path,
@@ -586,6 +754,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform=transform,
         transform_aug=transform_aug,
         seg_loader=seg_loader,
+        seg_renderer=seg_renderer,
     )
 
     seed = config['training']['seed']
