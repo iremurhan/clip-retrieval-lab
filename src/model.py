@@ -88,50 +88,82 @@ class DualEncoder(nn.Module):
             self.clip.logit_scale.fill_(2.6593)  # ln(1/0.07) = 2.6593
         logger.info("logit_scale reset to 2.6593 (τ=0.07)")
 
-        # 5. B5_seg only: segment embedding table for SAM-derived patch IDs.
-        # Strictly gated by config.model.seg_embed_size; absent for all other
-        # variants so that nothing in the forward path changes for them.
-        seg_embed_size = config.get('model', {}).get('seg_embed_size')
-        if seg_embed_size is not None:
-            if not isinstance(seg_embed_size, int) or seg_embed_size < 1:
+        # 5. B5a/B5b/B5c only: segment-aware patch enrichment.
+        # Strictly gated by config.model.seg_mode; absent for all other variants
+        # so that nothing in the forward path changes for them.
+        #   seg_mode == "spatial" | "semantic" : nn.Embedding(vocab, d_model)
+        #   seg_mode == "continuous"           : nn.Sequential(Linear, GELU, Linear)
+        seg_mode = config.get('model', {}).get('seg_mode')
+        self.seg_mode = seg_mode
+        self.seg_embedding = None
+        self.seg_projection = None
+        self.seg_vocab_size = None
+        self.seg_feature_dim = None
+        if seg_mode is not None:
+            if seg_mode not in ("spatial", "semantic", "continuous"):
                 raise ValueError(
-                    f"model.seg_embed_size must be a positive int, got {seg_embed_size!r}"
+                    f"model.seg_mode must be one of 'spatial','semantic','continuous'; got {seg_mode!r}"
                 )
             d_model = self.clip.vision_model.config.hidden_size  # 1024 for ViT-L
-            self.seg_embed_size = seg_embed_size
-            self.seg_embedding = nn.Embedding(seg_embed_size, d_model)
-            # Zero-init: at step 0 the segment embedding contributes nothing,
-            # so the model starts identical to B0+ and learns the contribution.
-            nn.init.zeros_(self.seg_embedding.weight)
-            # Always trainable, even when the rest of the vision encoder is
-            # frozen. This is a new parameter, not part of CLIP.
-            self.seg_embedding.weight.requires_grad = True
-            # Cache the patch grid layout once for shape assertions.
             patch_size = self.clip.vision_model.config.patch_size
             image_size = self.clip.vision_model.config.image_size
             self._seg_grid_size = image_size // patch_size
             self._seg_num_patches = self._seg_grid_size * self._seg_grid_size
-            logger.info(
-                f"B5_seg: seg_embedding initialized with n_seg={seg_embed_size}, "
-                f"d_model={d_model}, num_patches={self._seg_num_patches} "
-                f"(grid {self._seg_grid_size}x{self._seg_grid_size})"
-            )
-            # Activation memory: seg_embedding sits BEFORE the 24-layer ViT
-            # encoder, so even though the encoder is frozen, autograd must
-            # retain every layer's activations to backprop into seg_embedding.
-            # Enable gradient checkpointing on the vision encoder to drop them.
-            # Cost is ~one extra forward per step, which is grad-free here
-            # because the encoder weights themselves are frozen.
-            # gradient_checkpointing_enable lives on PreTrainedModel (self.clip),
-            # not on the inner CLIPVisionTransformer. Calling it on self.clip
-            # propagates the flag to vision + text encoders; text is frozen too
-            # so the extra recompute there is also grad-free.
+
+            if seg_mode in ("spatial", "semantic"):
+                vocab = config['model'].get('seg_vocab_size')
+                if not isinstance(vocab, int) or vocab < 1:
+                    raise ValueError(
+                        f"model.seg_vocab_size must be a positive int for seg_mode={seg_mode}, "
+                        f"got {vocab!r}"
+                    )
+                init_std = float(config['model'].get('seg_init_std', 0.02))
+                self.seg_vocab_size = vocab
+                self.seg_embedding = nn.Embedding(vocab, d_model)
+                # Normal init at CLIP positional-embedding scale. Previously we
+                # zero-inited, which (combined with the LR decay bug) produced a
+                # dead embedding that never learned. std=0.02 matches HF CLIP.
+                nn.init.normal_(self.seg_embedding.weight, mean=0.0, std=init_std)
+                self.seg_embedding.weight.requires_grad = True
+                logger.info(
+                    f"B5[{seg_mode}]: seg_embedding vocab={vocab}, d_model={d_model}, "
+                    f"init_std={init_std}, num_patches={self._seg_num_patches}"
+                )
+            else:  # continuous
+                feat_dim = int(config['model'].get('seg_feature_dim', 5))
+                hidden = int(config['model'].get('seg_proj_hidden', 128))
+                if feat_dim < 1 or hidden < 1:
+                    raise ValueError(
+                        f"seg_feature_dim and seg_proj_hidden must be positive, "
+                        f"got {feat_dim}, {hidden}"
+                    )
+                self.seg_feature_dim = feat_dim
+                self.seg_projection = nn.Sequential(
+                    nn.Linear(feat_dim, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, d_model),
+                )
+                # Xavier init is a reasonable default for a 2-layer MLP whose
+                # output is added to CLIP token activations at init scale.
+                for m in self.seg_projection.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.xavier_uniform_(m.weight)
+                        nn.init.zeros_(m.bias)
+                for p in self.seg_projection.parameters():
+                    p.requires_grad = True
+                logger.info(
+                    f"B5[continuous]: seg_projection MLP {feat_dim}->{hidden}->{d_model}, "
+                    f"num_patches={self._seg_num_patches}"
+                )
+
+            # Activation memory: segment injection sits BEFORE the 24-layer ViT
+            # encoder, so autograd must retain every layer's activations to
+            # backprop into seg_embedding / seg_projection. Enable gradient
+            # checkpointing on the vision encoder to drop them. Cost is ~one
+            # extra forward per step, grad-free because encoder weights are frozen.
             self.clip.gradient_checkpointing_enable()
             self.clip.config.use_cache = False
-            logger.info("B5_seg: enabled gradient checkpointing on CLIPModel")
-        else:
-            self.seg_embed_size = None
-            self.seg_embedding = None
+            logger.info(f"B5[{seg_mode}]: enabled gradient checkpointing on CLIPModel")
     
     def _apply_freezing_strategy(self):
         """
@@ -253,83 +285,98 @@ class DualEncoder(nn.Module):
         """
         Extract image features and standardize embeddings to float32.
 
+        `seg_ids` is a misnomer for backwards compatibility: it carries either
+        per-patch integer IDs (LongTensor [B, 576], seg_mode in {spatial, semantic})
+        or per-patch continuous features (FloatTensor [B, 576, F], seg_mode='continuous').
+
         Behavior matrix:
-            seg_embedding | seg_ids | path
-            --------------+---------+--------------------------------------
-            None          | None    | standard CLIP (B0/B0+/B1/B2/B3/FULL)
-            None          | tensor  | ValueError (gating mismatch)
-            set (B5_seg)  | None    | standard CLIP (no seg_emb injection)
-            set (B5_seg)  | tensor  | explicit forward with seg_emb injection
+            seg_mode | seg_ids | path
+            ---------+---------+--------------------------------------
+            None     | None    | standard CLIP (B0/B0+/B1/B2/B3/FULL)
+            None     | tensor  | ValueError (gating mismatch)
+            set      | None    | standard CLIP (no seg injection)
+            set      | tensor  | explicit forward with seg injection
 
         The (set, None) cell is intentional: the augmented intra-modal view
         uses RandomResizedCrop(scale=(0.4, 1.0)) which destroys spatial
-        alignment with the precomputed segment map. Passing seg_ids to that
-        view would inject misleading "this patch is dog" signal onto a sky
-        crop. The anchor view (mild crop) keeps the seg_ids; the augmented
-        view drops them and runs through standard CLIP, identical to B0+.
+        alignment with the precomputed segment map. The anchor view (mild
+        crop) keeps seg_ids; the augmented view drops them and runs through
+        standard CLIP, identical to B0+.
         """
         if seg_ids is None:
-            # Standard CLIP path. Used for every non-B5_seg variant AND for
-            # the augmented view of B5_seg (see docstring).
             image_embeds = self.clip.get_image_features(pixel_values=images)
             return image_embeds.float()
 
-        if self.seg_embedding is None:
+        if self.seg_mode is None:
             raise ValueError(
-                "seg_ids was provided but model.seg_embed_size is not set. "
-                "Either configure B5_seg or stop passing seg_ids."
+                "seg_ids was provided but model.seg_mode is not set. "
+                "Either configure a B5 variant (spatial/semantic/continuous) or stop passing seg_ids."
             )
 
-        # --- B5_seg path: explicit re-implementation of CLIPVisionTransformer
-        # forward (transformers 4.48.0) with segment-embedding injection. ---
-        if seg_ids.dtype != torch.long:
-            raise TypeError(
-                f"seg_ids must be torch.long, got {seg_ids.dtype}. "
-                "Cast at the dataloader, not here."
-            )
-        if seg_ids.dim() != 2 or seg_ids.size(0) != images.size(0) \
-                or seg_ids.size(1) != self._seg_num_patches:
-            raise ValueError(
-                f"seg_ids has shape {tuple(seg_ids.shape)}, expected "
-                f"({images.size(0)}, {self._seg_num_patches})."
-            )
-        if seg_ids.min().item() < 0 or seg_ids.max().item() >= self.seg_embed_size:
-            raise ValueError(
-                f"seg_ids out of range [0, {self.seg_embed_size}): "
-                f"min={seg_ids.min().item()}, max={seg_ids.max().item()}"
-            )
+        B = images.size(0)
+        # Shape + dtype validation, branching on mode.
+        if self.seg_mode in ("spatial", "semantic"):
+            if seg_ids.dtype != torch.long:
+                raise TypeError(
+                    f"seg_ids must be torch.long for seg_mode={self.seg_mode}, got {seg_ids.dtype}."
+                )
+            if seg_ids.dim() != 2 or seg_ids.size(0) != B \
+                    or seg_ids.size(1) != self._seg_num_patches:
+                raise ValueError(
+                    f"seg_ids has shape {tuple(seg_ids.shape)}, expected "
+                    f"({B}, {self._seg_num_patches})."
+                )
+            smin, smax = int(seg_ids.min().item()), int(seg_ids.max().item())
+            if smin < 0 or smax >= self.seg_vocab_size:
+                raise ValueError(
+                    f"seg_ids out of range [0, {self.seg_vocab_size}): min={smin}, max={smax}"
+                )
+        else:  # continuous
+            if not seg_ids.is_floating_point():
+                raise TypeError(
+                    f"seg_ids must be a float tensor for seg_mode=continuous, got {seg_ids.dtype}."
+                )
+            if seg_ids.dim() != 3 or seg_ids.size(0) != B \
+                    or seg_ids.size(1) != self._seg_num_patches \
+                    or seg_ids.size(2) != self.seg_feature_dim:
+                raise ValueError(
+                    f"seg_ids has shape {tuple(seg_ids.shape)}, expected "
+                    f"({B}, {self._seg_num_patches}, {self.seg_feature_dim})."
+                )
 
         vm = self.clip.vision_model
         # Stage 1: patch + position embeddings.
         hidden_states = vm.embeddings(images)  # [B, 1+576, 1024]
 
-        # Stage 2: build full sequence of segment IDs with CLS=0 (background).
-        # The CLS token (index 0) is treated as background per the spec.
-        cls_seg = torch.zeros(
-            seg_ids.size(0), 1, dtype=torch.long, device=seg_ids.device
+        # Stage 2: compute per-patch segment contribution for the 576 patch tokens.
+        if self.seg_mode in ("spatial", "semantic"):
+            seg_patches = self.seg_embedding(seg_ids)           # [B, 576, 1024]
+        else:
+            seg_patches = self.seg_projection(seg_ids.to(hidden_states.dtype))  # [B, 576, 1024]
+
+        # Stage 3: prepend a zero vector for the CLS token so CLS receives no
+        # segment signal regardless of mode (spec: "CLS should NOT get a
+        # segment embedding"), then add to patch+pos embeddings.
+        cls_zeros = torch.zeros(
+            B, 1, seg_patches.size(-1),
+            device=seg_patches.device, dtype=seg_patches.dtype,
         )
-        full_seg_ids = torch.cat([cls_seg, seg_ids], dim=1)  # [B, 577]
-        if full_seg_ids.size(1) != hidden_states.size(1):
+        full_seg = torch.cat([cls_zeros, seg_patches], dim=1)  # [B, 577, 1024]
+        if full_seg.size(1) != hidden_states.size(1):
             raise RuntimeError(
                 f"Sequence length mismatch: hidden_states={hidden_states.size(1)}, "
-                f"full_seg_ids={full_seg_ids.size(1)}. CLIP vision_model.embeddings "
-                "produced an unexpected number of tokens."
+                f"full_seg={full_seg.size(1)}."
             )
-
-        # Stage 3: inject segment embeddings (additive). seg_embedding is
-        # zero-initialized, so this is a no-op at step 0.
-        seg_emb = self.seg_embedding(full_seg_ids)  # [B, 577, 1024]
-        hidden_states = hidden_states + seg_emb
+        hidden_states = hidden_states + full_seg
 
         # Stage 4: continue through pre_layrnorm -> encoder -> CLS pool ->
         # post_layernorm -> visual_projection. Mirrors transformers 4.48.0
-        # CLIPVisionTransformer.forward exactly. The attribute name is
-        # "pre_layrnorm" (typo preserved upstream for backward compat).
+        # CLIPVisionTransformer.forward exactly. "pre_layrnorm" typo is upstream.
         hidden_states = vm.pre_layrnorm(hidden_states)
         encoder_outputs = vm.encoder(inputs_embeds=hidden_states)
         last_hidden_state = encoder_outputs[0]
-        pooled_output = last_hidden_state[:, 0, :]            # [B, 1024]   CLS token
-        pooled_output = vm.post_layernorm(pooled_output)      # [B, 1024]
+        pooled_output = last_hidden_state[:, 0, :]                   # [B, 1024]  CLS
+        pooled_output = vm.post_layernorm(pooled_output)             # [B, 1024]
         image_features = self.clip.visual_projection(pooled_output)  # [B, embed_dim]
         return image_features.float()
 

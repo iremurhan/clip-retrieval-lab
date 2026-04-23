@@ -247,130 +247,143 @@ class HardNegativeGenerator:
 
 
 # ============================================================================
-# Segment-Map Loader (B5_seg variant only)
+# Segment-Feature Loader (B5a/B5b/B5c variants only)
 # ============================================================================
 
-class SegmentMapLoader:
+_SEG_MODE_FILENAME = {
+    "spatial":    "spatial_bins.pt",
+    "semantic":   "semantic_ids.pt",
+    "continuous": "continuous_features.pt",
+}
+
+
+class SegmentFeatureLoader:
     """
-    Loads precomputed SAM segment maps and converts them to per-patch segment
-    IDs for the B5_seg variant. Only instantiated when
-    config['model']['seg_embed_size'] is not None.
+    Loads a precomputed per-patch tensor for the B5a / B5b / B5c variants.
 
-    Pipeline (per image, deterministic):
-        1. Load <seg_map_dir>/<filename_stem>.npz, key "seg" -> int32 (H_orig, W_orig)
-        2. Nearest-neighbor resize to (image_size, image_size).
-        3. Reshape into (grid, patch, grid, patch) and majority-vote per patch
-           -> (grid * grid,) int64 = 576 for ViT-L/14@336.
-        4. Modular wrap: seg_id = seg_id % n_seg.
+    Unlike the deprecated B5_seg loader, there is no runtime resize / majority
+    vote / modulo-wrap: all patch assignments are materialized offline by
+    scripts/precompute_sam.py --seg_mode {spatial,semantic,continuous} and
+    serialized as a single torch dict keyed by filename stem.
 
-    The loader is intentionally I/O strict: a missing .npz raises
-    FileNotFoundError instead of silently substituting zeros.
+    Layout (under <seg_map_dir>):
+        spatial_bins.pt        dict[str -> LongTensor (576,)],   vocab = 28
+        semantic_ids.pt        dict[str -> LongTensor (576,)],   vocab = 81
+        continuous_features.pt dict[str -> FloatTensor (576, F)], F typically 5
 
     Args:
-        seg_map_dir (str): Directory containing per-image .npz files.
-        image_size (int): Target spatial resolution (e.g. 336).
+        seg_map_dir (str): Directory containing the per-mode .pt file.
+        image_size (int): Target spatial resolution (used only for shape checks).
         patch_size (int): ViT patch size (14 for ViT-L/14).
-        n_seg (int): Modular wrap base (segment embedding table size).
+        seg_mode (str): One of 'spatial', 'semantic', 'continuous'.
+        seg_vocab_size (int | None): Embedding table size for discrete modes;
+            required if seg_mode in {'spatial', 'semantic'}, else ignored.
+        seg_feature_dim (int | None): Per-patch feature dim for continuous mode;
+            required if seg_mode == 'continuous'.
     """
 
-    def __init__(self, seg_map_dir: str, image_size: int, patch_size: int, n_seg: int):
+    def __init__(
+        self,
+        seg_map_dir: str,
+        image_size: int,
+        patch_size: int,
+        seg_mode: str,
+        seg_vocab_size: int | None = None,
+        seg_feature_dim: int | None = None,
+    ):
+        if seg_mode not in _SEG_MODE_FILENAME:
+            raise ValueError(
+                f"Unknown seg_mode {seg_mode!r}. "
+                f"Expected one of {list(_SEG_MODE_FILENAME)}."
+            )
         if not os.path.isdir(seg_map_dir):
             raise FileNotFoundError(
                 f"seg_map_dir does not exist: {seg_map_dir}. "
-                "Run scripts/precompute_sam.py before training the B5_seg variant."
+                "Run scripts/precompute_sam.py --seg_mode {spatial,semantic,continuous} first."
             )
         if image_size % patch_size != 0:
             raise ValueError(
                 f"image_size={image_size} must be divisible by patch_size={patch_size}."
             )
-        if n_seg < 1:
-            raise ValueError(f"n_seg must be >= 1, got {n_seg}")
 
         self.seg_map_dir = seg_map_dir
         self.image_size = image_size
         self.patch_size = patch_size
-        self.grid_size = image_size // patch_size  # 24 for 336/14
+        self.grid_size = image_size // patch_size           # 24 for 336/14
         self.num_patches = self.grid_size * self.grid_size  # 576
-        self.n_seg = n_seg
+        self.seg_mode = seg_mode
+        self.is_continuous = (seg_mode == "continuous")
 
-    def _resolve_path(self, filename: str) -> str:
-        # Key by filename stem so the loader works for both COCO
-        # ("COCO_train2014_000000000009.jpg") and Flickr30k ("1000092795.jpg").
-        stem = os.path.splitext(os.path.basename(filename))[0]
-        return os.path.join(self.seg_map_dir, f"{stem}.npz")
+        pt_path = os.path.join(seg_map_dir, _SEG_MODE_FILENAME[seg_mode])
+        if not os.path.isfile(pt_path):
+            raise FileNotFoundError(
+                f"Precomputed segment features not found: {pt_path}. "
+                f"Run: python scripts/precompute_sam.py --seg_mode {seg_mode} ..."
+            )
+
+        # Single dict on CPU, shared across workers via COW fork semantics.
+        logger.info(f"Loading segment features: {pt_path}")
+        self._table = torch.load(pt_path, map_location="cpu", weights_only=True)
+        if not isinstance(self._table, dict):
+            raise TypeError(
+                f"{pt_path} must contain a dict[str, Tensor], got {type(self._table).__name__}"
+            )
+        logger.info(f"Loaded {len(self._table)} segment-feature entries from {pt_path}")
+
+        if self.is_continuous:
+            if seg_feature_dim is None or seg_feature_dim < 1:
+                raise ValueError(
+                    f"seg_feature_dim must be >= 1 for continuous mode, got {seg_feature_dim!r}"
+                )
+            self.seg_feature_dim = int(seg_feature_dim)
+            self.seg_vocab_size = None
+        else:
+            if seg_vocab_size is None or seg_vocab_size < 1:
+                raise ValueError(
+                    f"seg_vocab_size must be >= 1 for seg_mode={seg_mode}, got {seg_vocab_size!r}"
+                )
+            self.seg_vocab_size = int(seg_vocab_size)
+            self.seg_feature_dim = None
 
     def load(self, filename: str) -> torch.Tensor:
         """
-        Load and patchify the segment map for one image.
+        Return the per-patch tensor for one image.
 
         Returns:
-            seg_ids: LongTensor of shape (num_patches,) = (576,) for ViT-L/14@336.
+            LongTensor (576,)        for seg_mode in {'spatial','semantic'}
+            FloatTensor (576, F)     for seg_mode == 'continuous'
         """
-        path = self._resolve_path(filename)
-        if not os.path.isfile(path):
-            raise FileNotFoundError(
-                f"Segment map not found: {path}. "
-                "B5_seg requires precomputed SAM masks for every training image."
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        feat = self._table.get(stem)
+        if feat is None:
+            raise KeyError(
+                f"Precomputed segment features missing for '{stem}' "
+                f"(seg_mode={self.seg_mode}, dir={self.seg_map_dir}). "
+                "Every training image must be covered."
             )
 
-        with np.load(path) as npz:
-            if "seg" not in npz.files:
-                raise KeyError(
-                    f"Segment map file {path} missing required key 'seg'. "
-                    f"Available keys: {npz.files}"
+        if self.is_continuous:
+            if feat.dim() != 2 or feat.size(0) != self.num_patches \
+                    or feat.size(1) != self.seg_feature_dim:
+                raise ValueError(
+                    f"Continuous features for {stem!r} have shape {tuple(feat.shape)}, "
+                    f"expected ({self.num_patches}, {self.seg_feature_dim})."
                 )
-            seg = npz["seg"]  # (H_orig, W_orig), int32
+            return feat.float()
 
-        if seg.ndim != 2:
+        if feat.dim() != 1 or feat.numel() != self.num_patches:
             raise ValueError(
-                f"Segment map at {path} has shape {seg.shape}, expected 2D (H, W)."
+                f"Discrete IDs for {stem!r} have shape {tuple(feat.shape)}, "
+                f"expected ({self.num_patches},)."
             )
-
-        # Step 1: nearest-neighbor resize to (image_size, image_size).
-        # PIL.Image.resize with NEAREST never blends IDs across boundaries.
-        # We cast to int32 first because PIL only accepts int32 / uint8 / float
-        # for mode='I'; int32 round-trips losslessly through mode='I'.
-        seg_int32 = seg.astype(np.int32, copy=False)
-        seg_pil = Image.fromarray(seg_int32, mode="I")
-        seg_pil = seg_pil.resize(
-            (self.image_size, self.image_size), resample=Image.Resampling.NEAREST
-        )
-        seg_resized = np.asarray(seg_pil, dtype=np.int64)  # (image_size, image_size)
-
-        if seg_resized.shape != (self.image_size, self.image_size):
-            raise RuntimeError(
-                f"Resized segment map has shape {seg_resized.shape}, "
-                f"expected ({self.image_size}, {self.image_size})."
-            )
-
-        # Step 2: Apply modular wrap BEFORE majority vote so patches that span
-        # multiple raw IDs (which would all be wrapped to the same bucket) cast
-        # their votes consistently.
-        seg_resized = seg_resized % self.n_seg
-
-        # Step 3: Reshape into (grid, patch_size, grid, patch_size) and
-        # majority-vote per (grid, grid) cell.
-        g, p = self.grid_size, self.patch_size
-        # (g, p, g, p) -> (g, g, p, p) -> (g*g, p*p)
-        cells = seg_resized.reshape(g, p, g, p).transpose(0, 2, 1, 3).reshape(g * g, p * p)
-
-        # np.bincount along axis=1 with minlength=n_seg, then argmax.
-        # Vectorized: build offsets so each row's bincount is independent.
-        # Shape transformation: (576, 196) -> (576,)
-        offsets = (np.arange(cells.shape[0], dtype=np.int64) * self.n_seg)[:, None]
-        flat = (cells + offsets).reshape(-1)
-        counts = np.bincount(flat, minlength=cells.shape[0] * self.n_seg)
-        counts = counts.reshape(cells.shape[0], self.n_seg)  # (576, n_seg)
-        majority = np.argmax(counts, axis=1).astype(np.int64)  # (576,)
-
-        seg_ids = torch.from_numpy(majority).long()  # (576,)
-        # Bounds check: every ID must lie within [0, n_seg).
-        if seg_ids.min().item() < 0 or seg_ids.max().item() >= self.n_seg:
+        feat = feat.long()
+        fmin, fmax = int(feat.min().item()), int(feat.max().item())
+        if fmin < 0 or fmax >= self.seg_vocab_size:
             raise ValueError(
-                f"seg_ids out of bounds at {path}: "
-                f"min={seg_ids.min().item()}, max={seg_ids.max().item()}, n_seg={self.n_seg}"
+                f"seg_ids out of bounds for {stem!r}: "
+                f"min={fmin}, max={fmax}, vocab_size={self.seg_vocab_size}"
             )
-        return seg_ids
+        return feat
 
 
 # ============================================================================
@@ -544,12 +557,12 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform = build_eval_transform(image_size)
         transform_aug = transform
 
-    # B5_seg gating: build SegmentMapLoader only if model.seg_embed_size is set.
-    # Every other variant pays zero overhead (no .npz I/O, no extra batch keys).
+    # B5a/B5b/B5c gating: build SegmentFeatureLoader only if model.seg_mode is set.
+    # Every other variant pays zero overhead (no I/O, no extra batch keys).
     seg_loader = None
-    if config.get('model', {}).get('seg_embed_size') is not None:
+    seg_mode = config.get('model', {}).get('seg_mode')
+    if seg_mode is not None:
         seg_map_dir = config['data']['seg_map_dir']
-        n_seg = config['model']['seg_embed_size']
         # patch_size is derived from the CLIP model name, not hardcoded:
         # 'clip-vit-large-patch14-336' -> patch=14. Matches the only model
         # supported by this project (see configs/config_base.yaml).
@@ -565,16 +578,18 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
                 f"Cannot infer ViT patch size from image_model_name={model_name!r}. "
                 "Add a branch to create_image_text_dataloader for this model."
             )
-        seg_loader = SegmentMapLoader(
+        seg_loader = SegmentFeatureLoader(
             seg_map_dir=seg_map_dir,
             image_size=image_size,
             patch_size=patch_size,
-            n_seg=n_seg,
+            seg_mode=seg_mode,
+            seg_vocab_size=config['model'].get('seg_vocab_size'),
+            seg_feature_dim=config['model'].get('seg_feature_dim'),
         )
         logger.info(
-            f"B5_seg seg_loader: dir={seg_map_dir}, image_size={image_size}, "
+            f"B5 seg_loader: mode={seg_mode}, dir={seg_map_dir}, image_size={image_size}, "
             f"patch_size={patch_size}, grid={seg_loader.grid_size}x{seg_loader.grid_size}, "
-            f"n_seg={n_seg}"
+            f"vocab_size={seg_loader.seg_vocab_size}, feature_dim={seg_loader.seg_feature_dim}"
         )
 
     dataset = CaptionImageDataset(

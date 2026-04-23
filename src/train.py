@@ -102,29 +102,35 @@ class Trainer:
         else:
             logger.info("Paraphraser disabled (intra_txt_weight=0).")
 
-        # B5_seg gating: pulled once at init so the hot loop is a single
+        # B5a/B5b/B5c gating: pulled once at init so the hot loop is a single
         # branch. None for every other variant.
-        self.use_seg_ids = config.get('model', {}).get('seg_embed_size') is not None
+        self.seg_mode = config.get('model', {}).get('seg_mode')
+        self.use_seg_ids = self.seg_mode is not None
         if self.use_seg_ids:
             logger.info(
-                f"B5_seg active in Trainer: model.seg_embed_size="
-                f"{config['model']['seg_embed_size']}"
+                f"B5 active in Trainer: model.seg_mode={self.seg_mode}, "
+                f"vocab={config['model'].get('seg_vocab_size')}, "
+                f"feat_dim={config['model'].get('seg_feature_dim')}"
             )
             if config['training']['use_grad_cache']:
-                # GradCache does not currently thread seg_ids through its
-                # cache/grad phases. Fail loud rather than silently dropping
-                # the segment-aware path mid-training.
                 raise RuntimeError(
-                    "B5_seg (model.seg_embed_size set) is incompatible with "
+                    "B5 (model.seg_mode set) is incompatible with "
                     "training.use_grad_cache=true. GradCache does not yet "
                     "thread seg_ids; either disable grad_cache or extend "
                     "src/grad_cache.py to forward seg_ids."
                 )
-        # B5_seg: running mean/std of unique-segment-count-per-image, only
+        # B5: running mean/std of unique-segment-count-per-image, only
         # accumulated during the first epoch as a sanity check.
         self._seg_unique_count_sum = 0.0
         self._seg_unique_count_sq_sum = 0.0
         self._seg_unique_count_n = 0
+
+        # Per-epoch accumulators for B5 diagnostics. Reset at the start of
+        # every train_epoch; consumed by evaluate().
+        self._seg_grad_norm_sum = 0.0
+        self._seg_grad_norm_n = 0
+        self._seg_cat_coverage_sum = 0.0   # B5b only (semantic)
+        self._seg_cat_coverage_n = 0
 
         # Initialize hard negative generator for B2 (POS-tag swapping)
         self.use_hard_negatives = config.get('loss', {}).get('hard_negatives', False)
@@ -230,11 +236,28 @@ class Trainer:
             del checkpoint, cpu_model_sd
             gc.collect()
 
+    def _compute_seg_grad_norm(self):
+        """
+        L2 norm of gradients on B5 segment parameters (seg_embedding and/or
+        seg_projection). Returns None if no such params exist or none have
+        gradients yet. Safe to call on any variant; no-op for non-B5.
+        """
+        sq_sum = 0.0
+        n_found = 0
+        for n, p in self.model.named_parameters():
+            if ("seg_embedding" in n or "seg_projection" in n) and p.grad is not None:
+                g = p.grad.detach()
+                sq_sum += float(g.pow(2).sum().item())
+                n_found += 1
+        if n_found == 0:
+            return None
+        return math.sqrt(sq_sum)
+
     def train_epoch(self, epoch):
         self.model.train()
         losses = AverageMeter()
         batch_time = AverageMeter()
-        
+
         num_batches = len(self.train_loader)
         batch_size = self.config['training']['batch_size']
         intra_img_weight = self.config['loss']['intra_img_weight']
@@ -243,33 +266,47 @@ class Trainer:
         # Initialize grad_norm for logging
         grad_norm = 0.0
         end_time = time.time()
-        
+
+        # B5 per-epoch diagnostics: reset accumulators.
+        self._seg_grad_norm_sum = 0.0
+        self._seg_grad_norm_n = 0
+        self._seg_cat_coverage_sum = 0.0
+        self._seg_cat_coverage_n = 0
+
         for step, batch in enumerate(self.train_loader):
             images = batch['image'].to(self.device, non_blocking=True)
             input_ids = batch['input_ids'].to(self.device, non_blocking=True)
             attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
-            # B5_seg only: pull per-patch SAM segment IDs from the batch.
+            # B5a/B5b/B5c only: pull per-patch segment tensor from the batch.
             # Strict gating — fail loud if the variant is active but the
             # collated batch is missing seg_ids.
             seg_ids = None
             if self.use_seg_ids:
                 if 'seg_ids' not in batch:
                     raise KeyError(
-                        "B5_seg active (model.seg_embed_size set) but batch is "
+                        "B5 active (model.seg_mode set) but batch is "
                         "missing 'seg_ids'. Check the dataloader factory."
                     )
                 seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
-                # First-epoch sanity stat: number of unique segment IDs per
-                # image. Cheap (one set per row of a 576-long tensor on CPU).
-                if epoch == 0:
-                    # seg_ids: [B, 576] LongTensor on device
+                # First-epoch sanity stat: unique-segment-ID-count per image.
+                # Only meaningful for discrete modes (spatial/semantic); skip
+                # for continuous float features.
+                if epoch == 0 and self.seg_mode in ('spatial', 'semantic'):
                     seg_ids_cpu = seg_ids.detach().to('cpu')
                     for row in seg_ids_cpu:
                         n_unique = int(torch.unique(row).numel())
                         self._seg_unique_count_sum += n_unique
                         self._seg_unique_count_sq_sum += n_unique * n_unique
                         self._seg_unique_count_n += 1
+
+                # B5b diagnostic: fraction of the 81 semantic categories that
+                # appear in this batch.
+                if self.seg_mode == 'semantic':
+                    vocab = int(self.config['model']['seg_vocab_size'])
+                    n_unique_batch = int(torch.unique(seg_ids).numel())
+                    self._seg_cat_coverage_sum += n_unique_batch / max(1, vocab)
+                    self._seg_cat_coverage_n += 1
 
             neg_input_ids = batch.get('negative_input_ids')
             neg_attention_mask = batch.get('negative_attention_mask')
@@ -557,7 +594,17 @@ class Trainer:
                             f"Skipping optimizer step at epoch {epoch} step {step}: "
                             f"grad_norm={grad_norm}. Weights not updated."
                         )
-            
+
+            # B5 diagnostic: L2 grad norm of the seg_embedding / seg_projection
+            # params, accumulated per epoch and logged at eval time. Runs after
+            # optimizer.step() but before the next iteration's zero_grad(), so
+            # gradients are still alive. No-op for every non-B5 variant.
+            if self.use_seg_ids:
+                seg_gn = self._compute_seg_grad_norm()
+                if seg_gn is not None and math.isfinite(seg_gn):
+                    self._seg_grad_norm_sum += seg_gn
+                    self._seg_grad_norm_n += 1
+
             self.scheduler.step()
             
             # Update metrics
@@ -738,15 +785,44 @@ class Trainer:
             f"mAP@R: {metrics['val/mapr_t2i']:.2f} | R-Prec: {metrics['val/rprecision_t2i']:.2f}"
         )
 
-        # B5_seg only: track Frobenius norm of the segment embedding table.
-        # Useful as a sanity check that the table is actually learning
-        # (it starts at 0 due to zero-init).
-        if self.use_seg_ids and self.model.seg_embedding is not None:
+        # B5a/B5b/B5c diagnostics. All gated on self.use_seg_ids so every
+        # other variant pays zero cost.
+        if self.use_seg_ids:
             with torch.no_grad():
-                seg_w = self.model.seg_embedding.weight  # [n_seg, d_model]
-                seg_norm = float(torch.linalg.norm(seg_w).item())
-            metrics["val/seg_embedding_norm"] = seg_norm
-            logger.info(f"[B5_seg] seg_embedding_norm={seg_norm:.6f}")
+                if self.model.seg_embedding is not None:
+                    seg_w = self.model.seg_embedding.weight  # [vocab, d_model]
+                    metrics["val/seg_embedding_norm"] = float(torch.linalg.norm(seg_w).item())
+                if self.model.seg_projection is not None:
+                    # Frobenius norm over all Linear weight matrices in the MLP.
+                    proj_norm_sq = 0.0
+                    for m in self.model.seg_projection.modules():
+                        if isinstance(m, torch.nn.Linear):
+                            proj_norm_sq += float(m.weight.pow(2).sum().item())
+                    metrics["val/seg_projection_weight_norm"] = math.sqrt(proj_norm_sq)
+
+            # Per-epoch averaged grad norm of seg_embedding / seg_projection.
+            if self._seg_grad_norm_n > 0:
+                metrics["val/seg_embedding_grad_norm"] = (
+                    self._seg_grad_norm_sum / self._seg_grad_norm_n
+                )
+
+            # B5b only: fraction of the 81 semantic categories seen per batch,
+            # averaged over the epoch's training batches.
+            if self.seg_mode == 'semantic' and self._seg_cat_coverage_n > 0:
+                metrics["val/seg_category_coverage"] = (
+                    self._seg_cat_coverage_sum / self._seg_cat_coverage_n
+                )
+
+            log_bits = [f"mode={self.seg_mode}"]
+            for k in (
+                "val/seg_embedding_norm",
+                "val/seg_projection_weight_norm",
+                "val/seg_embedding_grad_norm",
+                "val/seg_category_coverage",
+            ):
+                if k in metrics:
+                    log_bits.append(f"{k.split('/')[-1]}={metrics[k]:.6f}")
+            logger.info("[B5] " + " ".join(log_bits))
 
         if self.use_wandb:
             log_data = dict(metrics)
