@@ -46,6 +46,18 @@ runs:
       # data.seg_map_dir is set per-dataset in configs/config_{coco,flickr30k}.yaml
 
   B5b_seg_semantic:
+    # Per-patch vocabulary: 0 = background, 1..80 = COCO categories in the
+    # contiguous remap of COCO's sparse category_id space.
+    # Label source differs by dataset (see scripts/precompute_sam.py):
+    #   - COCO:      IoU-match each SAM mask against instances_{train,val}2014
+    #                annotations (threshold = 0.3).
+    #   - Flickr30k: zero-shot CLIP classify each SAM mask crop against the 80
+    #                COCO prompts (top-1 if prob >= 0.3, else background).
+    # Flickr30k-only filter: SAM segments whose bbox is <4 px on either side
+    # are dropped (stay as background). This avoids (a) CLIPImageProcessor
+    # mis-inferring the channel axis for shapes like (1, N, 3), and
+    # (b) feeding CLIP essentially-empty crops whose argmax over 80 classes is
+    # noise. Has no effect on COCO (IoU path).
     description: "B0+ + segment-aware patches with COCO 80 category IDs"
     parent: B0plus
     overrides:

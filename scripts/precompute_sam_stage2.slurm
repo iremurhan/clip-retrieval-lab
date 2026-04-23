@@ -88,21 +88,25 @@ echo "=========================================="
 
 cd /workspace
 
-# --- Runtime pip install into a workspace-local site-packages dir ---
-# The b5 container image does not yet include pycocotools; install it here so
-# no image rebuild is required. Target dir lives under /workspace (bind-mounted
-# and always writable), so subsequent jobs reuse the same install.
-PIP_TARGET="/workspace/.local/py_deps"
-mkdir -p "$PIP_TARGET"
-export PYTHONPATH="${PIP_TARGET}:/workspace:${PYTHONPATH:-}"
+# --- Runtime pip install into a tmpfs-backed dir ---
+# The b5 container image does not yet include pycocotools. It ships a native
+# _mask.cpython-*.so which must be loadable via mmap(PROT_EXEC). The bind-
+# mounted /workspace does NOT satisfy that (fails with "failed to map segment
+# from shared object"), so we install into /tmp which is the container's own
+# tmpfs and supports executable mapping. /tmp is per-job so we always reinstall.
+# --no-deps avoids pulling in numpy 2.x / matplotlib / pillow, which would
+# shadow the container's numpy 1.26.4.
+PIP_TARGET="/tmp/py_deps"
 
 if [ "$SEG_MODE" = "semantic" ] && [ "$DATASET" = "coco" ]; then
-    if ! python3 -c "import pycocotools" 2>/dev/null; then
-        echo "Installing pycocotools into ${PIP_TARGET} ..."
-        pip install --no-cache-dir --target="$PIP_TARGET" "pycocotools==2.0.7"
-    else
-        echo "pycocotools already importable, skipping install."
-    fi
+    rm -rf "$PIP_TARGET"
+    mkdir -p "$PIP_TARGET"
+    echo "Installing pycocotools (no-deps) into ${PIP_TARGET} ..."
+    pip install --no-cache-dir --no-deps --target="$PIP_TARGET" "pycocotools==2.0.7"
+    export PYTHONPATH="${PIP_TARGET}:/workspace:${PYTHONPATH:-}"
+else
+    # Other seg_modes / datasets do NOT need pycocotools.
+    export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 fi
 
 EXTRA_ARGS=()

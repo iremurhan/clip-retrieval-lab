@@ -416,6 +416,21 @@ def segmap_to_semantic_flickr(
             continue
         y1, y2 = int(ys.min()), int(ys.max())
         x1, x2 = int(xs.min()), int(xs.max())
+        crop_h = y2 - y1 + 1  # [H, W] bbox height
+        crop_w = x2 - x1 + 1  # [H, W] bbox width
+        # B5b design decision: discard SAM segments whose bbox is <4 px on
+        # either side. Two reasons, both load-bearing:
+        #   (1) Correctness — CLIPImageProcessor auto-infers the channel axis;
+        #       for shapes like (1, N, 3) it cannot disambiguate (C=1,H=N,W=3)
+        #       from (H=1,W=N,C=3) and falls back to channels-first, then
+        #       raises "mean must have 1 elements, got 3".
+        #   (2) Semantics — CLIP is trained on 224/336-px images. A 1x1 or 3x2
+        #       crop upscaled to 336x336 is a blurred color patch with no
+        #       object-level signal; its argmax over 80 classes is noise.
+        # Skipped segments stay at lut[sid]=0 (background) — identical outcome
+        # to a below-threshold zero-shot confidence.
+        if crop_h < 4 or crop_w < 4:
+            continue
         crop = image_pil.crop((x1, y1, x2 + 1, y2 + 1))
         inputs = clip_processor(images=crop, return_tensors="pt").to(device)
         with _torch.no_grad():
