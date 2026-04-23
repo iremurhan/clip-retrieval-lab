@@ -35,9 +35,30 @@ runs:
       model.lora_rank: 8
       model.unfreeze_vision_layers: 0
 
-  B5_seg:
-    description: "B0 + segment-aware patch enrichment via SAM masks"
-    parent: B0
+  B5a_seg_spatial:
+    description: "B0+ + segment-aware patches with spatial binning (3x3 grid x 3 sizes = 27 bins + bg)"
+    parent: B0plus
     overrides:
-      model.seg_embed_size: 64
+      model.seg_mode: spatial
+      model.seg_vocab_size: 28
+      model.seg_init_std: 0.02
+      training.seg_lr: 0.001
       # data.seg_map_dir is set per-dataset in configs/config_{coco,flickr30k}.yaml
+
+  B5b_seg_semantic:
+    description: "B0+ + segment-aware patches with COCO 80 category IDs"
+    parent: B0plus
+    overrides:
+      model.seg_mode: semantic
+      model.seg_vocab_size: 81
+      model.seg_init_std: 0.02
+      training.seg_lr: 0.001
+
+  B5c_seg_continuous:
+    description: "B0+ + segment-aware patches with continuous geometric MLP projection"
+    parent: B0plus
+    overrides:
+      model.seg_mode: continuous
+      model.seg_feature_dim: 5
+      model.seg_proj_hidden: 128
+      training.seg_lr: 0.001
