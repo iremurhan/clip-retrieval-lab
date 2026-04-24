@@ -12,9 +12,17 @@ runs:
     overrides: {}  # current defaults, no changes needed
 
   B0v2:
-    description: "B0+ with improved augmentation: LLM caption rewrites (replacing WordNet), reduced image aug (crop 0.7+, no grayscale), separate aug pipelines for inter/intra-modal. precomputed_path is set per-dataset in config_{coco,flickr30k}.yaml."
+    description: "B0+ with SLIP-style bipartite augmentation and LaCLIP LLM caption rewrites. Paraphraser model (mistral|llama) set via paraphraser.type; per-dataset paths in config_{coco,flickr30k}.yaml."
+    # Diff vs B0plus:
+    #   text paraphraser:            WordNet synonym replacement -> precomputed LLM rewrites
+    #                                (removed entirely from the codebase; paraphraser.type
+    #                                 now selects which LLM's rewrites to load)
+    #   augment.aug_crop_scale_min:  0.4 -> 0.7   (milder crop, preserves VL semantics)
+    #   augment.color_jitter_strength: 0.4 -> 0.2 (weaker photometric distortion)
+    #   augment.use_grayscale:       true -> false (removed; kills chromatic cues text relies on)
+    #   augment.separate_pipelines:  false -> true (SLIP-style: minimal anchor aug for inter-modal,
+    #                                               stronger aug only on the intra-modal view)
     overrides:
-      paraphraser.type: "llm_precomputed"
       augment.aug_crop_scale_min: 0.7
       augment.color_jitter_strength: 0.2
       augment.use_grayscale: false

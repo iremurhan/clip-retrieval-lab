@@ -81,38 +81,26 @@ class Trainer:
         
         # Initialize paraphraser for L_text_text = InfoNCE(T_orig, T_paraphrased)
         self.paraphraser = None
-        self._paraphraser_uses_sentids = False
         para_cfg = config['paraphraser']
         para_type = para_cfg['type']
-        paraphrase_path = para_cfg['precomputed_path']
+        para_paths = para_cfg['paths']
         intra_txt_weight = config['loss']['intra_txt_weight']
         if intra_txt_weight > 0:
-            if para_type == 'llm_precomputed':
-                from .paraphraser import PrecomputedLLMParaphraser
-                self.paraphraser = PrecomputedLLMParaphraser(
-                    rewrites_path=paraphrase_path,
-                    tokenizer=clip_tokenizer,
-                    device=device,
-                    max_length=config['data']['max_length'],
-                    seed=config['training']['seed'],
+            if para_type not in para_paths:
+                raise ValueError(
+                    f"paraphraser.type='{para_type}' is not defined in paraphraser.paths "
+                    f"(available: {sorted(para_paths.keys())})."
                 )
-                self._paraphraser_uses_sentids = True
-                logger.info("Using LLM pre-computed paraphraser (LaCLIP-style).")
-            elif paraphrase_path and os.path.exists(paraphrase_path):
-                from .paraphraser import PrecomputedParaphraser
-                self.paraphraser = PrecomputedParaphraser(
-                    clip_tokenizer, device,
-                    max_length=config['data']['max_length'],
-                )
-                logger.info("Using pre-computed paraphraser.")
-            else:
-                from .paraphraser import NLTKParaphraser
-                self.paraphraser = NLTKParaphraser(
-                    clip_tokenizer, device,
-                    max_length=config['data']['max_length'],
-                    seed=config['training']['seed'],
-                )
-                logger.info("Using NLTK synonym replacement paraphraser.")
+            rewrites_path = para_paths[para_type]
+            from .paraphraser import PrecomputedLLMParaphraser
+            self.paraphraser = PrecomputedLLMParaphraser(
+                rewrites_path=rewrites_path,
+                tokenizer=clip_tokenizer,
+                device=device,
+                max_length=config['data']['max_length'],
+                seed=config['training']['seed'],
+            )
+            logger.info(f"Using LLM pre-computed paraphraser (LaCLIP-style, type={para_type}).")
         else:
             logger.info("Paraphraser disabled (intra_txt_weight=0).")
 
@@ -301,8 +289,7 @@ class Trainer:
                 # Generate paraphrases for full batch before GradCache phases
                 para_input_ids, para_attention_mask = None, None
                 if intra_txt_weight > 0 and self.paraphraser is not None:
-                    para_arg = batch['sentid'].tolist() if self._paraphraser_uses_sentids else batch['caption']
-                    para_input_ids, para_attention_mask = self.paraphraser.generate(para_arg)
+                    para_input_ids, para_attention_mask = self.paraphraser.generate(batch['sentid'].tolist())
                     # para_input_ids: [N, 77], para_attention_mask: [N, 77]
 
                 image_aug = (
@@ -372,8 +359,7 @@ class Trainer:
                         _neg_n = 0    # length of hard-neg slice
 
                         if intra_txt_weight > 0 and self.paraphraser is not None:
-                            para_arg = batch['sentid'].tolist() if self._paraphraser_uses_sentids else batch['caption']
-                            para_ids, para_mask = self.paraphraser.generate(para_arg)
+                            para_ids, para_mask = self.paraphraser.generate(batch['sentid'].tolist())
                             nograd_ids_parts.append(para_ids)    # [N, 77]
                             nograd_mask_parts.append(para_mask)  # [N, 77]
                             _para_n = para_ids.shape[0]
@@ -506,8 +492,7 @@ class Trainer:
                     _neg_n = 0
 
                     if intra_txt_weight > 0 and self.paraphraser is not None:
-                        para_arg = batch['sentid'].tolist() if self._paraphraser_uses_sentids else batch['caption']
-                        para_ids, para_mask = self.paraphraser.generate(para_arg)
+                        para_ids, para_mask = self.paraphraser.generate(batch['sentid'].tolist())
                         nograd_ids_parts.append(para_ids)    # [N, 77]
                         nograd_mask_parts.append(para_mask)  # [N, 77]
                         _para_n = para_ids.shape[0]

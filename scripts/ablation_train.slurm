@@ -6,14 +6,17 @@
 # Called by scripts/launch_ablation.sh — do not invoke directly.
 #
 # Usage (via sbatch):
-#   sbatch scripts/ablation_train.slurm <RUN_ID> <SEED> <CONFIG>
+#   sbatch scripts/ablation_train.slurm <RUN_ID> <SEED> <CONFIG> [KEY=VAL ...]
 # Example:
 #   sbatch scripts/ablation_train.slurm B0plus 42 configs/config_flickr30k.yaml
+#   sbatch scripts/ablation_train.slurm B0v2   42 configs/config_flickr30k.yaml \
+#          paraphraser.type=llama
 #
 # Arguments:
 #   $1  RUN_ID   Registry run ID (e.g. B0, FULL)
 #   $2  SEED     Random seed (e.g. 42)
 #   $3  CONFIG   Dataset config path (e.g. configs/config_coco.yaml)
+#   $4+ EXTRA   Optional KEY=VAL overrides forwarded verbatim to run.py --override
 #
 # Checkpoint is written to:
 #   /output/results/{dataset}/{SLURM_JOB_ID}/  (best_model.pth, last_model.pth)
@@ -33,6 +36,8 @@ set -euo pipefail
 RUN_ID="${1}"
 SEED="${2}"
 CONFIG_FILE="${3:-configs/config_coco.yaml}"
+shift 3 || true
+EXTRA_OVERRIDES=("$@")
 
 DATASET=$(python3 -c "
 import sys, yaml
@@ -57,6 +62,12 @@ echo "Seed:       ${SEED}"
 echo "Dataset:    ${DATASET}"
 echo "Config:     ${CONFIG_FILE}"
 echo "Job dir:    ${JOB_DIR}"
+if [ ${#EXTRA_OVERRIDES[@]} -gt 0 ]; then
+    echo "Extra overrides:"
+    for ov in "${EXTRA_OVERRIDES[@]}"; do
+        echo "  - $ov"
+    done
+fi
 echo "=========================================="
 
 export WANDB_DIR="$JOB_DIR"
@@ -85,6 +96,7 @@ python3 -u run.py \
     --seed "$SEED" \
     --override \
         logging.checkpoint_dir="$CKPT_DIR" \
+        "${EXTRA_OVERRIDES[@]}" \
     > "$JOB_DIR/training.log" 2>&1
 TRAIN_EXIT_CODE=$?
 set -e

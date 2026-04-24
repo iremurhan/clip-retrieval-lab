@@ -7,6 +7,6 @@ loss:
   cls_label_path: "datasets/coco/coco_multilabel_map.pt"
 
 paraphraser:
-  # Used only when paraphraser.type == "llm_precomputed" (set by run registry).
-  precomputed_path: "datasets/coco/caption_rewrites_mistral-7b-instruct-v0.2.json"
-
+  paths:
+    mistral: "datasets/coco/caption_rewrites_mistral-7b-instruct-v0.2.json"
+    llama:   "datasets/coco/caption_rewrites_meta-llama-3-8b-instruct.json"

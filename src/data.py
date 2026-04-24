@@ -475,9 +475,20 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     # LaCLIP-style caption rewrites: only for train split
     caption_rewrites_path = None
     if split == 'train':
-        para_type = config['paraphraser']['type']
-        if para_type == 'llm_precomputed':
-            caption_rewrites_path = config['paraphraser']['precomputed_path']
+        para_cfg = config['paraphraser']
+        para_type = para_cfg['type']
+        para_paths = para_cfg['paths']
+        if para_type not in para_paths:
+            raise ValueError(
+                f"paraphraser.type='{para_type}' is not defined in paraphraser.paths "
+                f"(available: {sorted(para_paths.keys())})."
+            )
+        caption_rewrites_path = para_paths[para_type]
+        if not caption_rewrites_path:
+            raise ValueError(
+                f"paraphraser.paths['{para_type}'] is empty for this dataset. "
+                f"Define it in the dataset config."
+            )
 
     dataset = CaptionImageDataset(
         images_root_path=images_root,
