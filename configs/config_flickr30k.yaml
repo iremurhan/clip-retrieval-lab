@@ -4,5 +4,6 @@ data:
   captions_path: "datasets/flickr30k/caption_datasets/dataset_flickr30k.json"
 
 paraphraser:
-  # Used only when paraphraser.type == "llm_precomputed" (set by run registry).
-  precomputed_path: "datasets/flickr30k/caption_rewrites_mistral-7b-instruct-v0.2.json"
+  paths:
+    mistral: "datasets/flickr30k/caption_rewrites_mistral-7b-instruct-v0.2.json"
+    llama:   "datasets/flickr30k/caption_rewrites_meta-llama-3-8b-instruct.json"

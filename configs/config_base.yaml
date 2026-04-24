@@ -21,8 +21,10 @@ loss:
   cls_label_path: null
 
 paraphraser:
-  type: "nltk"            # "nltk" (WordNet synonym replacement) | "llm_precomputed" (LaCLIP-style LLM rewrites)
-  precomputed_path: null  # path to caption_rewrites.json; required when type=llm_precomputed
+  type: "mistral"         # "mistral" | "llama" — selects which offline LLM rewrites to load
+  # Dataset-specific configs must define:
+  #   paraphraser.paths.mistral: <path to mistral rewrites JSON>
+  #   paraphraser.paths.llama:   <path to llama rewrites JSON>
 
 training:
   batch_size: 128
