@@ -354,17 +354,52 @@ def _mask_iou(a: np.ndarray, b: np.ndarray) -> float:
     return float(inter) / float(union)
 
 
+def _decode_coco_ann(seg_raw, h: int, w: int) -> np.ndarray:
+    """Decode a single COCO annotation's `segmentation` field to a bool HxW mask.
+
+    Supports the three standard COCO forms: list-of-polygons, compressed RLE
+    (counts=bytes), and uncompressed RLE (counts=list). Called once per SAM
+    segment during IoU matching — decoding is lazy to cap peak memory.
+    """
+    from pycocotools import mask as maskUtils
+    if isinstance(seg_raw, list):
+        rles = maskUtils.frPyObjects(seg_raw, h, w)
+        rle = maskUtils.merge(rles)
+    elif isinstance(seg_raw, dict):
+        rle = seg_raw if isinstance(seg_raw["counts"], bytes) else maskUtils.frPyObjects([seg_raw], h, w)[0]
+    else:
+        raise TypeError(f"Unknown COCO segmentation type: {type(seg_raw)}")
+    return maskUtils.decode(rle).astype(bool)
+
+
 def segmap_to_semantic_coco(
     seg_map: np.ndarray,
     image_size: int,
     patch_size: int,
-    coco_instance_masks: list,   # list of (cat_id_remapped, bool_mask HxW) tuples
+    coco_instance_anns: list,   # list of (cat_id_remapped, h, w, seg_raw) tuples
     iou_threshold: float,
 ) -> torch.Tensor:
-    """Produce [576] LongTensor of COCO-80 category IDs (0=bg, 1..80)."""
+    """Produce [576] LongTensor of COCO-80 category IDs (0=bg, 1..80).
+
+    `coco_instance_anns` holds RAW segmentation fields (polygon / RLE); masks
+    are decoded on demand via `_decode_coco_ann` so peak memory is one decoded
+    bool mask, not the full set (which would OOM at ~600k anns on COCO train).
+    """
     grid = image_size // patch_size
     unique_ids = np.unique(seg_map)
     lut = np.zeros(int(unique_ids.max()) + 1, dtype=np.int64)
+
+    # Decode each instance mask exactly once per image and cache for the
+    # inner SAM-segment loop below (seg_map typically has tens of SAM ids, so
+    # decoding N_inst times per image would be O(N_sam * N_inst) decodes).
+    decoded: list[tuple[int, np.ndarray]] = []
+    for cat_id, h, w, seg_raw in coco_instance_anns:
+        try:
+            inst_mask = _decode_coco_ann(seg_raw, h, w)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to decode ann for cat={cat_id}: {e}")
+            continue
+        decoded.append((cat_id, inst_mask))
 
     for sid in unique_ids:
         if sid == 0:
@@ -372,7 +407,7 @@ def segmap_to_semantic_coco(
         sam_mask = (seg_map == sid)
         best_iou = 0.0
         best_cat = 0
-        for cat_id, inst_mask in coco_instance_masks:
+        for cat_id, inst_mask in decoded:
             iou = _mask_iou(sam_mask, inst_mask)
             if iou > best_iou:
                 best_iou = iou
@@ -451,11 +486,16 @@ def segmap_to_semantic_flickr(
 def _load_coco_instance_annotations(ann_dir: str) -> dict:
     """
     Parse instances_{train,val}2014.json and return a dict
-        image_filename_stem -> list[(cat_id_remapped, bool_mask HxW)]
+        image_filename_stem -> list[(cat_id_remapped, H, W, seg_raw)]
+
+    `seg_raw` is the annotation's ORIGINAL segmentation field (polygon list or
+    RLE dict) — NOT a decoded bool mask. Decoding is deferred to
+    `segmap_to_semantic_coco` / `_decode_coco_ann` so peak RSS stays bounded
+    (COCO train has ~600k anns; pre-decoding every bool mask OOMs at ~50 GB).
     """
     import json
     try:
-        from pycocotools import mask as maskUtils
+        from pycocotools import mask as maskUtils  # noqa: F401 — import check only
     except ImportError as e:
         raise RuntimeError(
             "B5b semantic on COCO requires pycocotools. `pip install pycocotools`."
@@ -463,7 +503,6 @@ def _load_coco_instance_annotations(ann_dir: str) -> dict:
 
     remap = _coco_id_remap()
     per_image: dict = {}
-    per_image_hw: dict = {}  # stem -> (H, W)
 
     for split in ("train2014", "val2014"):
         path = os.path.join(ann_dir, f"instances_{split}.json")
@@ -478,7 +517,6 @@ def _load_coco_instance_annotations(ann_dir: str) -> dict:
         for img in data["images"]:
             stem = os.path.splitext(img["file_name"])[0]
             img_meta[img["id"]] = (stem, img["height"], img["width"])
-            per_image_hw[stem] = (img["height"], img["width"])
         for ann in data["annotations"]:
             if ann.get("iscrowd", 0):
                 continue
@@ -493,19 +531,7 @@ def _load_coco_instance_annotations(ann_dir: str) -> dict:
             seg = ann.get("segmentation")
             if seg is None:
                 continue
-            try:
-                if isinstance(seg, list):
-                    rles = maskUtils.frPyObjects(seg, h, w)
-                    rle = maskUtils.merge(rles)
-                elif isinstance(seg, dict):
-                    rle = seg if isinstance(seg["counts"], bytes) else maskUtils.frPyObjects([seg], h, w)[0]
-                else:
-                    continue
-                m = maskUtils.decode(rle).astype(bool)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Failed to decode ann {ann.get('id')}: {e}")
-                continue
-            per_image.setdefault(stem, []).append((cat_remapped, m))
+            per_image.setdefault(stem, []).append((cat_remapped, h, w, seg))
 
     logger.info(f"COCO annotations: {len(per_image)} images with >=1 instance")
     return per_image
