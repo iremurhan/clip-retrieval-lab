@@ -19,10 +19,10 @@ Design Rationale:
 import torch
 from torch.utils.data import Dataset, DataLoader
 import json
+import numpy as np
 import os
 import logging
 import random
-import numpy as np
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -321,14 +321,30 @@ class SegmentFeatureLoader:
                 f"Run: python scripts/precompute_sam.py --seg_mode {seg_mode} ..."
             )
 
-        # Single dict on CPU, shared across workers via COW fork semantics.
         logger.info(f"Loading segment features: {pt_path}")
-        self._table = torch.load(pt_path, map_location="cpu", weights_only=True)
-        if not isinstance(self._table, dict):
+        raw = torch.load(pt_path, map_location="cpu", weights_only=True)
+        if not isinstance(raw, dict):
             raise TypeError(
-                f"{pt_path} must contain a dict[str, Tensor], got {type(self._table).__name__}"
+                f"{pt_path} must contain a dict[str, Tensor], got {type(raw).__name__}"
             )
-        logger.info(f"Loaded {len(self._table)} segment-feature entries from {pt_path}")
+        # Pack into a single contiguous tensor + numpy stem index. The dict
+        # and its str keys would otherwise re-COW per DataLoader worker
+        # (refcount writes break shared pages); the packed tensor lives in
+        # shared memory and the U-array key table is a single C buffer.
+        stems = list(raw.keys())
+        first = raw[stems[0]]
+        packed = torch.empty((len(stems), *first.shape), dtype=first.dtype)
+        for i, s in enumerate(stems):
+            packed[i] = raw[s]
+        del raw
+        packed.share_memory_()
+        self._packed = packed                                       # [K, 576] or [K, 576, F]
+        order = np.argsort(np.asarray(stems, dtype=np.str_))
+        self._stems_sorted = np.asarray(stems, dtype=np.str_)[order]
+        self._stems_order = order.astype(np.int64)
+        logger.info(
+            f"Loaded {len(stems)} segment-feature entries (packed, shared) from {pt_path}"
+        )
 
         if self.is_continuous:
             if seg_feature_dim is None or seg_feature_dim < 1:
@@ -354,13 +370,14 @@ class SegmentFeatureLoader:
             FloatTensor (576, F)     for seg_mode == 'continuous'
         """
         stem = os.path.splitext(os.path.basename(filename))[0]
-        feat = self._table.get(stem)
-        if feat is None:
+        pos = int(np.searchsorted(self._stems_sorted, stem))
+        if pos >= self._stems_sorted.shape[0] or str(self._stems_sorted[pos]) != stem:
             raise KeyError(
                 f"Precomputed segment features missing for '{stem}' "
                 f"(seg_mode={self.seg_mode}, dir={self.seg_map_dir}). "
                 "Every training image must be covered."
             )
+        feat = self._packed[int(self._stems_order[pos])]
 
         if self.is_continuous:
             if feat.dim() != 2 or feat.size(0) != self.num_patches \
@@ -389,6 +406,32 @@ class SegmentFeatureLoader:
 # ============================================================================
 # Dataset
 # ============================================================================
+
+class _ColumnarSampleStore:
+    """COW-safe metadata store. All columns are numpy buffers so that worker
+    fork does not break COW via Python refcount writes. __getitem__ rebuilds
+    a dict per call to preserve the existing dataset.samples[idx] API."""
+    __slots__ = ("image_ids", "sentids", "captions", "filepaths", "filenames")
+
+    def __init__(self, image_ids, sentids, captions, filepaths, filenames):
+        self.image_ids = image_ids   # int64  [N]
+        self.sentids = sentids       # int64  [N]
+        self.captions = captions     # U<max> [N]
+        self.filepaths = filepaths   # U<max> [N]
+        self.filenames = filenames   # U<max> [N]
+
+    def __len__(self):
+        return self.image_ids.shape[0]  # [N] -> scalar
+
+    def __getitem__(self, idx):
+        return {
+            "image_id": int(self.image_ids[idx]),
+            "sentid":   int(self.sentids[idx]),
+            "caption":  str(self.captions[idx]),
+            "filepath": str(self.filepaths[idx]),
+            "filename": str(self.filenames[idx]),
+        }
+
 
 class CaptionImageDataset(Dataset):
     def __init__(
@@ -426,7 +469,10 @@ class CaptionImageDataset(Dataset):
         with open(captions_path, 'r') as f:
             data = json.load(f)
 
-        self.samples = []
+        # COW-safe columnar staging. List-of-dicts forces Python refcount
+        # writes on every access, multiplying dataset RSS by num_workers on
+        # fork. Buffers below are converted to numpy at the end of __init__.
+        image_ids, sentids, captions, filepaths, filenames = [], [], [], [], []
 
         # Karpathy JSON parsing logic
         for img in data['images']:
@@ -434,30 +480,39 @@ class CaptionImageDataset(Dataset):
             if current_split == 'restval' and split == 'train':
                 current_split = 'train'
 
-            if current_split == split:
-                # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
-                if 'cocoid' in img:
-                    img_id = int(img['cocoid'])
-                elif 'imgid' in img:
-                    img_id = int(img['imgid'])
-                elif 'id' in img:
-                    img_id = int(img['id'])
-                else:
-                    raise ValueError(
-                        f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
-                    )
+            if current_split != split:
+                continue
 
-                # Take exactly 5 captions
-                sentences = img['sentences'][:5]
-                for sent in sentences:
-                    self.samples.append({
-                        'image_id': img_id,
-                        'caption': sent['raw'],
-                        'sentid': int(sent['sentid']),
-                        'filepath': img.get('filepath', ''),
-                        'filename': img.get('filename', '')
-                    })
+            # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
+            if 'cocoid' in img:
+                img_id = int(img['cocoid'])
+            elif 'imgid' in img:
+                img_id = int(img['imgid'])
+            elif 'id' in img:
+                img_id = int(img['id'])
+            else:
+                raise ValueError(
+                    f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
+                )
 
+            fp = img.get('filepath', '')
+            fn = img.get('filename', '')
+            for sent in img['sentences'][:5]:
+                image_ids.append(img_id)
+                sentids.append(int(sent['sentid']))
+                captions.append(sent['raw'])
+                filepaths.append(fp)
+                filenames.append(fn)
+
+        del data
+
+        self.samples = _ColumnarSampleStore(
+            image_ids=np.asarray(image_ids, dtype=np.int64),
+            sentids=np.asarray(sentids, dtype=np.int64),
+            captions=np.asarray(captions,  dtype=np.str_),
+            filepaths=np.asarray(filepaths, dtype=np.str_),
+            filenames=np.asarray(filenames, dtype=np.str_),
+        )
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
 
     def __len__(self):
