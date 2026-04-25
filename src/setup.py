@@ -131,22 +131,41 @@ def setup_config(base_path=None, config_path=None, overrides=None):
 
 def make_wandb_config(config):
     """Build a minimal config dict for WandB (scientific params only)."""
-    return {
-        "run_id":              config['logging']['run_id'],
-        "dataset":             config['data']['dataset'],
-        "seed":                config['training']['seed'],
-        "model":               config.get('model', {}).get('image_model_name'),
-        "loss_type":           config.get('loss', {}).get('type', 'infonce'),
-        "hard_negatives":      config.get('loss', {}).get('hard_negatives', False),
-        "lora_rank":           config.get('model', {}).get('lora_rank', 0),
-        "unfreeze_layers":     config.get('model', {}).get('unfreeze_vision_layers', 0),
-        "intra_img_weight":    config.get('loss', {}).get('intra_img_weight', 0),
-        "intra_txt_weight":    config.get('loss', {}).get('intra_txt_weight', 0),
-        "k_photometric_augs":  config.get('augment', {}).get('k_photometric_augs', 0),
-        "batch_size":          config.get('training', {}).get('batch_size'),
-        "epochs":              config.get('training', {}).get('epochs'),
-        "use_grad_cache":      config.get('training', {}).get('use_grad_cache', False),
+    aug = config.get('augment', {})
+    payload = {
+        "run_id":                config['logging']['run_id'],
+        "dataset":               config['data']['dataset'],
+        "seed":                  config['training']['seed'],
+        "model":                 config.get('model', {}).get('image_model_name'),
+        "loss_type":             config.get('loss', {}).get('type', 'infonce'),
+        "hard_negatives":        config.get('loss', {}).get('hard_negatives', False),
+        "lora_rank":             config.get('model', {}).get('lora_rank', 0),
+        "unfreeze_layers":       config.get('model', {}).get('unfreeze_vision_layers', 0),
+        "intra_img_weight":      config.get('loss', {}).get('intra_img_weight', 0),
+        "intra_txt_weight":      config.get('loss', {}).get('intra_txt_weight', 0),
+        "k_photometric_augs":    aug.get('k_photometric_augs', 0),
+        "aug_crop_scale_min":    aug.get('aug_crop_scale_min'),
+        "color_jitter_strength": aug.get('color_jitter_strength'),
+        "use_grayscale":         aug.get('use_grayscale'),
+        "separate_pipelines":    aug.get('separate_pipelines'),
+        "batch_size":            config.get('training', {}).get('batch_size'),
+        "epochs":                config.get('training', {}).get('epochs'),
+        "use_grad_cache":        config.get('training', {}).get('use_grad_cache', False),
     }
+
+    # Configuration lineage — flat keys so WandB can group/filter by them.
+    # Read directly from the merged YAML; not derived from CLI flags.
+    lineage = config.get('lineage')
+    if lineage is not None:
+        if not isinstance(lineage, dict):
+            raise TypeError(
+                f"config['lineage'] must be a dict, got {type(lineage).__name__}"
+            )
+        for k, v in lineage.items():
+            payload[f"lineage.{k}"] = v
+        payload["lineage"] = dict(lineage)  # nested form for downstream consumers
+
+    return payload
 
 
 def format_run_name(run_id, dataset_name, seed=None):
