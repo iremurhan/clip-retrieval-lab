@@ -2,6 +2,9 @@ data:
   dataset: "coco"
   images_path: "datasets/coco"
   captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
+  # COCO RSS scales ~4x vs Flickr; cap workers to keep host RAM under SLURM --mem.
+  # Pairs with the COW-safe samples / packed seg table in src/data.py.
+  num_workers: 2
   # Used only by B5_seg (gated on model.seg_embed_size). Path is relative to /workspace.
   seg_map_dir: "datasets/coco/sam_masks"
 
