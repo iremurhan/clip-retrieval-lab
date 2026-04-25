@@ -54,9 +54,25 @@ data:
   image_size: 336
 
 augment:
-  # Number of photometric transforms sampled from the VLM-safe pool per image.
-  # Pool: [ColorJitter, GaussianBlur, RandomGrayscale]. Max k=3.
+  # Number of photometric transforms sampled from the configurable pool per image.
+  # Pool: [ColorJitter, GaussianBlur] + RandomGrayscale (if use_grayscale=true).
   k_photometric_augs: 2
+  # Lower bound of RandomResizedCrop scale on the augmented contrastive view.
+  # B0v2_clean default; <0.4 is overcropping for VLM retrieval.
+  aug_crop_scale_min: 0.4
+  # ColorJitter (b/c/s) magnitude; hue is scaled by 0.25x internally.
+  color_jitter_strength: 0.4
+  # Include RandomGrayscale(p=1.0) in the photometric pool.
+  use_grayscale: true
+  # SLIP-style separate anchor / aug pipelines (anchor stays photometrically clean).
+  separate_pipelines: true
+
+# Configuration lineage — frozen provenance metadata. Forwarded into the
+# WandB run config (see src/setup.py::make_wandb_config).
+lineage:
+  parent_branch: "B0v2"
+  augmentation_scheme: "B0v2_clean"
+  previous_baseline: "B0plus"
 
 logging:
   use_wandb: true
