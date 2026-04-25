@@ -261,6 +261,32 @@ class HardNegativeGenerator:
 # Dataset
 # ============================================================================
 
+class _ColumnarSampleStore:
+    """COW-safe metadata store. All columns are numpy buffers so that worker
+    fork does not break COW via Python refcount writes. __getitem__ rebuilds
+    a dict per call to preserve the existing dataset.samples[idx] API."""
+    __slots__ = ("image_ids", "sentids", "captions", "filepaths", "filenames")
+
+    def __init__(self, image_ids, sentids, captions, filepaths, filenames):
+        self.image_ids = image_ids   # int64  [N]
+        self.sentids = sentids       # int64  [N]
+        self.captions = captions     # U<max> [N]
+        self.filepaths = filepaths   # U<max> [N]
+        self.filenames = filenames   # U<max> [N]
+
+    def __len__(self):
+        return self.image_ids.shape[0]  # [N] -> scalar
+
+    def __getitem__(self, idx):
+        return {
+            "image_id": int(self.image_ids[idx]),
+            "sentid":   int(self.sentids[idx]),
+            "caption":  str(self.captions[idx]),
+            "filepath": str(self.filepaths[idx]),
+            "filename": str(self.filenames[idx]),
+        }
+
+
 class CaptionImageDataset(Dataset):
     def __init__(
         self,
@@ -315,7 +341,10 @@ class CaptionImageDataset(Dataset):
         with open(captions_path, 'r') as f:
             data = json.load(f)
 
-        self.samples = []
+        # COW-safe columnar staging. List-of-dicts forces Python refcount
+        # writes on every access, multiplying dataset RSS by num_workers on
+        # fork. Buffers below are converted to numpy at the end of __init__.
+        image_ids, sentids, captions, filepaths, filenames = [], [], [], [], []
 
         # Karpathy JSON parsing logic
         for img in data['images']:
@@ -323,35 +352,44 @@ class CaptionImageDataset(Dataset):
             if current_split == 'restval' and split == 'train':
                 current_split = 'train'
 
-            if current_split == split:
-                # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
-                if 'cocoid' in img:
-                    img_id = int(img['cocoid'])
-                elif 'imgid' in img:
-                    img_id = int(img['imgid'])
-                elif 'id' in img:
-                    img_id = int(img['id'])
-                else:
-                    raise ValueError(
-                        f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
-                    )
+            if current_split != split:
+                continue
 
-                # Take exactly 5 captions
-                sentences = img['sentences'][:5]
-                for sent in sentences:
-                    self.samples.append({
-                        'image_id': img_id,
-                        'caption': sent['raw'],
-                        'sentid': int(sent['sentid']),
-                        'filepath': img.get('filepath', ''),
-                        'filename': img.get('filename', '')
-                    })
+            # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
+            if 'cocoid' in img:
+                img_id = int(img['cocoid'])
+            elif 'imgid' in img:
+                img_id = int(img['imgid'])
+            elif 'id' in img:
+                img_id = int(img['id'])
+            else:
+                raise ValueError(
+                    f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
+                )
 
+            fp = img.get('filepath', '')
+            fn = img.get('filename', '')
+            for sent in img['sentences'][:5]:
+                image_ids.append(img_id)
+                sentids.append(int(sent['sentid']))
+                captions.append(sent['raw'])
+                filepaths.append(fp)
+                filenames.append(fn)
+
+        del data
+
+        self.samples = _ColumnarSampleStore(
+            image_ids=np.asarray(image_ids, dtype=np.int64),
+            sentids=np.asarray(sentids, dtype=np.int64),
+            captions=np.asarray(captions,  dtype=np.str_),
+            filepaths=np.asarray(filepaths, dtype=np.str_),
+            filenames=np.asarray(filenames, dtype=np.str_),
+        )
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
 
         # Validate coverage: every sample sentid must exist in caption_rewrites
         if self.caption_rewrites is not None:
-            dataset_sids = {s['sentid'] for s in self.samples}
+            dataset_sids = set(self.samples.sentids.tolist())
             missing = dataset_sids - self.caption_rewrites.keys()
             if missing:
                 sample_ids = sorted(missing)[:10]
