@@ -26,7 +26,7 @@
 #   datasets/{dataset}/caption_rewrites_{model_slug}.json
 #   /output/results/rewrites/{job_id}/generate.log
 # =============================================================================
-#SBATCH --time=24:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=48G
