@@ -7,6 +7,24 @@ runs:
       loss.intra_txt_weight: 0
       augment.k_photometric_augs: 0
 
+  B0_uf5:
+    description: "B0 + unfreeze last 5 vision blocks"
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 5
+
+  B0_uf6:
+    description: "B0 + unfreeze last 6 vision blocks"
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 6
+
+  B0_uf7:
+    description: "B0 + unfreeze last 7 vision blocks"
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 7
+
   B0plus:
     description: "Full baseline — mix aug for img + paraphrase for txt + intra-modal + 4-layer unfreeze"
     overrides: {}  # current defaults, no changes needed
