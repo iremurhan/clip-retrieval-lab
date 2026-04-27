@@ -79,10 +79,21 @@ class DualEncoder(nn.Module):
             )
             self._init_head_weights()
         
-        # 3. Freezing Strategy - Freeze backbone, train projections
+        # 3. Classification head (branches off pre-projection hidden state)
+        num_cls = config['loss'].get('cls_num_classes', 0)
+        if num_cls > 0:
+            vision_hidden = self.clip.config.vision_config.hidden_size  # 1024 for ViT-L/14
+            self.cls_head = nn.Linear(vision_hidden, num_cls)
+            nn.init.xavier_uniform_(self.cls_head.weight)
+            nn.init.constant_(self.cls_head.bias, 0)
+            logger.info(f"Classification head: Linear({vision_hidden}, {num_cls})")
+        else:
+            self.cls_head = None
+
+        # 4. Freezing Strategy - Freeze backbone, train projections
         self._apply_freezing_strategy()
 
-        # 4. Reset logit_scale to fine-tuning starting value
+        # 5. Reset logit_scale to fine-tuning starting value
         # Pretrained CLIP has logit_scale ~4.6 (τ≈0.01), too high for fine-tuning.
         with torch.no_grad():
             self.clip.logit_scale.fill_(2.6593)  # ln(1/0.07) = 2.6593
@@ -252,6 +263,29 @@ class DualEncoder(nn.Module):
         if self.image_proj is not None:
             image_embeds = self.image_proj(image_embeds)
         return F.normalize(image_embeds, p=2, dim=1)
+
+    def encode_image_with_cls(self, images):
+        """
+        Single vision forward pass returning both contrastive embeddings and
+        classification logits. Avoids running the ViT twice.
+
+        Returns:
+            contrastive: [B, embed_dim] L2-normalized image embeddings
+            cls_logits:  [B, num_classes] raw logits from cls_head
+        """
+        if self.cls_head is None:
+            raise RuntimeError(
+                "encode_image_with_cls() called but cls_head is None. "
+                "Set loss.cls_num_classes > 0 in config."
+            )
+        vision_out = self.clip.vision_model(pixel_values=images)
+        pooled = vision_out.pooler_output.float()          # [B, 1024]
+        projected = self.clip.visual_projection(pooled)    # [B, 768]
+        if self.image_proj is not None:
+            projected = self.image_proj(projected)          # [B, embed_dim]
+        contrastive = F.normalize(projected, p=2, dim=1)   # [B, embed_dim]
+        cls_logits = self.cls_head(pooled)                  # [B, num_classes]
+        return contrastive, cls_logits
 
     def encode_text(self, input_ids, attention_mask):
         """Encode text only (L2-normalized). For use with separate image encoding (e.g. hard negatives)."""

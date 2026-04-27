@@ -24,6 +24,7 @@ import os
 import time
 import random
 from .metrics import AverageMeter, compute_recall_at_k, compute_eccv_metrics
+import torch.nn.functional as F
 from .utils import compute_grad_norm, chunked_matmul
 from .grad_cache import GradCache
 
@@ -81,24 +82,25 @@ class Trainer:
         # Initialize paraphraser for L_text_text = InfoNCE(T_orig, T_paraphrased)
         self.paraphraser = None
         para_cfg = config['paraphraser']
-        paraphrase_path = para_cfg['precomputed_path']
+        para_type = para_cfg['type']
+        para_paths = para_cfg['paths']
         intra_txt_weight = config['loss']['intra_txt_weight']
         if intra_txt_weight > 0:
-            if paraphrase_path and os.path.exists(paraphrase_path):
-                from .paraphraser import PrecomputedParaphraser
-                self.paraphraser = PrecomputedParaphraser(
-                    clip_tokenizer, device,
-                    max_length=config['data']['max_length'],
+            if para_type not in para_paths:
+                raise ValueError(
+                    f"paraphraser.type='{para_type}' is not defined in paraphraser.paths "
+                    f"(available: {sorted(para_paths.keys())})."
                 )
-                logger.info("Using pre-computed paraphraser.")
-            else:
-                from .paraphraser import NLTKParaphraser
-                self.paraphraser = NLTKParaphraser(
-                    clip_tokenizer, device,
-                    max_length=config['data']['max_length'],
-                    seed=config['training']['seed'],
-                )
-                logger.info("Using NLTK synonym replacement paraphraser.")
+            rewrites_path = para_paths[para_type]
+            from .paraphraser import PrecomputedLLMParaphraser
+            self.paraphraser = PrecomputedLLMParaphraser(
+                rewrites_path=rewrites_path,
+                tokenizer=clip_tokenizer,
+                device=device,
+                max_length=config['data']['max_length'],
+                seed=config['training']['seed'],
+            )
+            logger.info(f"Using LLM pre-computed paraphraser (LaCLIP-style, type={para_type}).")
         else:
             logger.info("Paraphraser disabled (intra_txt_weight=0).")
 
@@ -112,6 +114,25 @@ class Trainer:
             logger.info("Hard negative generator initialized (spaCy POS-tag swapping).")
         else:
             self.hard_neg_generator = None
+
+        # Initialize multi-label classification auxiliary loss
+        self.cls_weight = config['loss'].get('cls_weight', 0.0)
+        if self.cls_weight > 0:
+            cls_label_path = config['loss'].get('cls_label_path')
+            if not cls_label_path or not os.path.isfile(cls_label_path):
+                raise FileNotFoundError(
+                    f"cls_weight={self.cls_weight} but cls_label_path is missing or invalid: "
+                    f"'{cls_label_path}'. Run tools/build_coco_multilabel.py first."
+                )
+            self.cls_label_map = torch.load(cls_label_path, map_location=self.device)
+            num_cls = config['loss']['cls_num_classes']
+            self._cls_zero_vec = torch.zeros(num_cls, dtype=torch.float32, device=self.device)
+            logger.info(
+                f"Multi-label classification enabled: weight={self.cls_weight}, "
+                f"{len(self.cls_label_map)} images loaded from {cls_label_path}"
+            )
+        else:
+            self.cls_label_map = None
 
         # SIGTERM flag — set externally via signal handler in run.py
         self._sigterm_received = False
@@ -268,8 +289,7 @@ class Trainer:
                 # Generate paraphrases for full batch before GradCache phases
                 para_input_ids, para_attention_mask = None, None
                 if intra_txt_weight > 0 and self.paraphraser is not None:
-                    captions = batch['caption']  # list[str], len=N
-                    para_input_ids, para_attention_mask = self.paraphraser.generate(captions)
+                    para_input_ids, para_attention_mask = self.paraphraser.generate(batch['sentid'].tolist())
                     # para_input_ids: [N, 77], para_attention_mask: [N, 77]
 
                 image_aug = (
@@ -317,7 +337,11 @@ class Trainer:
                     # Zero gradients before forward to avoid stale gradient accumulation
                     self.optimizer.zero_grad()
                     with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype):
-                        img_embeds = self.model.encode_image(images)
+                        cls_logits = None
+                        if self.cls_weight > 0 and self.model.cls_head is not None:
+                            img_embeds, cls_logits = self.model.encode_image_with_cls(images)
+                        else:
+                            img_embeds = self.model.encode_image(images)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_embeds = None
                         txt_aug_embeds = None
@@ -326,11 +350,20 @@ class Trainer:
                             with torch.no_grad():
                                 img_aug_embeds = self.model.encode_image(
                                     batch['image_aug'].to(self.device, non_blocking=True))
+
+                        # Merge paraphrase + hard-neg text into a single no_grad
+                        # encode_text call to avoid redundant kernel launches.
+                        nograd_ids_parts = []
+                        nograd_mask_parts = []
+                        _para_n = 0   # length of paraphrase slice
+                        _neg_n = 0    # length of hard-neg slice
+
                         if intra_txt_weight > 0 and self.paraphraser is not None:
-                            with torch.no_grad():
-                                para_ids, para_mask = self.paraphraser.generate(
-                                    batch['caption'])
-                                txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+                            para_ids, para_mask = self.paraphraser.generate(batch['sentid'].tolist())
+                            nograd_ids_parts.append(para_ids)    # [N, 77]
+                            nograd_mask_parts.append(para_mask)  # [N, 77]
+                            _para_n = para_ids.shape[0]
+
                         if self.hard_neg_generator is not None:
                             captions = batch['caption']
                             hard_neg_captions = self.hard_neg_generator.generate(captions)
@@ -343,8 +376,22 @@ class Trainer:
                             )
                             neg_ids = tokenized_neg['input_ids'].to(self.device)
                             neg_mask = tokenized_neg['attention_mask'].to(self.device)
+                            nograd_ids_parts.append(neg_ids)    # [N, 77]
+                            nograd_mask_parts.append(neg_mask)  # [N, 77]
+                            _neg_n = neg_ids.shape[0]
+
+                        # Single fused no_grad encode_text for all auxiliary texts
+                        if nograd_ids_parts:
+                            merged_ids = torch.cat(nograd_ids_parts, dim=0)    # [_para_n + _neg_n, 77]
+                            merged_mask = torch.cat(nograd_mask_parts, dim=0)  # [_para_n + _neg_n, 77]
                             with torch.no_grad():
-                                neg_txt_embeds = self.model.encode_text(neg_ids, neg_mask)  # [N, D]
+                                merged_embeds = self.model.encode_text(merged_ids, merged_mask)  # [_para_n + _neg_n, D]
+                            offset = 0
+                            if _para_n > 0:
+                                txt_aug_embeds = merged_embeds[offset:offset + _para_n]  # [N, D]
+                                offset += _para_n
+                            if _neg_n > 0:
+                                neg_txt_embeds = merged_embeds[offset:offset + _neg_n]   # [N, D]
 
                         if step == 0 and epoch == 0:
                             loss_type = self.config['loss']['type']
@@ -395,6 +442,18 @@ class Trainer:
                         )
                         loss = loss_dict["loss_total"]
 
+                        # Multi-label classification auxiliary loss
+                        if cls_logits is not None:
+                            image_ids = batch['image_id']
+                            label_vecs = torch.stack(
+                                [self.cls_label_map.get(iid.item(), self._cls_zero_vec) for iid in image_ids]
+                            )  # [B, 80]
+                            loss_cls = F.binary_cross_entropy_with_logits(
+                                cls_logits, label_vecs)  # scalar
+                            loss = loss + self.cls_weight * loss_cls
+                            loss_dict["loss_cls"] = loss_cls
+                            loss_dict["loss_total"] = loss
+
                     # Backward with gradient scaling
                     self.scaler.scale(loss).backward()
                     
@@ -412,7 +471,11 @@ class Trainer:
                 else:
                     # Standard precision training
                     self.optimizer.zero_grad()
-                    img_embeds = self.model.encode_image(images)
+                    cls_logits = None
+                    if self.cls_weight > 0 and self.model.cls_head is not None:
+                        img_embeds, cls_logits = self.model.encode_image_with_cls(images)
+                    else:
+                        img_embeds = self.model.encode_image(images)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
                     img_aug_embeds = None
                     txt_aug_embeds = None
@@ -420,10 +483,20 @@ class Trainer:
                     if intra_img_weight > 0:
                         with torch.no_grad():
                             img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
+
+                    # Merge paraphrase + hard-neg text into a single no_grad
+                    # encode_text call to avoid redundant kernel launches.
+                    nograd_ids_parts = []
+                    nograd_mask_parts = []
+                    _para_n = 0
+                    _neg_n = 0
+
                     if intra_txt_weight > 0 and self.paraphraser is not None:
-                        with torch.no_grad():
-                            para_ids, para_mask = self.paraphraser.generate(batch['caption'])
-                            txt_aug_embeds = self.model.encode_text(para_ids, para_mask)
+                        para_ids, para_mask = self.paraphraser.generate(batch['sentid'].tolist())
+                        nograd_ids_parts.append(para_ids)    # [N, 77]
+                        nograd_mask_parts.append(para_mask)  # [N, 77]
+                        _para_n = para_ids.shape[0]
+
                     if self.hard_neg_generator is not None:
                         captions = batch['caption']
                         hard_neg_captions = self.hard_neg_generator.generate(captions)
@@ -436,8 +509,22 @@ class Trainer:
                         )
                         neg_ids = tokenized_neg['input_ids'].to(self.device)
                         neg_mask = tokenized_neg['attention_mask'].to(self.device)
+                        nograd_ids_parts.append(neg_ids)    # [N, 77]
+                        nograd_mask_parts.append(neg_mask)  # [N, 77]
+                        _neg_n = neg_ids.shape[0]
+
+                    # Single fused no_grad encode_text for all auxiliary texts
+                    if nograd_ids_parts:
+                        merged_ids = torch.cat(nograd_ids_parts, dim=0)    # [_para_n + _neg_n, 77]
+                        merged_mask = torch.cat(nograd_mask_parts, dim=0)  # [_para_n + _neg_n, 77]
                         with torch.no_grad():
-                            neg_txt_embeds = self.model.encode_text(neg_ids, neg_mask)  # [N, D]
+                            merged_embeds = self.model.encode_text(merged_ids, merged_mask)  # [_para_n + _neg_n, D]
+                        offset = 0
+                        if _para_n > 0:
+                            txt_aug_embeds = merged_embeds[offset:offset + _para_n]  # [N, D]
+                            offset += _para_n
+                        if _neg_n > 0:
+                            neg_txt_embeds = merged_embeds[offset:offset + _neg_n]   # [N, D]
 
                     if step == 0 and epoch == 0:
                         loss_type = self.config['loss']['type']
@@ -487,6 +574,18 @@ class Trainer:
                         neg_txt_embeds=neg_txt_embeds
                     )
                     loss = loss_dict["loss_total"]
+
+                    # Multi-label classification auxiliary loss
+                    if cls_logits is not None:
+                        image_ids = batch['image_id']
+                        label_vecs = torch.stack(
+                            [self.cls_label_map.get(iid.item(), self._cls_zero_vec) for iid in image_ids]
+                        )  # [B, 80]
+                        loss_cls = F.binary_cross_entropy_with_logits(
+                            cls_logits, label_vecs)  # scalar
+                        loss = loss + self.cls_weight * loss_cls
+                        loss_dict["loss_cls"] = loss_cls
+                        loss_dict["loss_total"] = loss
 
                     loss.backward()
 
@@ -540,6 +639,8 @@ class Trainer:
                             "train/samples_per_sec": samples_per_sec,
                             "train/batch_time": batch_time.val,
                         }
+                        if "loss_cls" in loss_dict:
+                            log_dict["train/loss_cls"] = loss_dict["loss_cls"].item()
                         log_dict.update(lr_dict)
                         wandb.log(log_dict)
                     except Exception as e:
