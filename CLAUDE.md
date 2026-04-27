@@ -16,7 +16,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Docker image for HPC: `biremurhan/image-text-contrast:v0.14` (includes PyTorch).
+Docker image for HPC: `biremurhan/image-text-contrast:v0.16` (includes PyTorch, vllm, gcc).
 
 ## Common Commands
 

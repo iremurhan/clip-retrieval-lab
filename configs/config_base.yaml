@@ -16,9 +16,15 @@ loss:
   intra_img_weight: 1
   intra_txt_weight: 1
   hard_negatives: false
+  cls_weight: 0.0
+  cls_num_classes: 0
+  cls_label_path: null
 
 paraphraser:
-  precomputed_path: null  # set to path if pre-computed JSON exists; otherwise NLTK is used
+  type: "mistral"         # "mistral" | "llama" — selects which offline LLM rewrites to load
+  # Dataset-specific configs must define:
+  #   paraphraser.paths.mistral: <path to mistral rewrites JSON>
+  #   paraphraser.paths.llama:   <path to llama rewrites JSON>
 
 training:
   batch_size: 128
@@ -40,9 +46,13 @@ data:
   image_size: 336
 
 augment:
-  # Number of photometric transforms sampled from the VLM-safe pool per image.
-  # Pool: [ColorJitter, GaussianBlur, RandomGrayscale]. Max k=3.
+  # Number of photometric transforms sampled from the pool per image.
+  # Pool size depends on use_grayscale: 3 with grayscale, 2 without. k <= pool_size.
   k_photometric_augs: 2
+  aug_crop_scale_min: 0.4       # lower bound of RandomResizedCrop scale for augmented view
+  color_jitter_strength: 0.4    # brightness/contrast/saturation magnitude; hue = 0.25x
+  use_grayscale: true            # include RandomGrayscale in photometric pool
+  separate_pipelines: false      # SLIP-style: minimal anchor aug for inter-modal, stronger for intra-modal
 
 logging:
   use_wandb: true

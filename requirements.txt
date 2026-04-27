@@ -3,5 +3,4 @@ PyYAML==6.0.2
 transformers==4.48.0
 wandb==0.25.1
 eccv-caption
-nltk
 spacy

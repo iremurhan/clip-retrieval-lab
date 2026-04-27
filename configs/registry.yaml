@@ -11,6 +11,47 @@ runs:
     description: "Full baseline — mix aug for img + paraphrase for txt + intra-modal + 4-layer unfreeze"
     overrides: {}  # current defaults, no changes needed
 
+  B0v2:
+    description: "B0+ with SLIP-style bipartite augmentation and LaCLIP LLM caption rewrites. Paraphraser model (mistral|llama) set via paraphraser.type; per-dataset paths in config_{coco,flickr30k}.yaml."
+    changelog: |
+      Forensic delta vs B0 (main); scope: src/, configs/.
+
+      [Data Augmentation]
+      - src/data.py StochasticPhotometricPool.__init__: (k) -> (k, color_jitter_strength=0.4, use_grayscale=True).
+      - src/data.py ColorJitter args: hardcoded (b=0.4,c=0.4,s=0.4,h=0.1) -> parameterized (s,s,s,s*0.25).
+      - src/data.py RandomGrayscale(p=1.0): unconditional pool member -> conditional on use_grayscale flag.
+      - src/data.py build_anchor_transform: (image_size) -> (image_size, separate_pipelines=False).
+      - src/data.py build_augmented_transform: (image_size, k) -> (image_size, k, aug_crop_scale_min=0.4, color_jitter_strength=0.4, use_grayscale=True).
+      - src/data.py RandomResizedCrop scale on augmented view: literal 0.4 -> parameterized aug_crop_scale_min.
+      - src/data.py create_image_text_dataloader: strict-reads aug_crop_scale_min, color_jitter_strength, use_grayscale, separate_pipelines from config['augment'].
+      - src/data.py CaptionImageDataset.__init__: added caption_rewrites_path; loads {sentid: [rewrites]} JSON; __getitem__ samples uniformly from [original, *rewrites].
+      - src/data.py _ColumnarSampleStore: new class, numpy-columnar metadata store replacing list-of-dicts self.samples.
+      - src/paraphraser.py: removed NLTKParaphraser (WordNet) and PrecomputedParaphraser (caption-string keyed); replaced with PrecomputedLLMParaphraser (sentid keyed). Removed imports nltk, nltk.corpus.wordnet; removed nltk.download(wordnet/averaged_perceptron_tagger_eng/punkt_tab).
+      - configs/config_base.yaml augment block: added keys aug_crop_scale_min, color_jitter_strength, use_grayscale, separate_pipelines.
+      - configs/config_base.yaml paraphraser block: precomputed_path:null -> type:"mistral"; introduces paths.{mistral,llama}.
+      - configs/config_coco.yaml: added paraphraser.paths.{mistral,llama}.
+      - configs/config_flickr30k.yaml: added paraphraser.paths.{mistral,llama}.
+
+      [Model Architecture]
+      - src/model.py DualEncoder.__init__: optional cls_head = nn.Linear(vision_hidden=1024, num_cls), gated on loss.cls_num_classes > 0; xavier_uniform weight init, zero bias.
+      - src/model.py DualEncoder.encode_image_with_cls(images): new method; single ViT forward returning (L2-normalized contrastive [B,embed_dim], cls_logits [B,num_classes]); logits taken from pre-projection pooler_output.
+
+      [Hyperparameters / Config Schema]
+      - configs/config_base.yaml loss block: added cls_weight=0.0, cls_num_classes=0, cls_label_path=null.
+      - configs/config_coco.yaml: added loss.cls_label_path="datasets/coco/coco_multilabel_map.pt".
+      - src/train.py Trainer.__init__: NLTK fallback removed; paraphraser dispatched strictly via paraphraser.type in paraphraser.paths; raises ValueError on type miss.
+      - src/train.py Trainer.__init__: cls_weight>0 path loads cls_label_map from cls_label_path; allocates _cls_zero_vec; FileNotFoundError if path missing.
+      - src/train.py train_epoch: paraphraser.generate signature changed from batch['caption'] to batch['sentid'].tolist().
+      - src/train.py train_epoch: paraphrase + hard-negative tokenized ID slices concatenated into a single encode_text call.
+      - src/train.py train_epoch: when cls_weight>0 and cls_head present, encode_image_with_cls is called; loss_total += cls_weight * F.binary_cross_entropy_with_logits(cls_logits, label_vecs); loss_dict gains "loss_cls".
+      - configs/registry.yaml: this B0v2 entry; overrides {augment.aug_crop_scale_min:0.7, augment.color_jitter_strength:0.2, augment.use_grayscale:false, augment.separate_pipelines:true}.
+      - configs/registry.yaml: B4 entry added; overrides {loss.cls_weight:1.0, loss.cls_num_classes:80}.
+    overrides:
+      augment.aug_crop_scale_min: 0.7
+      augment.color_jitter_strength: 0.2
+      augment.use_grayscale: false
+      augment.separate_pipelines: true
+
   B1:
     description: "B0+ + SigLIP loss (replaces InfoNCE)"
     overrides:

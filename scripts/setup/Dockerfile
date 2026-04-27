@@ -10,6 +10,7 @@ WORKDIR /workspace
 
 RUN apt-get update && apt-get install -y \
     git \
+    gcc \
     libgl1-mesa-glx \
     libglib2.0-0 \
     python3-tk \

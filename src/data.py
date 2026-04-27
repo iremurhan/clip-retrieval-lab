@@ -44,44 +44,45 @@ class StochasticPhotometricPool:
     """
     Phase 2 of the Bipartite Augmentation Pipeline.
 
-    A pool of VLM-safe photometric transforms from which exactly k are
-    randomly selected (without replacement) and applied sequentially.
-
-    All magnitudes are hardcoded to VLM-safe bounds:
-        - ColorJitter: brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1
-        - GaussianBlur: sigma=(0.1, 1.0)
-        - Grayscale: p=1.0 (applied only when selected)
+    A pool of photometric transforms from which exactly k are randomly
+    selected (without replacement) and applied sequentially.
 
     Args:
         k (int): Number of transforms to sample from the pool per call.
-                 Must satisfy 0 <= k <= pool_size (currently 3).
+                 Must satisfy 0 <= k <= pool_size.
+        color_jitter_strength (float): Multiplier for (brightness, contrast,
+                 saturation); hue is scaled by 0.25x. Default 0.4.
+        use_grayscale (bool): Include RandomGrayscale in pool. Default True.
 
     Raises:
         ValueError: If k > pool_size or k < 0 at construction time.
     """
 
-    def __init__(self, k):
-        # ---- VLM-Safe Hardcoded Magnitudes (DO NOT use SimCLR defaults) ----
+    def __init__(self, k, color_jitter_strength=0.4, use_grayscale=True):
+        s = color_jitter_strength
         self._pool = [
             transforms.ColorJitter(
-                brightness=0.4,
-                contrast=0.4,
-                saturation=0.4,
-                hue=0.1
+                brightness=s,
+                contrast=s,
+                saturation=s,
+                hue=s * 0.25,  # hue range is narrower
             ),
             transforms.GaussianBlur(
                 kernel_size=23,
                 sigma=(0.1, 1.0)
             ),
-            transforms.RandomGrayscale(p=1.0),
         ]
+        if use_grayscale:
+            self._pool.append(transforms.RandomGrayscale(p=1.0))
+
+        self._pool_names = [type(t).__name__ for t in self._pool]
 
         if not isinstance(k, int) or k < 0:
             raise ValueError(f"k must be a non-negative integer, got {k}")
         if k > len(self._pool):
             raise ValueError(
                 f"k={k} exceeds photometric pool size={len(self._pool)}. "
-                f"Available transforms: {[type(t).__name__ for t in self._pool]}"
+                f"Available transforms: {self._pool_names}"
             )
         self._k = k
 
@@ -105,53 +106,64 @@ class StochasticPhotometricPool:
     def __repr__(self):
         return (
             f"StochasticPhotometricPool(k={self._k}, "
-            f"pool=[ColorJitter, GaussianBlur, RandomGrayscale])"
+            f"pool={self._pool_names})"
         )
 
 
-def build_anchor_transform(image_size):
+def build_anchor_transform(image_size, separate_pipelines=False):
     """
-    Build the deterministic anchor transform for training.
-    Spatial: Mild RandomResizedCrop + flip, then normalization.
-    NO photometric augmentation on the anchor.
+    Build the anchor transform for training (used for inter-modal loss).
+
+    When separate_pipelines=True (SLIP-style), the anchor uses a very mild
+    crop (0.9, 1.0) with NO photometric augmentation — preserving visual
+    semantics for the image-text contrastive objective.
+
+    When separate_pipelines=False (legacy), same mild crop + flip.
 
     Args:
         image_size (int): Target spatial resolution.
+        separate_pipelines (bool): If True, use minimal augmentation for inter-modal.
 
     Returns:
         transforms.Compose
     """
     return transforms.Compose([
-        # Phase 1 (Spatial) — Mild crop preserving semantic content
+        # Spatial — Mild crop preserving semantic content for text alignment
         transforms.RandomResizedCrop(image_size, scale=(0.9, 1.0)),
         transforms.RandomHorizontalFlip(),
-        # Phase 3 (Normalization)
+        # Normalization — no photometric augmentation on the anchor
         transforms.ToTensor(),
         transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
     ])
 
 
-def build_augmented_transform(image_size, k):
+def build_augmented_transform(image_size, k, aug_crop_scale_min=0.4,
+                              color_jitter_strength=0.4, use_grayscale=True):
     """
-    Build the Bipartite Augmentation transform for the contrastive view.
+    Build the Bipartite Augmentation transform for the contrastive view
+    (used for intra-modal L_img_img).
 
-    Phase 1 (Spatial):      RandomResizedCrop(scale=(0.4, 1.0)) + RandomHorizontalFlip
+    Phase 1 (Spatial):      RandomResizedCrop + RandomHorizontalFlip
     Phase 2 (Photometric):  StochasticPhotometricPool with k-selection
     Phase 3 (Normalization): ToTensor → CLIP normalization
 
     Args:
         image_size (int): Target spatial resolution.
         k (int): Number of photometric transforms to sample per image.
+        aug_crop_scale_min (float): Lower bound of crop scale (default 0.4).
+        color_jitter_strength (float): ColorJitter magnitude (default 0.4).
+        use_grayscale (bool): Include RandomGrayscale in pool (default True).
 
     Returns:
         transforms.Compose
     """
     return transforms.Compose([
-        # Phase 1 (Spatial) — VLM-safe lower bound at 0.4 to preserve semantics
-        transforms.RandomResizedCrop(image_size, scale=(0.4, 1.0)),
+        # Phase 1 (Spatial)
+        transforms.RandomResizedCrop(image_size, scale=(aug_crop_scale_min, 1.0)),
         transforms.RandomHorizontalFlip(),
-        # Phase 2 (Photometric) — k-selection from VLM-safe pool
-        StochasticPhotometricPool(k),
+        # Phase 2 (Photometric) — k-selection from configurable pool
+        StochasticPhotometricPool(k, color_jitter_strength=color_jitter_strength,
+                                  use_grayscale=use_grayscale),
         # Phase 3 (Normalization) — Exact CLIP stats
         transforms.ToTensor(),
         transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
@@ -249,6 +261,32 @@ class HardNegativeGenerator:
 # Dataset
 # ============================================================================
 
+class _ColumnarSampleStore:
+    """COW-safe metadata store. All columns are numpy buffers so that worker
+    fork does not break COW via Python refcount writes. __getitem__ rebuilds
+    a dict per call to preserve the existing dataset.samples[idx] API."""
+    __slots__ = ("image_ids", "sentids", "captions", "filepaths", "filenames")
+
+    def __init__(self, image_ids, sentids, captions, filepaths, filenames):
+        self.image_ids = image_ids   # int64  [N]
+        self.sentids = sentids       # int64  [N]
+        self.captions = captions     # U<max> [N]
+        self.filepaths = filepaths   # U<max> [N]
+        self.filenames = filenames   # U<max> [N]
+
+    def __len__(self):
+        return self.image_ids.shape[0]  # [N] -> scalar
+
+    def __getitem__(self, idx):
+        return {
+            "image_id": int(self.image_ids[idx]),
+            "sentid":   int(self.sentids[idx]),
+            "caption":  str(self.captions[idx]),
+            "filepath": str(self.filepaths[idx]),
+            "filename": str(self.filenames[idx]),
+        }
+
+
 class CaptionImageDataset(Dataset):
     def __init__(
         self,
@@ -259,6 +297,7 @@ class CaptionImageDataset(Dataset):
         split='train',
         transform=None,
         transform_aug=None,
+        caption_rewrites_path=None,
     ):
         """
         Args:
@@ -269,6 +308,9 @@ class CaptionImageDataset(Dataset):
             split (str): 'train', 'val', or 'test'.
             transform (callable, optional): Anchor image transform.
             transform_aug (callable, optional): Augmented view transform (intra-modal).
+            caption_rewrites_path (str, optional): Path to LLM-generated caption
+                rewrites JSON ({sentid: [r1, r2, r3]}). When set, __getitem__
+                uniformly samples from [original, r1, r2, r3] (LaCLIP-style).
         """
         self.images_root_path = images_root_path
         self.tokenizer = tokenizer
@@ -277,12 +319,32 @@ class CaptionImageDataset(Dataset):
         self.transform = transform
         self.transform_aug = transform_aug
 
+        # LaCLIP-style caption augmentation: load precomputed LLM rewrites
+        self.caption_rewrites = None
+        if caption_rewrites_path:
+            if not os.path.exists(caption_rewrites_path):
+                raise FileNotFoundError(
+                    f"caption_rewrites_path provided but file not found: "
+                    f"{caption_rewrites_path}. Run scripts/generate_rewrites.py first."
+                )
+            import json as _json
+            with open(caption_rewrites_path, 'r') as f:
+                raw = _json.load(f)
+            self.caption_rewrites = {int(k): v for k, v in raw.items()}
+            logger.info(
+                f"Loaded {len(self.caption_rewrites)} LLM caption rewrites "
+                f"from {caption_rewrites_path}"
+            )
+
         # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
         with open(captions_path, 'r') as f:
             data = json.load(f)
 
-        self.samples = []
+        # COW-safe columnar staging. List-of-dicts forces Python refcount
+        # writes on every access, multiplying dataset RSS by num_workers on
+        # fork. Buffers below are converted to numpy at the end of __init__.
+        image_ids, sentids, captions, filepaths, filenames = [], [], [], [], []
 
         # Karpathy JSON parsing logic
         for img in data['images']:
@@ -290,31 +352,52 @@ class CaptionImageDataset(Dataset):
             if current_split == 'restval' and split == 'train':
                 current_split = 'train'
 
-            if current_split == split:
-                # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
-                if 'cocoid' in img:
-                    img_id = int(img['cocoid'])
-                elif 'imgid' in img:
-                    img_id = int(img['imgid'])
-                elif 'id' in img:
-                    img_id = int(img['id'])
-                else:
-                    raise ValueError(
-                        f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
-                    )
+            if current_split != split:
+                continue
 
-                # Take exactly 5 captions
-                sentences = img['sentences'][:5]
-                for sent in sentences:
-                    self.samples.append({
-                        'image_id': img_id,
-                        'caption': sent['raw'],
-                        'sentid': int(sent['sentid']),
-                        'filepath': img.get('filepath', ''),
-                        'filename': img.get('filename', '')
-                    })
+            # Handle ID variations (COCO: cocoid/id, Flickr30k: imgid)
+            if 'cocoid' in img:
+                img_id = int(img['cocoid'])
+            elif 'imgid' in img:
+                img_id = int(img['imgid'])
+            elif 'id' in img:
+                img_id = int(img['id'])
+            else:
+                raise ValueError(
+                    f"Image entry missing 'cocoid', 'imgid', or 'id'. Keys: {list(img.keys())}"
+                )
 
+            fp = img.get('filepath', '')
+            fn = img.get('filename', '')
+            for sent in img['sentences'][:5]:
+                image_ids.append(img_id)
+                sentids.append(int(sent['sentid']))
+                captions.append(sent['raw'])
+                filepaths.append(fp)
+                filenames.append(fn)
+
+        del data
+
+        self.samples = _ColumnarSampleStore(
+            image_ids=np.asarray(image_ids, dtype=np.int64),
+            sentids=np.asarray(sentids, dtype=np.int64),
+            captions=np.asarray(captions,  dtype=np.str_),
+            filepaths=np.asarray(filepaths, dtype=np.str_),
+            filenames=np.asarray(filenames, dtype=np.str_),
+        )
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
+
+        # Validate coverage: every sample sentid must exist in caption_rewrites
+        if self.caption_rewrites is not None:
+            dataset_sids = set(self.samples.sentids.tolist())
+            missing = dataset_sids - self.caption_rewrites.keys()
+            if missing:
+                sample_ids = sorted(missing)[:10]
+                raise RuntimeError(
+                    f"caption_rewrites is incomplete: {len(missing)}/{len(dataset_sids)} "
+                    f"sentids missing (first 10: {sample_ids}). "
+                    f"Re-run: sbatch scripts/generate_rewrites.slurm --resume"
+                )
 
     def __len__(self):
         return len(self.samples)
@@ -323,6 +406,17 @@ class CaptionImageDataset(Dataset):
         sample = self.samples[idx]
         image_id = sample['image_id']
         caption = sample['caption']
+
+        # LaCLIP-style: uniform random from [original, rewrite1, ..., rewriteN]
+        if self.caption_rewrites is not None:
+            sentid = sample['sentid']
+            if sentid not in self.caption_rewrites:
+                raise KeyError(
+                    f"sentid {sentid} not found in caption_rewrites. "
+                    f"Rewrites file is incomplete — re-run scripts/generate_rewrites.py."
+                )
+            candidates = [caption] + self.caption_rewrites[sentid]
+            caption = random.choice(candidates)
 
         # Load Image
         filepath = sample.get('filepath', '').strip()
@@ -391,19 +485,48 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
 
     if split == 'train':
         # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
-        k = config['augment']['k_photometric_augs']
+        aug_cfg = config['augment']
+        k = aug_cfg['k_photometric_augs']
+        aug_crop_scale_min = aug_cfg['aug_crop_scale_min']
+        color_jitter_strength = aug_cfg['color_jitter_strength']
+        use_grayscale = aug_cfg['use_grayscale']
+        separate_pipelines = aug_cfg['separate_pipelines']
 
-        transform = build_anchor_transform(image_size)
-        transform_aug = build_augmented_transform(image_size, k)
+        transform = build_anchor_transform(image_size, separate_pipelines=separate_pipelines)
+        transform_aug = build_augmented_transform(
+            image_size, k,
+            aug_crop_scale_min=aug_crop_scale_min,
+            color_jitter_strength=color_jitter_strength,
+            use_grayscale=use_grayscale,
+        )
 
         logger.info(
-            f"Train transforms built: anchor=(crop+flip), "
-            f"augmented=(bipartite, k={k} photometric from pool)"
+            f"Train transforms built: anchor=(crop+flip, separate={separate_pipelines}), "
+            f"augmented=(crop_min={aug_crop_scale_min}, k={k}, "
+            f"jitter={color_jitter_strength}, grayscale={use_grayscale})"
         )
     else:
         # Validation/Test: deterministic, no augmentation
         transform = build_eval_transform(image_size)
         transform_aug = transform
+
+    # LaCLIP-style caption rewrites: only for train split
+    caption_rewrites_path = None
+    if split == 'train':
+        para_cfg = config['paraphraser']
+        para_type = para_cfg['type']
+        para_paths = para_cfg['paths']
+        if para_type not in para_paths:
+            raise ValueError(
+                f"paraphraser.type='{para_type}' is not defined in paraphraser.paths "
+                f"(available: {sorted(para_paths.keys())})."
+            )
+        caption_rewrites_path = para_paths[para_type]
+        if not caption_rewrites_path:
+            raise ValueError(
+                f"paraphraser.paths['{para_type}'] is empty for this dataset. "
+                f"Define it in the dataset config."
+            )
 
     dataset = CaptionImageDataset(
         images_root_path=images_root,
@@ -413,6 +536,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         split=split,
         transform=transform,
         transform_aug=transform_aug,
+        caption_rewrites_path=caption_rewrites_path,
     )
 
     seed = config['training']['seed']
