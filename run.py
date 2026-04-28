@@ -6,6 +6,7 @@ Handles configuration setup, tracker initialization, and triggers the training e
 """
 
 import argparse
+import math
 import os
 import signal
 import sys
@@ -13,13 +14,22 @@ import logging
 import warnings
 import torch
 import wandb
-from transformers import CLIPTokenizer, get_cosine_schedule_with_warmup
+from transformers import CLIPTokenizer
 
 from src.setup import setup_config, setup_seed, setup_tracker, load_registry_overrides
 from src.data import create_image_text_dataloader
 from src.model import DualEncoder
 from src.loss import build_loss
 from src.train import Trainer
+
+
+# Param-group names that use a flat LR schedule instead of cosine-with-warmup.
+#   B5a/B5b: seg_embedding   — fresh nn.Embedding(vocab, d_model)
+#   B5c:     seg_projection  — fresh 2-layer MLP
+#   B4:      cls_head        — fresh nn.Linear(vision_hidden, num_cls)
+# These are all freshly-initialized parameters; a cosine decay would crush their
+# LR to ~1e-8 by the first epoch, leaving them effectively untrained.
+_CONSTANT_LR_GROUPS = frozenset({"seg_embedding", "seg_projection", "cls_head"})
 
 
 def setup_logging():
@@ -39,16 +49,28 @@ def setup_logging():
 
 
 def create_clip_optimizer(model, config):
-    """Create optimizer with parameter groups for CLIP fine-tuning."""
+    """Create optimizer with parameter groups for CLIP fine-tuning.
+
+    Param groups (created only when their pattern matches >= 1 trainable param):
+        clip_proj      visual_projection / text_projection                   lr_clip_proj (cosine)
+        cls_head       B4 multi-label classifier head                        lr_cls       (constant)
+        seg_embedding  B5a/B5b discrete segment embedding table              lr_seg       (constant)
+        seg_projection B5c continuous segment MLP                            lr_seg       (constant)
+        backbone       remaining trainable CLIP layers (last N unfrozen)     lr_backbone  (cosine)
+    """
     opt_name = config["training"]["optimizer"].lower()
     wd = float(config["training"]["weight_decay"])
     lr_clip_proj = float(config["training"].get("clip_projection_lr", 1e-5))
     lr_backbone = float(config["training"].get("backbone_lr", 1e-6))
+    lr_seg = float(config["training"].get("seg_lr", 1e-3))
+    lr_cls = float(config["training"].get("cls_lr", 1e-3))
 
     trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
     clip_proj_params = []
     custom_head_params = []
     cls_head_params = []
+    seg_embed_params = []   # B5a/B5b discrete embedding table
+    seg_proj_params = []    # B5c continuous projection MLP
     backbone_params = []
 
     for n, p in trainable:
@@ -58,6 +80,10 @@ def create_clip_optimizer(model, config):
             custom_head_params.append(p)
         elif "cls_head" in n:
             cls_head_params.append(p)
+        elif "seg_embedding" in n:
+            seg_embed_params.append(p)
+        elif "seg_projection" in n:
+            seg_proj_params.append(p)
         else:
             backbone_params.append(p)
 
@@ -71,7 +97,11 @@ def create_clip_optimizer(model, config):
             "Check config['model']['embed_dim']."
         )
     if cls_head_params:
-        param_groups.append({"name": "cls_head", "params": cls_head_params, "lr": lr_clip_proj})
+        param_groups.append({"name": "cls_head", "params": cls_head_params, "lr": lr_cls})
+    if seg_embed_params:
+        param_groups.append({"name": "seg_embedding", "params": seg_embed_params, "lr": lr_seg})
+    if seg_proj_params:
+        param_groups.append({"name": "seg_projection", "params": seg_proj_params, "lr": lr_seg})
     if backbone_params:
         param_groups.append({"name": "backbone", "params": backbone_params, "lr": lr_backbone})
 
@@ -83,16 +113,45 @@ def create_clip_optimizer(model, config):
 
 
 def create_lr_scheduler(optimizer, config, num_training_steps):
-    """Create learning rate scheduler (cosine with warmup)."""
-    warmup = int(config["training"].get("warmup_epochs", 2))
-    warmup_steps = min(warmup * (num_training_steps // config["training"]["epochs"]), num_training_steps)
-    # Suppress the spurious "scheduler.step() before optimizer.step()" warning that
-    # transformers' get_cosine_schedule_with_warmup triggers internally during __init__.
-    # The training loop calls optimizer.step() before scheduler.step() correctly.
+    """Per-parameter-group LR scheduler.
+
+    Every group uses cosine-with-warmup, EXCEPT groups named in
+    `_CONSTANT_LR_GROUPS` (seg_embedding, seg_projection, cls_head), which use
+    a flat multiplier of 1.0 so the freshly-initialized parameters keep their
+    base LR throughout training. A uniform cosine decay would crush these to
+    ~1e-8 by the first epoch (observed bug on b5-aware), leaving them
+    effectively untrained.
+    """
+    warmup_epochs = int(config["training"].get("warmup_epochs", 2))
+    epochs = int(config["training"]["epochs"])
+    warmup_steps = min(
+        warmup_epochs * (num_training_steps // epochs),
+        num_training_steps,
+    )
+
+    def cosine_with_warmup(step: int) -> float:
+        if step < warmup_steps:
+            return float(step) / float(max(1, warmup_steps))
+        progress = (step - warmup_steps) / max(1, num_training_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    def constant(step: int) -> float:
+        return 1.0
+
+    lr_lambdas = [
+        constant if pg.get("name") in _CONSTANT_LR_GROUPS else cosine_with_warmup
+        for pg in optimizer.param_groups
+    ]
+    group_names = [pg.get("name", "?") for pg in optimizer.param_groups]
+    lambda_names = ["constant" if fn is constant else "cosine" for fn in lr_lambdas]
+    logging.getLogger(__name__).info(
+        "LR schedule: " + ", ".join(f"{n}={k}" for n, k in zip(group_names, lambda_names))
+    )
+
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*lr_scheduler.step.*before.*optimizer.step.*")
         warnings.filterwarnings("ignore", message=".*Detected call of.*lr_scheduler.step.*")
-        return get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=num_training_steps)
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambdas)
 
 
 def main():
