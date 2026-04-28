@@ -2,6 +2,10 @@ data:
   dataset: "coco"
   images_path: "datasets/coco"
   captions_path: "datasets/coco/caption_datasets/dataset_coco.json"
+  # B5a/B5b/B5c: directory containing precomputed per-mode .pt files
+  # (spatial_bins.pt / semantic_ids.pt / continuous_features.pt).
+  # Produced by scripts/precompute_sam.py.
+  seg_map_dir: "datasets/coco/sam_segments"
 
 loss:
   cls_label_path: "datasets/coco/coco_multilabel_map.pt"
