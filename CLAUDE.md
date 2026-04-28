@@ -37,21 +37,6 @@ python run.py --config configs/config_flickr30k.yaml --resume checkpoints/best_m
 ./scripts/start_training.sh <run_name> [config_path]
 ```
 
-**Pairwise similarity mining (required before training with hard negatives)**
-```bash
-# Text-text caption similarity (most common — used for FNE in training)
-python tools/mine_pairwise_sim.py --modality caption --config configs/config_flickr30k.yaml --top_k 1000
-
-# Image-image visual similarity
-python tools/mine_pairwise_sim.py --modality visual --config configs/config_flickr30k.yaml
-
-# Image-image caption consensus (saves mean/min/max variants)
-python tools/mine_pairwise_sim.py --modality consensus --config configs/config_flickr30k.yaml
-
-# HPC wrapper
-./scripts/start_mining.sh flickr30k   # or coco
-```
-
 **Debug mode (fast iteration, uses train set for val)**
 ```bash
 python run.py --config configs/config_flickr30k.yaml --override debug.debug_mode=true debug.debug_samples=100
@@ -82,15 +67,16 @@ src/
   metrics.py            compute_recall_at_k, compute_map_at_k (Recall@1/5/10, MAP@5/10)
   utils.py              compute_grad_norm and misc helpers
 tools/
-  mine_pairwise_sim.py  Standalone mining script (caption / visual / consensus modalities)
-  create_triplets.py    Triplet creation utility
+  build_coco_multilabel.py  COCO multilabel target builder (B4 prep)
+  eval_zero_shot.py         Zero-shot evaluation tool
 configs/
   config_base.yaml      All defaults
-  config_{coco,flickr}.yaml   Dataset-specific paths
-  sweep*.yaml           W&B sweep configs
+  config_{coco,flickr30k}.yaml   Dataset-specific paths
+  registry.yaml         Named-run definitions (B0/B0+/B1/B2/B4/B5a/b/c)
 scripts/
   *.slurm               SLURM job scripts
-  start_training.sh / start_mining.sh   HPC wrappers
+  start_training.sh     HPC training wrapper
+legacy/                 Archived (paraphrase generation, etc.) — not on the active training path
 ```
 
 ### Key Design Decisions
