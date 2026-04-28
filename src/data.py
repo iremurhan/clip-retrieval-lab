@@ -22,6 +22,7 @@ import json
 import os
 import logging
 import random
+import numpy as np
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
