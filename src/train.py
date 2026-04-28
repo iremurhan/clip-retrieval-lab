@@ -256,23 +256,24 @@ class Trainer:
                 loss_type = self.config['loss']['type']
                 w_img = self.config['loss']['intra_img_weight']
                 w_txt = self.config['loss']['intra_txt_weight']
-                img_aug_available = 'image_aug' in batch
+                # B0v3 pair design: dataset returns image_aug_a + image_aug_b for the
+                # intra-modal image-image pair, NOT a single image_aug.
+                pair_available = ('image_aug_a' in batch) and ('image_aug_b' in batch)
                 txt_aug_available = self.paraphraser is not None
                 logger.info(
                     f"Loss config at step 0: type={loss_type}, "
                     f"intra_img_weight={w_img}, intra_txt_weight={w_txt}, "
-                    f"img_aug_available={img_aug_available}, "
+                    f"img_aug_pair_available={pair_available}, "
                     f"txt_aug_available={txt_aug_available}"
                 )
-                if w_img > 0 and not img_aug_available:
+                if w_img > 0 and not pair_available:
                     raise RuntimeError(
-                        f"intra_img_weight={w_img} but img_aug_embeds is None. "
-                        "Check that k_photometric_augs > 0 and image_aug is in batch."
+                        f"intra_img_weight={w_img} but image_aug_a/image_aug_b are not in batch. "
+                        "Check that k_photometric_augs > 0 and the dataset returns the B0v3 pair."
                     )
                 if w_txt > 0 and not txt_aug_available:
                     raise RuntimeError(
-                        f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
-                        "Check that paraphraser is initialized and intra_txt_weight > 0."
+                        f"intra_txt_weight={w_txt} but paraphraser is not initialized."
                     )
 
             # ============================================================
@@ -280,32 +281,30 @@ class Trainer:
             # ============================================================
             if self.use_grad_cache:
                 # GRADIENT CACHING MODE
-                # GradCache handles the forward/backward internally
+                # GradCache currently does NOT support B0v3 pair-based intra-modal
+                # (would require threading both aug views and both paraphrase pairs
+                # through the cache phases). Fail loud rather than silently degrade.
+                if intra_img_weight > 0 or intra_txt_weight > 0:
+                    raise RuntimeError(
+                        "GradCache does not yet support B0v3 pair-based intra-modal "
+                        "(intra_img_weight>0 or intra_txt_weight>0). "
+                        "Either disable training.use_grad_cache or extend src/grad_cache.py "
+                        "to thread image_aug_a/image_aug_b + paraphrase pairs."
+                    )
                 if neg_input_ids is not None:
                     logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
                 if self.use_hard_negatives:
                     logger.warning("Syntactic hard negatives (loss.hard_negatives) are not supported with GradCache yet. Ignoring.")
 
-                # Generate paraphrases for full batch before GradCache phases
-                para_input_ids, para_attention_mask = None, None
-                if intra_txt_weight > 0 and self.paraphraser is not None:
-                    para_input_ids, para_attention_mask = self.paraphraser.generate(batch['sentid'].tolist())
-                    # para_input_ids: [N, 77], para_attention_mask: [N, 77]
-
-                image_aug = (
-                    batch['image_aug'].to(self.device, non_blocking=True)
-                    if intra_img_weight > 0 else None
-                )  # [N, C, H, W] or None
-
                 # Zero gradients before GradCache forward (which accumulates gradients)
                 self.optimizer.zero_grad()
 
-                # GradCache performs forward and backward internally
+                # GradCache performs forward and backward internally (inter-modal only)
                 loss_dict = self.grad_cache.forward(
                     images, input_ids, attention_mask,
-                    para_input_ids=para_input_ids,
-                    para_attention_mask=para_attention_mask,
-                    image_aug=image_aug,
+                    para_input_ids=None,
+                    para_attention_mask=None,
+                    image_aug=None,
                 )
                 loss = loss_dict["loss_total"]
                 
@@ -343,26 +342,39 @@ class Trainer:
                         else:
                             img_embeds = self.model.encode_image(images)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                        img_aug_embeds = None
-                        txt_aug_embeds = None
+                        img_aug_a_embeds = None
+                        img_aug_b_embeds = None
+                        txt_aug_a_embeds = None
+                        txt_aug_b_embeds = None
                         neg_txt_embeds = None
+
+                        # B0v3: encode the two augmented image views for image-image
+                        # intra-modal pair. Both views are produced independently by
+                        # transform_aug applied twice in __getitem__.
                         if intra_img_weight > 0:
                             with torch.no_grad():
-                                img_aug_embeds = self.model.encode_image(
-                                    batch['image_aug'].to(self.device, non_blocking=True))
+                                img_aug_a_embeds = self.model.encode_image(
+                                    batch['image_aug_a'].to(self.device, non_blocking=True))
+                                img_aug_b_embeds = self.model.encode_image(
+                                    batch['image_aug_b'].to(self.device, non_blocking=True))
 
-                        # Merge paraphrase + hard-neg text into a single no_grad
+                        # Merge paraphrase pair + hard-neg text into a single no_grad
                         # encode_text call to avoid redundant kernel launches.
                         nograd_ids_parts = []
                         nograd_mask_parts = []
-                        _para_n = 0   # length of paraphrase slice
-                        _neg_n = 0    # length of hard-neg slice
+                        _para_n_a = 0
+                        _para_n_b = 0
+                        _neg_n = 0
 
                         if intra_txt_weight > 0 and self.paraphraser is not None:
-                            para_ids, para_mask = self.paraphraser.generate(batch['sentid'].tolist())
-                            nograd_ids_parts.append(para_ids)    # [N, 77]
-                            nograd_mask_parts.append(para_mask)  # [N, 77]
-                            _para_n = para_ids.shape[0]
+                            pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.generate_pair(
+                                batch['sentid'].tolist())
+                            nograd_ids_parts.append(pa_ids)
+                            nograd_mask_parts.append(pa_mask)
+                            _para_n_a = pa_ids.shape[0]
+                            nograd_ids_parts.append(pb_ids)
+                            nograd_mask_parts.append(pb_mask)
+                            _para_n_b = pb_ids.shape[0]
 
                         if self.hard_neg_generator is not None:
                             captions = batch['caption']
@@ -376,22 +388,25 @@ class Trainer:
                             )
                             neg_ids = tokenized_neg['input_ids'].to(self.device)
                             neg_mask = tokenized_neg['attention_mask'].to(self.device)
-                            nograd_ids_parts.append(neg_ids)    # [N, 77]
-                            nograd_mask_parts.append(neg_mask)  # [N, 77]
+                            nograd_ids_parts.append(neg_ids)
+                            nograd_mask_parts.append(neg_mask)
                             _neg_n = neg_ids.shape[0]
 
                         # Single fused no_grad encode_text for all auxiliary texts
                         if nograd_ids_parts:
-                            merged_ids = torch.cat(nograd_ids_parts, dim=0)    # [_para_n + _neg_n, 77]
-                            merged_mask = torch.cat(nograd_mask_parts, dim=0)  # [_para_n + _neg_n, 77]
+                            merged_ids = torch.cat(nograd_ids_parts, dim=0)
+                            merged_mask = torch.cat(nograd_mask_parts, dim=0)
                             with torch.no_grad():
-                                merged_embeds = self.model.encode_text(merged_ids, merged_mask)  # [_para_n + _neg_n, D]
+                                merged_embeds = self.model.encode_text(merged_ids, merged_mask)
                             offset = 0
-                            if _para_n > 0:
-                                txt_aug_embeds = merged_embeds[offset:offset + _para_n]  # [N, D]
-                                offset += _para_n
+                            if _para_n_a > 0:
+                                txt_aug_a_embeds = merged_embeds[offset:offset + _para_n_a]
+                                offset += _para_n_a
+                            if _para_n_b > 0:
+                                txt_aug_b_embeds = merged_embeds[offset:offset + _para_n_b]
+                                offset += _para_n_b
                             if _neg_n > 0:
-                                neg_txt_embeds = merged_embeds[offset:offset + _neg_n]   # [N, D]
+                                neg_txt_embeds = merged_embeds[offset:offset + _neg_n]
 
                         if step == 0 and epoch == 0:
                             loss_type = self.config['loss']['type']
@@ -400,18 +415,18 @@ class Trainer:
                             logger.info(
                                 f"Loss config at step 0: type={loss_type}, "
                                 f"intra_img_weight={w_img}, intra_txt_weight={w_txt}, "
-                                f"img_aug_available={img_aug_embeds is not None}, "
-                                f"txt_aug_available={txt_aug_embeds is not None}"
+                                f"img_aug_pair_available={img_aug_a_embeds is not None and img_aug_b_embeds is not None}, "
+                                f"txt_aug_pair_available={txt_aug_a_embeds is not None and txt_aug_b_embeds is not None}"
                             )
-                            if w_img > 0 and img_aug_embeds is None:
+                            if w_img > 0 and (img_aug_a_embeds is None or img_aug_b_embeds is None):
                                 raise RuntimeError(
-                                    f"intra_img_weight={w_img} but img_aug_embeds is None. "
-                                    "Check that k_photometric_augs > 0 and image_aug is in batch."
+                                    f"intra_img_weight={w_img} but image_aug pair is None. "
+                                    "Check that k_photometric_augs > 0 and dataset returns image_aug_a/image_aug_b."
                                 )
-                            if w_txt > 0 and txt_aug_embeds is None:
+                            if w_txt > 0 and (txt_aug_a_embeds is None or txt_aug_b_embeds is None):
                                 raise RuntimeError(
-                                    f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
-                                    "Check that paraphraser is initialized and intra_txt_weight > 0."
+                                    f"intra_txt_weight={w_txt} but paraphrase pair embeds are None. "
+                                    "Check that paraphraser is initialized and rewrites file has >= 2 entries per sentid."
                                 )
                             if self.use_hard_negatives:
                                 if neg_txt_embeds is None:
@@ -437,8 +452,11 @@ class Trainer:
                         loss_dict = self.criterion(
                             img_embeds, txt_embeds,
                             self.model.clip.logit_scale,
-                            img_aug_embeds, txt_aug_embeds,
-                            neg_txt_embeds=neg_txt_embeds
+                            img_aug_a_embeds=img_aug_a_embeds,
+                            img_aug_b_embeds=img_aug_b_embeds,
+                            txt_aug_a_embeds=txt_aug_a_embeds,
+                            txt_aug_b_embeds=txt_aug_b_embeds,
+                            neg_txt_embeds=neg_txt_embeds,
                         )
                         loss = loss_dict["loss_total"]
 
@@ -477,25 +495,38 @@ class Trainer:
                     else:
                         img_embeds = self.model.encode_image(images)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
-                    img_aug_embeds = None
-                    txt_aug_embeds = None
+                    img_aug_a_embeds = None
+                    img_aug_b_embeds = None
+                    txt_aug_a_embeds = None
+                    txt_aug_b_embeds = None
                     neg_txt_embeds = None
+
+                    # B0v3: encode the two augmented image views for image-image
+                    # intra-modal pair.
                     if intra_img_weight > 0:
                         with torch.no_grad():
-                            img_aug_embeds = self.model.encode_image(batch['image_aug'].to(self.device, non_blocking=True))
+                            img_aug_a_embeds = self.model.encode_image(
+                                batch['image_aug_a'].to(self.device, non_blocking=True))
+                            img_aug_b_embeds = self.model.encode_image(
+                                batch['image_aug_b'].to(self.device, non_blocking=True))
 
-                    # Merge paraphrase + hard-neg text into a single no_grad
+                    # Merge paraphrase pair + hard-neg text into a single no_grad
                     # encode_text call to avoid redundant kernel launches.
                     nograd_ids_parts = []
                     nograd_mask_parts = []
-                    _para_n = 0
+                    _para_n_a = 0
+                    _para_n_b = 0
                     _neg_n = 0
 
                     if intra_txt_weight > 0 and self.paraphraser is not None:
-                        para_ids, para_mask = self.paraphraser.generate(batch['sentid'].tolist())
-                        nograd_ids_parts.append(para_ids)    # [N, 77]
-                        nograd_mask_parts.append(para_mask)  # [N, 77]
-                        _para_n = para_ids.shape[0]
+                        pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.generate_pair(
+                            batch['sentid'].tolist())
+                        nograd_ids_parts.append(pa_ids)
+                        nograd_mask_parts.append(pa_mask)
+                        _para_n_a = pa_ids.shape[0]
+                        nograd_ids_parts.append(pb_ids)
+                        nograd_mask_parts.append(pb_mask)
+                        _para_n_b = pb_ids.shape[0]
 
                     if self.hard_neg_generator is not None:
                         captions = batch['caption']
@@ -509,22 +540,25 @@ class Trainer:
                         )
                         neg_ids = tokenized_neg['input_ids'].to(self.device)
                         neg_mask = tokenized_neg['attention_mask'].to(self.device)
-                        nograd_ids_parts.append(neg_ids)    # [N, 77]
-                        nograd_mask_parts.append(neg_mask)  # [N, 77]
+                        nograd_ids_parts.append(neg_ids)
+                        nograd_mask_parts.append(neg_mask)
                         _neg_n = neg_ids.shape[0]
 
                     # Single fused no_grad encode_text for all auxiliary texts
                     if nograd_ids_parts:
-                        merged_ids = torch.cat(nograd_ids_parts, dim=0)    # [_para_n + _neg_n, 77]
-                        merged_mask = torch.cat(nograd_mask_parts, dim=0)  # [_para_n + _neg_n, 77]
+                        merged_ids = torch.cat(nograd_ids_parts, dim=0)
+                        merged_mask = torch.cat(nograd_mask_parts, dim=0)
                         with torch.no_grad():
-                            merged_embeds = self.model.encode_text(merged_ids, merged_mask)  # [_para_n + _neg_n, D]
+                            merged_embeds = self.model.encode_text(merged_ids, merged_mask)
                         offset = 0
-                        if _para_n > 0:
-                            txt_aug_embeds = merged_embeds[offset:offset + _para_n]  # [N, D]
-                            offset += _para_n
+                        if _para_n_a > 0:
+                            txt_aug_a_embeds = merged_embeds[offset:offset + _para_n_a]
+                            offset += _para_n_a
+                        if _para_n_b > 0:
+                            txt_aug_b_embeds = merged_embeds[offset:offset + _para_n_b]
+                            offset += _para_n_b
                         if _neg_n > 0:
-                            neg_txt_embeds = merged_embeds[offset:offset + _neg_n]   # [N, D]
+                            neg_txt_embeds = merged_embeds[offset:offset + _neg_n]
 
                     if step == 0 and epoch == 0:
                         loss_type = self.config['loss']['type']
@@ -533,18 +567,18 @@ class Trainer:
                         logger.info(
                             f"Loss config at step 0: type={loss_type}, "
                             f"intra_img_weight={w_img}, intra_txt_weight={w_txt}, "
-                            f"img_aug_available={img_aug_embeds is not None}, "
-                            f"txt_aug_available={txt_aug_embeds is not None}"
+                            f"img_aug_pair_available={img_aug_a_embeds is not None and img_aug_b_embeds is not None}, "
+                            f"txt_aug_pair_available={txt_aug_a_embeds is not None and txt_aug_b_embeds is not None}"
                         )
-                        if w_img > 0 and img_aug_embeds is None:
+                        if w_img > 0 and (img_aug_a_embeds is None or img_aug_b_embeds is None):
                             raise RuntimeError(
-                                f"intra_img_weight={w_img} but img_aug_embeds is None. "
-                                "Check that k_photometric_augs > 0 and image_aug is in batch."
+                                f"intra_img_weight={w_img} but image_aug pair is None. "
+                                "Check that k_photometric_augs > 0 and dataset returns image_aug_a/image_aug_b."
                             )
-                        if w_txt > 0 and txt_aug_embeds is None:
+                        if w_txt > 0 and (txt_aug_a_embeds is None or txt_aug_b_embeds is None):
                             raise RuntimeError(
-                                f"intra_txt_weight={w_txt} but txt_aug_embeds is None. "
-                                "Check that paraphraser is initialized and intra_txt_weight > 0."
+                                f"intra_txt_weight={w_txt} but paraphrase pair embeds are None. "
+                                "Check that paraphraser is initialized and rewrites file has >= 2 entries per sentid."
                             )
                         if self.use_hard_negatives:
                             if neg_txt_embeds is None:
@@ -570,8 +604,11 @@ class Trainer:
                     loss_dict = self.criterion(
                         img_embeds, txt_embeds,
                         self.model.clip.logit_scale,
-                        img_aug_embeds, txt_aug_embeds,
-                        neg_txt_embeds=neg_txt_embeds
+                        img_aug_a_embeds=img_aug_a_embeds,
+                        img_aug_b_embeds=img_aug_b_embeds,
+                        txt_aug_a_embeds=txt_aug_a_embeds,
+                        txt_aug_b_embeds=txt_aug_b_embeds,
+                        neg_txt_embeds=neg_txt_embeds,
                     )
                     loss = loss_dict["loss_total"]
 

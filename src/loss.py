@@ -104,19 +104,25 @@ class SigLIPLoss(nn.Module):
 
         return (loss_pos + loss_neg) / 2
 
-    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
+    def forward(self, img_embeds, txt_embeds, logit_scale,
+                img_aug_a_embeds=None, img_aug_b_embeds=None,
+                txt_aug_a_embeds=None, txt_aug_b_embeds=None,
+                neg_txt_embeds=None):
         """
-        Compute SigLIP loss with optional intra-modal consistency terms.
+        Compute SigLIP loss with optional B0v3 pair-based intra-modal terms.
 
         Args:
-            img_embeds: [N, D] L2-normalized image embeddings
-            txt_embeds: [N, D] L2-normalized text embeddings
-            logit_scale: scalar nn.Parameter — model.clip.logit_scale (log scale)
-            img_aug_embeds: [N, D] optional — augmented image embeddings for intra-modal loss
-            txt_aug_embeds: [N, D] optional — paraphrase text embeddings for intra-modal loss
+            img_embeds: [N, D] L2-normalized image embeddings (inter-modal anchor — clean view).
+            txt_embeds: [N, D] L2-normalized text embeddings (inter-modal anchor — original caption).
+            logit_scale: scalar nn.Parameter — model.clip.logit_scale (log scale).
+            img_aug_a_embeds, img_aug_b_embeds: [N, D] optional — two augmented image
+                views for the intra-modal image-image SigLIP pair (L_img_img).
+            txt_aug_a_embeds, txt_aug_b_embeds: [N, D] optional — two paraphrase text
+                embeddings for the intra-modal text-text SigLIP pair (L_text_text).
+            neg_txt_embeds: [N, D] optional — hard-negative captions (B2).
 
         Returns:
-            dict with keys: loss_total, loss_inter, loss_intra_img, loss_intra_txt
+            dict with keys: loss_total, loss_inter, loss_intra_img, loss_intra_txt.
         """
         if neg_txt_embeds is not None:
             loss_inter = self._compute_siglip_with_hard_negatives(
@@ -125,12 +131,12 @@ class SigLIPLoss(nn.Module):
             loss_inter = self._compute_siglip(img_embeds, txt_embeds, logit_scale)
 
         loss_img = torch.tensor(0.0, device=img_embeds.device)
-        if self.w_img > 0 and img_aug_embeds is not None:
-            loss_img = self._compute_siglip(img_embeds, img_aug_embeds, logit_scale)
+        if self.w_img > 0 and img_aug_a_embeds is not None and img_aug_b_embeds is not None:
+            loss_img = self._compute_siglip(img_aug_a_embeds, img_aug_b_embeds, logit_scale)
 
         loss_txt = torch.tensor(0.0, device=img_embeds.device)
-        if self.w_txt > 0 and txt_aug_embeds is not None:
-            loss_txt = self._compute_siglip(txt_embeds, txt_aug_embeds, logit_scale)
+        if self.w_txt > 0 and txt_aug_a_embeds is not None and txt_aug_b_embeds is not None:
+            loss_txt = self._compute_siglip(txt_aug_a_embeds, txt_aug_b_embeds, logit_scale)
 
         loss_total = loss_inter + self.w_img * loss_img + self.w_txt * loss_txt
 
@@ -256,23 +262,27 @@ class SymmetricInfoNCELoss(nn.Module):
 
         return (loss_i2t + loss_t2i) / 2
 
-    def forward(self, img_embeds, txt_embeds, logit_scale, img_aug_embeds=None, txt_aug_embeds=None, neg_txt_embeds=None):
+    def forward(self, img_embeds, txt_embeds, logit_scale,
+                img_aug_a_embeds=None, img_aug_b_embeds=None,
+                txt_aug_a_embeds=None, txt_aug_b_embeds=None,
+                neg_txt_embeds=None):
         """
-        Computes the complete retrieval loss with optional intra-modal regularization.
+        Compute the complete InfoNCE retrieval loss with optional B0v3 pair-based
+        intra-modal regularization and optional NegCLIP-style hard negatives.
 
         Args:
-            img_embeds: [N, D] - L2 normalized image embeddings
-            txt_embeds: [N, D] - L2 normalized text embeddings (positives)
-            logit_scale: scalar nn.Parameter — model.clip.logit_scale (log scale)
-            img_aug_embeds: [N, D] optional - for intra-modal image loss
-            txt_aug_embeds: [N, D] optional - for intra-modal text loss
+            img_embeds: [N, D] L2-normalized image embeddings (inter-modal anchor — clean view).
+            txt_embeds: [N, D] L2-normalized text embeddings (inter-modal anchor — original caption).
+            logit_scale: scalar nn.Parameter — model.clip.logit_scale (log scale).
+            img_aug_a_embeds, img_aug_b_embeds: [N, D] optional — two augmented image
+                views for the intra-modal image-image InfoNCE pair (L_img_img).
+            txt_aug_a_embeds, txt_aug_b_embeds: [N, D] optional — two paraphrase text
+                embeddings for the intra-modal text-text InfoNCE pair (L_text_text).
+            neg_txt_embeds: [N, D] optional — hard-negative captions; extends the i2t
+                similarity matrix to N×2N (NegCLIP-asymmetric, B2).
 
         Returns:
-            dict: Dictionary containing total loss and individual components:
-                - "loss_total": Final weighted sum
-                - "loss_inter": Image-Text contrastive loss
-                - "loss_intra_img": Image-Image intra-modal loss
-                - "loss_intra_txt": Text-Text intra-modal loss
+            dict: { "loss_total", "loss_inter", "loss_intra_img", "loss_intra_txt" }.
         """
         scale = logit_scale.exp().clamp(max=100)  # scalar
         ls_val = logit_scale.exp().item()
@@ -290,12 +300,12 @@ class SymmetricInfoNCELoss(nn.Module):
             loss_inter = self._compute_contrastive(img_embeds, txt_embeds, scale)
 
         loss_img = torch.tensor(0.0, device=img_embeds.device)
-        if self.w_img > 0 and img_aug_embeds is not None:
-            loss_img = self._compute_contrastive(img_embeds, img_aug_embeds, scale)
+        if self.w_img > 0 and img_aug_a_embeds is not None and img_aug_b_embeds is not None:
+            loss_img = self._compute_contrastive(img_aug_a_embeds, img_aug_b_embeds, scale)
 
         loss_txt = torch.tensor(0.0, device=txt_embeds.device)
-        if self.w_txt > 0 and txt_aug_embeds is not None:
-            loss_txt = self._compute_contrastive(txt_embeds, txt_aug_embeds, scale)
+        if self.w_txt > 0 and txt_aug_a_embeds is not None and txt_aug_b_embeds is not None:
+            loss_txt = self._compute_contrastive(txt_aug_a_embeds, txt_aug_b_embeds, scale)
 
         total_loss = loss_inter + (self.w_img * loss_img) + (self.w_txt * loss_txt)
 

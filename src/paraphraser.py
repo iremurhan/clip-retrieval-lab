@@ -83,3 +83,49 @@ class PrecomputedLLMParaphraser:
             tokenized['input_ids'].to(self.device),       # [N, max_length]
             tokenized['attention_mask'].to(self.device),  # [N, max_length]
         )
+
+    def generate_pair(self, sentids: list) -> tuple:
+        """
+        Pick TWO distinct random rewrites per sentid for paraphrase ↔ paraphrase
+        intra-modal text loss (B0v3 pair-based design).
+
+        Each sentid must have at least 2 rewrites available; otherwise a ValueError
+        is raised so the caller fails loud rather than silently sampling the same
+        paraphrase twice.
+
+        Args:
+            sentids: list[int] of length N — sentence IDs from the batch.
+
+        Returns:
+            (a_input_ids, a_attention_mask, b_input_ids, b_attention_mask) —
+            each [N, max_length] LongTensor on self.device.
+        """
+        texts_a = []
+        texts_b = []
+        for sid in sentids:
+            sid_int = int(sid)
+            rw_list = self.rewrites.get(sid_int)
+            n = len(rw_list) if rw_list else 0
+            if n < 2:
+                raise ValueError(
+                    f"sentid {sid_int}: need >= 2 rewrites for B0v3 paraphrase pair, "
+                    f"got {n}. Re-run scripts/generate_rewrites.py with --num_rewrites>=2."
+                )
+            a, b = self.rng.sample(rw_list, 2)  # 2 distinct rewrites
+            texts_a.append(a)
+            texts_b.append(b)
+
+        tok_a = self.tokenizer(
+            texts_a, padding='max_length', truncation=True,
+            max_length=self.max_length, return_tensors='pt',
+        )
+        tok_b = self.tokenizer(
+            texts_b, padding='max_length', truncation=True,
+            max_length=self.max_length, return_tensors='pt',
+        )
+        return (
+            tok_a['input_ids'].to(self.device),
+            tok_a['attention_mask'].to(self.device),
+            tok_b['input_ids'].to(self.device),
+            tok_b['attention_mask'].to(self.device),
+        )
