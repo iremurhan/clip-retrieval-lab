@@ -134,6 +134,28 @@ class Trainer:
         else:
             self.cls_label_map = None
 
+        # B5a/B5b/B5c gating: cached at init so the hot loop is a single bool check.
+        self.seg_mode = config.get('model', {}).get('seg_mode')
+        self.use_seg_ids = self.seg_mode is not None
+        if self.use_seg_ids:
+            if self.cls_weight > 0:
+                raise RuntimeError(
+                    "B4 (loss.cls_weight > 0) and B5 (model.seg_mode set) are mutually exclusive: "
+                    "cls_head reads pooler_output while seg-injection rewrites hidden_states. "
+                    "Either disable cls_weight or unset seg_mode."
+                )
+            if self.use_grad_cache:
+                raise RuntimeError(
+                    "B5 (model.seg_mode set) is incompatible with training.use_grad_cache=true. "
+                    "GradCache does not yet thread seg_ids; either disable grad_cache or extend "
+                    "src/grad_cache.py to forward seg_ids."
+                )
+            logger.info(
+                f"B5 active in Trainer: model.seg_mode={self.seg_mode}, "
+                f"vocab={config['model'].get('seg_vocab_size')}, "
+                f"feat_dim={config['model'].get('seg_feature_dim')}"
+            )
+
         # SIGTERM flag — set externally via signal handler in run.py
         self._sigterm_received = False
 
@@ -246,6 +268,18 @@ class Trainer:
             input_ids = batch['input_ids'].to(self.device, non_blocking=True)
             attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
+            # B5 inter-modal seg_ids; None for every other variant. Augmented
+            # views (image_aug_a/b) intentionally drop seg_ids — RandomResizedCrop
+            # breaks spatial alignment with the precomputed map.
+            seg_ids = None
+            if self.use_seg_ids:
+                if 'seg_ids' not in batch:
+                    raise KeyError(
+                        "B5 active (model.seg_mode set) but batch is missing 'seg_ids'. "
+                        "Check the dataloader factory."
+                    )
+                seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
+
             neg_input_ids = batch.get('negative_input_ids')
             neg_attention_mask = batch.get('negative_attention_mask')
             if neg_input_ids is not None:
@@ -340,7 +374,7 @@ class Trainer:
                         if self.cls_weight > 0 and self.model.cls_head is not None:
                             img_embeds, cls_logits = self.model.encode_image_with_cls(images)
                         else:
-                            img_embeds = self.model.encode_image(images)
+                            img_embeds = self.model.encode_image(images, seg_ids=seg_ids)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_a_embeds = None
                         img_aug_b_embeds = None
@@ -493,7 +527,7 @@ class Trainer:
                     if self.cls_weight > 0 and self.model.cls_head is not None:
                         img_embeds, cls_logits = self.model.encode_image_with_cls(images)
                     else:
-                        img_embeds = self.model.encode_image(images)
+                        img_embeds = self.model.encode_image(images, seg_ids=seg_ids)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
                     img_aug_a_embeds = None
                     img_aug_b_embeds = None
@@ -703,8 +737,20 @@ class Trainer:
             input_ids = batch['input_ids'].to(self.device, non_blocking=True)
             attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
+            # B5: thread per-patch seg_ids through eval batches too. Augmented
+            # views aren't generated during eval (transform_aug=transform), so
+            # only the inter-modal forward needs seg_ids here.
+            seg_ids = None
+            if self.use_seg_ids:
+                if 'seg_ids' not in batch:
+                    raise KeyError(
+                        "B5 active but eval batch is missing 'seg_ids'. "
+                        "Check the dataloader factory."
+                    )
+                seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
+
             with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
-                img_emb, txt_emb = self.model(images, input_ids, attention_mask)
+                img_emb, txt_emb = self.model(images, input_ids, attention_mask, seg_ids=seg_ids)
             img_embeds_list.append(img_emb.cpu())
             txt_embeds_list.append(txt_emb.cpu())
             image_ids_list.append(batch['image_id'].cpu())

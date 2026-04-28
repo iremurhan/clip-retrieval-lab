@@ -232,6 +232,162 @@ class HardNegativeGenerator:
 
 
 # ============================================================================
+# Segment-Feature Loader (B5a/B5b/B5c variants only)
+# ============================================================================
+
+_SEG_MODE_FILENAME = {
+    "spatial":    "spatial_bins.pt",
+    "semantic":   "semantic_ids.pt",
+    "continuous": "continuous_features.pt",
+}
+
+
+class SegmentFeatureLoader:
+    """
+    Loads a precomputed per-patch tensor for the B5a / B5b / B5c variants.
+
+    All patch assignments are materialized offline by
+    scripts/precompute_sam.py --seg_mode {spatial,semantic,continuous} and
+    serialized as a single torch dict keyed by filename stem.
+
+    Layout (under <seg_map_dir>):
+        spatial_bins.pt        dict[str -> LongTensor (576,)],   vocab = 28
+        semantic_ids.pt        dict[str -> LongTensor (576,)],   vocab = 81
+        continuous_features.pt dict[str -> FloatTensor (576, F)], F typically 5
+
+    Args:
+        seg_map_dir (str): Directory containing the per-mode .pt file.
+        image_size (int): Target spatial resolution (used only for shape checks).
+        patch_size (int): ViT patch size (14 for ViT-L/14).
+        seg_mode (str): One of 'spatial', 'semantic', 'continuous'.
+        seg_vocab_size (int | None): Embedding table size for discrete modes;
+            required if seg_mode in {'spatial', 'semantic'}, else ignored.
+        seg_feature_dim (int | None): Per-patch feature dim for continuous mode;
+            required if seg_mode == 'continuous'.
+    """
+
+    def __init__(
+        self,
+        seg_map_dir,
+        image_size,
+        patch_size,
+        seg_mode,
+        seg_vocab_size=None,
+        seg_feature_dim=None,
+    ):
+        if seg_mode not in _SEG_MODE_FILENAME:
+            raise ValueError(
+                f"Unknown seg_mode {seg_mode!r}. "
+                f"Expected one of {list(_SEG_MODE_FILENAME)}."
+            )
+        if not os.path.isdir(seg_map_dir):
+            raise FileNotFoundError(
+                f"seg_map_dir does not exist: {seg_map_dir}. "
+                "Run scripts/precompute_sam.py --seg_mode {spatial,semantic,continuous} first."
+            )
+        if image_size % patch_size != 0:
+            raise ValueError(
+                f"image_size={image_size} must be divisible by patch_size={patch_size}."
+            )
+
+        self.seg_map_dir = seg_map_dir
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.grid_size = image_size // patch_size           # 24 for 336/14
+        self.num_patches = self.grid_size * self.grid_size  # 576
+        self.seg_mode = seg_mode
+        self.is_continuous = (seg_mode == "continuous")
+
+        pt_path = os.path.join(seg_map_dir, _SEG_MODE_FILENAME[seg_mode])
+        if not os.path.isfile(pt_path):
+            raise FileNotFoundError(
+                f"Precomputed segment features not found: {pt_path}. "
+                f"Run: python scripts/precompute_sam.py --seg_mode {seg_mode} ..."
+            )
+
+        logger.info(f"Loading segment features: {pt_path}")
+        raw = torch.load(pt_path, map_location="cpu", weights_only=True)
+        if not isinstance(raw, dict):
+            raise TypeError(
+                f"{pt_path} must contain a dict[str, Tensor], got {type(raw).__name__}"
+            )
+        # Pack into a single contiguous tensor + numpy stem index. The dict
+        # and its str keys would otherwise re-COW per DataLoader worker
+        # (refcount writes break shared pages); the packed tensor lives in
+        # shared memory and the U-array key table is a single C buffer.
+        stems = list(raw.keys())
+        first = raw[stems[0]]
+        packed = torch.empty((len(stems), *first.shape), dtype=first.dtype)
+        for i, s in enumerate(stems):
+            packed[i] = raw[s]
+        del raw
+        packed.share_memory_()
+        self._packed = packed                                       # [K, 576] or [K, 576, F]
+        order = np.argsort(np.asarray(stems, dtype=np.str_))
+        self._stems_sorted = np.asarray(stems, dtype=np.str_)[order]
+        self._stems_order = order.astype(np.int64)
+        logger.info(
+            f"Loaded {len(stems)} segment-feature entries (packed, shared) from {pt_path}"
+        )
+
+        if self.is_continuous:
+            if seg_feature_dim is None or seg_feature_dim < 1:
+                raise ValueError(
+                    f"seg_feature_dim must be >= 1 for continuous mode, got {seg_feature_dim!r}"
+                )
+            self.seg_feature_dim = int(seg_feature_dim)
+            self.seg_vocab_size = None
+        else:
+            if seg_vocab_size is None or seg_vocab_size < 1:
+                raise ValueError(
+                    f"seg_vocab_size must be >= 1 for seg_mode={seg_mode}, got {seg_vocab_size!r}"
+                )
+            self.seg_vocab_size = int(seg_vocab_size)
+            self.seg_feature_dim = None
+
+    def load(self, filename):
+        """
+        Return the per-patch tensor for one image.
+
+        Returns:
+            LongTensor (576,)    for seg_mode in {'spatial','semantic'}
+            FloatTensor (576, F) for seg_mode == 'continuous'
+        """
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        pos = int(np.searchsorted(self._stems_sorted, stem))
+        if pos >= self._stems_sorted.shape[0] or str(self._stems_sorted[pos]) != stem:
+            raise KeyError(
+                f"Precomputed segment features missing for '{stem}' "
+                f"(seg_mode={self.seg_mode}, dir={self.seg_map_dir}). "
+                "Every training image must be covered."
+            )
+        feat = self._packed[int(self._stems_order[pos])]
+
+        if self.is_continuous:
+            if feat.dim() != 2 or feat.size(0) != self.num_patches \
+                    or feat.size(1) != self.seg_feature_dim:
+                raise ValueError(
+                    f"Continuous features for {stem!r} have shape {tuple(feat.shape)}, "
+                    f"expected ({self.num_patches}, {self.seg_feature_dim})."
+                )
+            return feat.float()
+
+        if feat.dim() != 1 or feat.numel() != self.num_patches:
+            raise ValueError(
+                f"Discrete IDs for {stem!r} have shape {tuple(feat.shape)}, "
+                f"expected ({self.num_patches},)."
+            )
+        feat = feat.long()
+        fmin, fmax = int(feat.min().item()), int(feat.max().item())
+        if fmin < 0 or fmax >= self.seg_vocab_size:
+            raise ValueError(
+                f"seg_ids out of bounds for {stem!r}: "
+                f"min={fmin}, max={fmax}, vocab_size={self.seg_vocab_size}"
+            )
+        return feat
+
+
+# ============================================================================
 # Dataset
 # ============================================================================
 
@@ -271,6 +427,7 @@ class CaptionImageDataset(Dataset):
         split='train',
         transform=None,
         transform_aug=None,
+        seg_loader=None,
     ):
         """
         Args:
@@ -286,6 +443,11 @@ class CaptionImageDataset(Dataset):
                 (random augmentation). Applied TWICE per sample to produce two
                 independent augmented views (image_aug_a, image_aug_b) for the
                 intra-modal image-image contrast (B0v3 pair design).
+            seg_loader (SegmentFeatureLoader, optional): If set, __getitem__
+                also returns 'seg_ids' for the inter-modal image only
+                (B5a/B5b/B5c). Augmented views drop seg_ids since
+                RandomResizedCrop breaks spatial alignment with the
+                precomputed map.
 
         Note:
             LaCLIP-style caption rewrites are loaded by the trainer-side
@@ -300,6 +462,7 @@ class CaptionImageDataset(Dataset):
         self.split = split
         self.transform = transform
         self.transform_aug = transform_aug
+        self.seg_loader = seg_loader
 
         # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
@@ -393,7 +556,7 @@ class CaptionImageDataset(Dataset):
             return_tensors='pt'
         )
 
-        return {
+        out = {
             'image': img_tensor,
             'image_aug_a': img_aug_a_tensor,
             'image_aug_b': img_aug_b_tensor,
@@ -403,6 +566,11 @@ class CaptionImageDataset(Dataset):
             'image_id': image_id,
             'sentid': sample['sentid'],
         }
+        # B5a/B5b/B5c: per-patch seg_ids for the inter-modal image only.
+        # Augmented views skip this — RandomResizedCrop breaks alignment.
+        if self.seg_loader is not None:
+            out['seg_ids'] = self.seg_loader.load(filename)
+        return out
 
 
 # ============================================================================
@@ -459,6 +627,40 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform = build_eval_transform(image_size)
         transform_aug = transform
 
+    # B5a/B5b/B5c gating: build SegmentFeatureLoader only when model.seg_mode
+    # is set. Every other variant pays zero overhead (no I/O, no batch keys).
+    seg_loader = None
+    seg_mode = config.get('model', {}).get('seg_mode')
+    if seg_mode is not None:
+        seg_map_dir = config['data']['seg_map_dir']
+        # patch_size is derived from the CLIP model name, not hardcoded:
+        # 'clip-vit-large-patch14-336' -> patch=14.
+        model_name = config['model']['image_model_name']
+        if 'patch14' in model_name:
+            patch_size = 14
+        elif 'patch16' in model_name:
+            patch_size = 16
+        elif 'patch32' in model_name:
+            patch_size = 32
+        else:
+            raise ValueError(
+                f"Cannot derive patch_size from model name {model_name!r}. "
+                "Add a branch to create_image_text_dataloader for this model."
+            )
+        seg_loader = SegmentFeatureLoader(
+            seg_map_dir=seg_map_dir,
+            image_size=image_size,
+            patch_size=patch_size,
+            seg_mode=seg_mode,
+            seg_vocab_size=config['model'].get('seg_vocab_size'),
+            seg_feature_dim=config['model'].get('seg_feature_dim'),
+        )
+        logger.info(
+            f"B5 seg_loader: mode={seg_mode}, dir={seg_map_dir}, image_size={image_size}, "
+            f"patch_size={patch_size}, grid={seg_loader.grid_size}x{seg_loader.grid_size}, "
+            f"vocab_size={seg_loader.seg_vocab_size}, feature_dim={seg_loader.seg_feature_dim}"
+        )
+
     dataset = CaptionImageDataset(
         images_root_path=images_root,
         captions_path=captions_path,
@@ -467,6 +669,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         split=split,
         transform=transform,
         transform_aug=transform_aug,
+        seg_loader=seg_loader,
     )
 
     seed = config['training']['seed']
