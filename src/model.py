@@ -98,7 +98,83 @@ class DualEncoder(nn.Module):
         with torch.no_grad():
             self.clip.logit_scale.fill_(2.6593)  # ln(1/0.07) = 2.6593
         logger.info("logit_scale reset to 2.6593 (τ=0.07)")
-    
+
+        # 6. B5a / B5b / B5c only: segment-aware patch enrichment.
+        # Strictly gated by config.model.seg_mode; absent for all other variants
+        # so that nothing in the forward path changes for them.
+        #   seg_mode == "spatial"    | "semantic" : nn.Embedding(vocab, d_model)
+        #   seg_mode == "continuous"              : nn.Sequential(Linear, GELU, Linear)
+        seg_mode = config.get('model', {}).get('seg_mode')
+        self.seg_mode = seg_mode
+        self.seg_embedding = None
+        self.seg_projection = None
+        self.seg_vocab_size = None
+        self.seg_feature_dim = None
+        if seg_mode is not None:
+            if seg_mode not in ("spatial", "semantic", "continuous"):
+                raise ValueError(
+                    f"model.seg_mode must be one of 'spatial','semantic','continuous'; got {seg_mode!r}"
+                )
+            d_model = self.clip.vision_model.config.hidden_size  # 1024 for ViT-L
+            patch_size = self.clip.vision_model.config.patch_size
+            image_size = self.clip.vision_model.config.image_size
+            self._seg_grid_size = image_size // patch_size
+            self._seg_num_patches = self._seg_grid_size * self._seg_grid_size
+
+            if seg_mode in ("spatial", "semantic"):
+                vocab = config['model'].get('seg_vocab_size')
+                if not isinstance(vocab, int) or vocab < 1:
+                    raise ValueError(
+                        f"model.seg_vocab_size must be a positive int for seg_mode={seg_mode}, "
+                        f"got {vocab!r}"
+                    )
+                init_std = float(config['model'].get('seg_init_std', 0.02))
+                self.seg_vocab_size = vocab
+                self.seg_embedding = nn.Embedding(vocab, d_model)
+                # Normal init at CLIP positional-embedding scale. Zero-init combined
+                # with cosine LR decay produced a dead embedding on b5-aware that
+                # never learned; std=0.02 matches HF CLIP's positional_embedding.
+                nn.init.normal_(self.seg_embedding.weight, mean=0.0, std=init_std)
+                self.seg_embedding.weight.requires_grad = True
+                logger.info(
+                    f"B5[{seg_mode}]: seg_embedding vocab={vocab}, d_model={d_model}, "
+                    f"init_std={init_std}, num_patches={self._seg_num_patches}"
+                )
+            else:  # continuous
+                feat_dim = int(config['model'].get('seg_feature_dim', 5))
+                hidden = int(config['model'].get('seg_proj_hidden', 128))
+                if feat_dim < 1 or hidden < 1:
+                    raise ValueError(
+                        f"seg_feature_dim and seg_proj_hidden must be positive, "
+                        f"got {feat_dim}, {hidden}"
+                    )
+                self.seg_feature_dim = feat_dim
+                self.seg_projection = nn.Sequential(
+                    nn.Linear(feat_dim, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, d_model),
+                )
+                # Xavier init is a reasonable default for a 2-layer MLP whose
+                # output is added to CLIP token activations at init scale.
+                for m in self.seg_projection.modules():
+                    if isinstance(m, nn.Linear):
+                        nn.init.xavier_uniform_(m.weight)
+                        nn.init.zeros_(m.bias)
+                for p in self.seg_projection.parameters():
+                    p.requires_grad = True
+                logger.info(
+                    f"B5[continuous]: seg_projection MLP {feat_dim}->{hidden}->{d_model}, "
+                    f"num_patches={self._seg_num_patches}"
+                )
+
+            # Activation memory: segment injection sits BEFORE the 24-layer ViT
+            # encoder, so autograd must retain every layer's activations to
+            # backprop into seg_embedding / seg_projection. Enable gradient
+            # checkpointing on the vision encoder to drop them.
+            self.clip.gradient_checkpointing_enable()
+            self.clip.config.use_cache = False
+            logger.info(f"B5[{seg_mode}]: enabled gradient checkpointing on CLIPModel")
+
     def _apply_freezing_strategy(self):
         """
         Freeze CLIP backbone, selectively unfreeze layers for fine-tuning.
@@ -215,10 +291,103 @@ class DualEncoder(nn.Module):
                         if m.bias is not None:
                             nn.init.constant_(m.bias, 0)
 
-    def _get_image_features(self, images):
-        """Extract image features and standardize embeddings to float32."""
-        image_embeds = self.clip.get_image_features(pixel_values=images)
-        return image_embeds.float()
+    def _get_image_features(self, images, seg_ids=None):
+        """
+        Extract image features and standardize embeddings to float32.
+
+        `seg_ids` carries either per-patch integer IDs (LongTensor [B, 576],
+        seg_mode in {spatial, semantic}) or per-patch continuous features
+        (FloatTensor [B, 576, F], seg_mode='continuous').
+
+        Behavior matrix:
+            seg_mode | seg_ids | path
+            ---------+---------+--------------------------------------
+            None     | None    | standard CLIP (B0/B0+/B1/B2/B4/etc)
+            None     | tensor  | ValueError (gating mismatch)
+            set      | None    | standard CLIP (no seg injection)
+            set      | tensor  | explicit forward with seg injection
+
+        The (set, None) cell is intentional: the augmented intra-modal views use
+        RandomResizedCrop(scale=(aug_crop_scale_min, 1.0)) which destroys spatial
+        alignment with the precomputed segment map. The clean inter-modal view
+        uses seg_ids; the augmented views drop them.
+        """
+        if seg_ids is None:
+            image_embeds = self.clip.get_image_features(pixel_values=images)
+            return image_embeds.float()
+
+        if self.seg_mode is None:
+            raise ValueError(
+                "seg_ids was provided but model.seg_mode is not set. "
+                "Either configure a B5 variant (spatial/semantic/continuous) or stop passing seg_ids."
+            )
+
+        B = images.size(0)
+        # Shape + dtype validation, branching on mode.
+        if self.seg_mode in ("spatial", "semantic"):
+            if seg_ids.dtype != torch.long:
+                raise TypeError(
+                    f"seg_ids must be torch.long for seg_mode={self.seg_mode}, got {seg_ids.dtype}."
+                )
+            if seg_ids.dim() != 2 or seg_ids.size(0) != B \
+                    or seg_ids.size(1) != self._seg_num_patches:
+                raise ValueError(
+                    f"seg_ids has shape {tuple(seg_ids.shape)}, expected "
+                    f"({B}, {self._seg_num_patches})."
+                )
+            smin, smax = int(seg_ids.min().item()), int(seg_ids.max().item())
+            if smin < 0 or smax >= self.seg_vocab_size:
+                raise ValueError(
+                    f"seg_ids out of range [0, {self.seg_vocab_size}): min={smin}, max={smax}"
+                )
+        else:  # continuous
+            if not seg_ids.is_floating_point():
+                raise TypeError(
+                    f"seg_ids must be a float tensor for seg_mode=continuous, got {seg_ids.dtype}."
+                )
+            if seg_ids.dim() != 3 or seg_ids.size(0) != B \
+                    or seg_ids.size(1) != self._seg_num_patches \
+                    or seg_ids.size(2) != self.seg_feature_dim:
+                raise ValueError(
+                    f"seg_ids has shape {tuple(seg_ids.shape)}, expected "
+                    f"({B}, {self._seg_num_patches}, {self.seg_feature_dim})."
+                )
+
+        vm = self.clip.vision_model
+        # Stage 1: patch + position embeddings.
+        hidden_states = vm.embeddings(images)  # [B, 1+576, 1024]
+
+        # Stage 2: compute per-patch segment contribution for the 576 patch tokens.
+        if self.seg_mode in ("spatial", "semantic"):
+            seg_patches = self.seg_embedding(seg_ids)                          # [B, 576, 1024]
+        else:
+            seg_patches = self.seg_projection(seg_ids.to(hidden_states.dtype))  # [B, 576, 1024]
+
+        # Stage 3: prepend a zero vector for the CLS token so CLS receives no
+        # segment signal (spec: "CLS should NOT get a segment embedding"), then
+        # add to patch+pos embeddings.
+        cls_zeros = torch.zeros(
+            B, 1, seg_patches.size(-1),
+            device=seg_patches.device, dtype=seg_patches.dtype,
+        )
+        full_seg = torch.cat([cls_zeros, seg_patches], dim=1)  # [B, 577, 1024]
+        if full_seg.size(1) != hidden_states.size(1):
+            raise RuntimeError(
+                f"Sequence length mismatch: hidden_states={hidden_states.size(1)}, "
+                f"full_seg={full_seg.size(1)}."
+            )
+        hidden_states = hidden_states + full_seg
+
+        # Stage 4: continue through pre_layrnorm -> encoder -> CLS pool ->
+        # post_layernorm -> visual_projection. Mirrors transformers 4.48.0
+        # CLIPVisionTransformer.forward exactly. "pre_layrnorm" typo is upstream.
+        hidden_states = vm.pre_layrnorm(hidden_states)
+        encoder_outputs = vm.encoder(inputs_embeds=hidden_states)
+        last_hidden_state = encoder_outputs[0]
+        pooled_output = last_hidden_state[:, 0, :]                   # [B, 1024]  CLS
+        pooled_output = vm.post_layernorm(pooled_output)             # [B, 1024]
+        image_features = self.clip.visual_projection(pooled_output)  # [B, embed_dim]
+        return image_features.float()
 
     def _get_text_features(self, input_ids, attention_mask):
         """Extract text features and standardize embeddings to float32."""
@@ -228,38 +397,48 @@ class DualEncoder(nn.Module):
         )
         return text_embeds.float()
 
-    def forward(self, images, input_ids, attention_mask):
+    def forward(self, images, input_ids, attention_mask, seg_ids=None):
         """
         Forward pass returning L2-normalized embeddings.
-        
+
         Args:
             images: [Batch, 3, 336, 336] - Pixel values (336px for CLIP ViT-L/14-336)
             input_ids: [Batch, SeqLen] - Tokenized text
             attention_mask: [Batch, SeqLen] - Attention mask
-            
+            seg_ids: [Batch, 576] LongTensor (spatial/semantic) or
+                     [Batch, 576, F] FloatTensor (continuous) — REQUIRED iff
+                     config.model.seg_mode is set, must be None otherwise.
+
         Returns:
             img_embeds: [Batch, embed_dim] - L2 normalized image embeddings
             txt_embeds: [Batch, embed_dim] - L2 normalized text embeddings
         """
-        # Get CLIP embeddings (already projected)
-        # Note: CLIP expects 'pixel_values' for images
-        image_embeds = self._get_image_features(images)
+        image_embeds = self._get_image_features(images, seg_ids=seg_ids)
         text_embeds = self._get_text_features(input_ids, attention_mask)
-        
+
         # Optional: Additional projection to match target embed_dim
         if self.image_proj is not None:
             image_embeds = self.image_proj(image_embeds)
             text_embeds = self.text_proj(text_embeds)
-        
+
         # L2 Normalization (critical for contrastive learning)
         image_embeds = F.normalize(image_embeds, p=2, dim=1)
         text_embeds = F.normalize(text_embeds, p=2, dim=1)
-        
+
         return image_embeds, text_embeds
 
-    def encode_image(self, images):
-        """Encode images only (L2-normalized). For use with separate text encoding (e.g. negatives)."""
-        image_embeds = self._get_image_features(images)
+    def encode_image(self, images, seg_ids=None):
+        """
+        Encode images only (L2-normalized). For use with separate text encoding
+        (e.g. hard negatives, intra-modal augmented views).
+
+        Args:
+            images:  [B, 3, 336, 336]
+            seg_ids: optional per-patch tensor — REQUIRED iff config.model.seg_mode
+                     is set; otherwise must be None. See _get_image_features for
+                     the four-quadrant gating.
+        """
+        image_embeds = self._get_image_features(images, seg_ids=seg_ids)
         if self.image_proj is not None:
             image_embeds = self.image_proj(image_embeds)
         return F.normalize(image_embeds, p=2, dim=1)
@@ -269,6 +448,11 @@ class DualEncoder(nn.Module):
         Single vision forward pass returning both contrastive embeddings and
         classification logits. Avoids running the ViT twice.
 
+        Not compatible with B5 segment-aware mode — the seg-injection path
+        rewrites hidden_states before the encoder, while this method takes the
+        encoder's pooler_output directly. B4 (cls_head) and B5 (seg_mode) are
+        mutually exclusive and the trainer enforces this at init time.
+
         Returns:
             contrastive: [B, embed_dim] L2-normalized image embeddings
             cls_logits:  [B, num_classes] raw logits from cls_head
@@ -277,6 +461,11 @@ class DualEncoder(nn.Module):
             raise RuntimeError(
                 "encode_image_with_cls() called but cls_head is None. "
                 "Set loss.cls_num_classes > 0 in config."
+            )
+        if self.seg_mode is not None:
+            raise NotImplementedError(
+                "encode_image_with_cls() does not support B5 segment-aware mode. "
+                "B4 (cls_head) and B5 (seg_mode) cannot be combined currently."
             )
         vision_out = self.clip.vision_model(pixel_values=images)
         pooled = vision_out.pooler_output.float()          # [B, 1024]
