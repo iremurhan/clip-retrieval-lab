@@ -9,18 +9,18 @@
 # Uses HuggingFace Transformers (AutoModelForCausalLM, bfloat16, device_map="auto").
 #
 # Usage:
-#   sbatch scripts/generate_rewrites.slurm coco
-#   sbatch scripts/generate_rewrites.slurm flickr
-#   sbatch scripts/generate_rewrites.slurm coco meta-llama/Meta-Llama-3-8B-Instruct
+#   sbatch legacy/paraphrase_generation/generate_rewrites.slurm coco
+#   sbatch legacy/paraphrase_generation/generate_rewrites.slurm flickr
+#   sbatch legacy/paraphrase_generation/generate_rewrites.slurm coco meta-llama/Meta-Llama-3-8B-Instruct
 #
 # Smoke test (process only first N captions, e.g. 32):
-#   SMOKE_TEST=32 sbatch scripts/generate_rewrites.slurm coco
+#   SMOKE_TEST=32 sbatch legacy/paraphrase_generation/generate_rewrites.slurm coco
 #
 # Override batch size (default: 16):
-#   BATCH_SIZE=8 sbatch scripts/generate_rewrites.slurm coco
+#   BATCH_SIZE=8 sbatch legacy/paraphrase_generation/generate_rewrites.slurm coco
 #
 # Resume (safe to resubmit — always appends):
-#   sbatch scripts/generate_rewrites.slurm coco
+#   sbatch legacy/paraphrase_generation/generate_rewrites.slurm coco
 #
 # Outputs:
 #   datasets/{dataset}/caption_rewrites_{model_slug}.json
@@ -91,7 +91,7 @@ echo "Starting rewrite generation..."
 # non-zero exit. tee mirrors output to BOTH the slurm out file and generate.log
 # so you can see progress in either place.
 set +e
-python3 -u scripts/generate_rewrites.py \
+python3 -u legacy/paraphrase_generation/generate_rewrites.py \
     --captions_path "$CAPTIONS_PATH" \
     --output_path "$OUTPUT_PATH" \
     --model "$MODEL" \
