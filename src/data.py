@@ -111,33 +111,6 @@ class StochasticPhotometricPool:
         )
 
 
-def build_anchor_transform(image_size, separate_pipelines=False):
-    """
-    Build the anchor transform for training (used for inter-modal loss).
-
-    When separate_pipelines=True (SLIP-style), the anchor uses a very mild
-    crop (0.9, 1.0) with NO photometric augmentation — preserving visual
-    semantics for the image-text contrastive objective.
-
-    When separate_pipelines=False (legacy), same mild crop + flip.
-
-    Args:
-        image_size (int): Target spatial resolution.
-        separate_pipelines (bool): If True, use minimal augmentation for inter-modal.
-
-    Returns:
-        transforms.Compose
-    """
-    return transforms.Compose([
-        # Spatial — Mild crop preserving semantic content for text alignment
-        transforms.RandomResizedCrop(image_size, scale=(0.9, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        # Normalization — no photometric augmentation on the anchor
-        transforms.ToTensor(),
-        transforms.Normalize(mean=CLIP_MEAN, std=CLIP_STD),
-    ])
-
-
 def build_augmented_transform(image_size, k, aug_crop_scale_min=0.4,
                               color_jitter_strength=0.4, use_grayscale=True):
     """
@@ -298,7 +271,6 @@ class CaptionImageDataset(Dataset):
         split='train',
         transform=None,
         transform_aug=None,
-        caption_rewrites_path=None,
     ):
         """
         Args:
@@ -307,11 +279,20 @@ class CaptionImageDataset(Dataset):
             tokenizer: HuggingFace tokenizer.
             max_length (int): Token sequence length (Default: 77).
             split (str): 'train', 'val', or 'test'.
-            transform (callable, optional): Anchor image transform.
-            transform_aug (callable, optional): Augmented view transform (intra-modal).
-            caption_rewrites_path (str, optional): Path to LLM-generated caption
-                rewrites JSON ({sentid: [r1, r2, r3]}). When set, __getitem__
-                uniformly samples from [original, r1, r2, r3] (LaCLIP-style).
+            transform (callable, optional): Inter-modal image transform (clean,
+                eval-style — Resize + CenterCrop + Normalize). The contrastive
+                anchor for image ↔ text alignment.
+            transform_aug (callable, optional): Intra-modal image transform
+                (random augmentation). Applied TWICE per sample to produce two
+                independent augmented views (image_aug_a, image_aug_b) for the
+                intra-modal image-image contrast (B0v3 pair design).
+
+        Note:
+            LaCLIP-style caption rewrites are loaded by the trainer-side
+            PrecomputedLLMParaphraser, NOT by the dataset. The dataset always
+            returns the ORIGINAL caption; paraphrase pairs for the intra-modal
+            text-text loss are produced in the training loop via
+            paraphraser.generate_pair(sentids).
         """
         self.images_root_path = images_root_path
         self.tokenizer = tokenizer
@@ -319,23 +300,6 @@ class CaptionImageDataset(Dataset):
         self.split = split
         self.transform = transform
         self.transform_aug = transform_aug
-
-        # LaCLIP-style caption augmentation: load precomputed LLM rewrites
-        self.caption_rewrites = None
-        if caption_rewrites_path:
-            if not os.path.exists(caption_rewrites_path):
-                raise FileNotFoundError(
-                    f"caption_rewrites_path provided but file not found: "
-                    f"{caption_rewrites_path}. Run scripts/generate_rewrites.py first."
-                )
-            import json as _json
-            with open(caption_rewrites_path, 'r') as f:
-                raw = _json.load(f)
-            self.caption_rewrites = {int(k): v for k, v in raw.items()}
-            logger.info(
-                f"Loaded {len(self.caption_rewrites)} LLM caption rewrites "
-                f"from {caption_rewrites_path}"
-            )
 
         # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
@@ -388,36 +352,13 @@ class CaptionImageDataset(Dataset):
         )
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
 
-        # Validate coverage: every sample sentid must exist in caption_rewrites
-        if self.caption_rewrites is not None:
-            dataset_sids = set(self.samples.sentids.tolist())
-            missing = dataset_sids - self.caption_rewrites.keys()
-            if missing:
-                sample_ids = sorted(missing)[:10]
-                raise RuntimeError(
-                    f"caption_rewrites is incomplete: {len(missing)}/{len(dataset_sids)} "
-                    f"sentids missing (first 10: {sample_ids}). "
-                    f"Re-run: sbatch scripts/generate_rewrites.slurm --resume"
-                )
-
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
         image_id = sample['image_id']
-        caption = sample['caption']
-
-        # LaCLIP-style: uniform random from [original, rewrite1, ..., rewriteN]
-        if self.caption_rewrites is not None:
-            sentid = sample['sentid']
-            if sentid not in self.caption_rewrites:
-                raise KeyError(
-                    f"sentid {sentid} not found in caption_rewrites. "
-                    f"Rewrites file is incomplete — re-run scripts/generate_rewrites.py."
-                )
-            candidates = [caption] + self.caption_rewrites[sentid]
-            caption = random.choice(candidates)
+        caption = sample['caption']  # original — no random.choice mixing (B0v3)
 
         # Load Image
         filepath = sample.get('filepath', '').strip()
@@ -436,11 +377,14 @@ class CaptionImageDataset(Dataset):
 
         image = Image.open(image_path).convert('RGB')
 
-        # Transform Image (original anchor and augmented contrastive view)
+        # Inter-modal image: clean (eval-style transform applied to training image)
         img_tensor = self.transform(image)
-        img_aug_tensor = self.transform_aug(image)
+        # Intra-modal image: TWO independent augmented views (B0v3 pair design)
+        img_aug_a_tensor = self.transform_aug(image)
+        img_aug_b_tensor = self.transform_aug(image)
 
-        # Tokenize Text
+        # Tokenize Text (original caption only — paraphrase pair is handled in
+        # the training loop via paraphraser.generate_pair).
         tokenized = self.tokenizer(
             caption,
             padding='max_length',
@@ -451,7 +395,8 @@ class CaptionImageDataset(Dataset):
 
         return {
             'image': img_tensor,
-            'image_aug': img_aug_tensor,
+            'image_aug_a': img_aug_a_tensor,
+            'image_aug_b': img_aug_b_tensor,
             'caption': caption,
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
@@ -491,9 +436,11 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         aug_crop_scale_min = aug_cfg['aug_crop_scale_min']
         color_jitter_strength = aug_cfg['color_jitter_strength']
         use_grayscale = aug_cfg['use_grayscale']
-        separate_pipelines = aug_cfg['separate_pipelines']
 
-        transform = build_anchor_transform(image_size, separate_pipelines=separate_pipelines)
+        # B0v3 pair design: inter-modal uses eval-style clean transform; the
+        # intra-modal pair (image_aug_a, image_aug_b) is sampled from
+        # transform_aug applied twice in __getitem__.
+        transform = build_eval_transform(image_size)
         transform_aug = build_augmented_transform(
             image_size, k,
             aug_crop_scale_min=aug_crop_scale_min,
@@ -502,32 +449,15 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         )
 
         logger.info(
-            f"Train transforms built: anchor=(crop+flip, separate={separate_pipelines}), "
-            f"augmented=(crop_min={aug_crop_scale_min}, k={k}, "
+            f"Train transforms built (B0v3 pair design): "
+            f"inter-modal=eval-clean, "
+            f"intra-modal=2× augmented(crop_min={aug_crop_scale_min}, k={k}, "
             f"jitter={color_jitter_strength}, grayscale={use_grayscale})"
         )
     else:
         # Validation/Test: deterministic, no augmentation
         transform = build_eval_transform(image_size)
         transform_aug = transform
-
-    # LaCLIP-style caption rewrites: only for train split
-    caption_rewrites_path = None
-    if split == 'train':
-        para_cfg = config['paraphraser']
-        para_type = para_cfg['type']
-        para_paths = para_cfg['paths']
-        if para_type not in para_paths:
-            raise ValueError(
-                f"paraphraser.type='{para_type}' is not defined in paraphraser.paths "
-                f"(available: {sorted(para_paths.keys())})."
-            )
-        caption_rewrites_path = para_paths[para_type]
-        if not caption_rewrites_path:
-            raise ValueError(
-                f"paraphraser.paths['{para_type}'] is empty for this dataset. "
-                f"Define it in the dataset config."
-            )
 
     dataset = CaptionImageDataset(
         images_root_path=images_root,
@@ -537,7 +467,6 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         split=split,
         transform=transform,
         transform_aug=transform_aug,
-        caption_rewrites_path=caption_rewrites_path,
     )
 
     seed = config['training']['seed']
