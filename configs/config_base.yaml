@@ -10,6 +10,17 @@ model:
   embed_dim: null
   unfreeze_vision_layers: 4
   unfreeze_strategy: "full"
+  # B5a/B5b/B5c only: segment-aware patch enrichment. Leave seg_mode=null to
+  # disable the variant entirely (zero overhead for B0/B0+/B1/B2/B4).
+  # seg_mode: "spatial" (B5a) | "semantic" (B5b) | "continuous" (B5c) | null
+  seg_mode: null
+  # Discrete modes (spatial/semantic): size of the embedding table.
+  seg_vocab_size: null
+  # Init std for seg_embedding.weight (matches CLIP positional embedding scale).
+  seg_init_std: 0.02
+  # Continuous mode only: per-segment feature dim and MLP hidden width.
+  seg_feature_dim: 5
+  seg_proj_hidden: 128
 
 loss:
   type: infonce
@@ -38,6 +49,11 @@ training:
 
   clip_projection_lr: 0.00005
   backbone_lr: 0.000002
+  # B5a/B5b/B5c: base LR for seg_embedding / seg_projection groups.
+  # B4:           base LR for cls_head group.
+  # All three groups use a flat (non-cosine) schedule; see _CONSTANT_LR_GROUPS in run.py.
+  seg_lr: 0.001
+  cls_lr: 0.001
   weight_decay: 0.01
 
 data:
@@ -52,7 +68,6 @@ augment:
   aug_crop_scale_min: 0.4       # lower bound of RandomResizedCrop scale for augmented view
   color_jitter_strength: 0.4    # brightness/contrast/saturation magnitude; hue = 0.25x
   use_grayscale: true            # include RandomGrayscale in photometric pool
-  separate_pipelines: false      # SLIP-style: minimal anchor aug for inter-modal, stronger for intra-modal
 
 logging:
   use_wandb: true

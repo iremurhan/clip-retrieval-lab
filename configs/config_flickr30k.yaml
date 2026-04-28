@@ -2,6 +2,11 @@ data:
   dataset: "flickr30k"
   images_path: "datasets/flickr30k/flickr30k_images"
   captions_path: "datasets/flickr30k/caption_datasets/dataset_flickr30k.json"
+  # B5a/B5b/B5c: directory containing precomputed per-mode .pt files.
+  # B5b semantic on Flickr30k uses zero-shot CLIP labels over the 80 COCO
+  # category prompts (top-1 if prob >= 0.3 else background); SAM segments
+  # with bbox <4 px on either side are dropped to background by precompute.
+  seg_map_dir: "datasets/flickr30k/sam_segments"
 
 paraphraser:
   paths:

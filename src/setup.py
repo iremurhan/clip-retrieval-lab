@@ -153,7 +153,6 @@ def make_wandb_config(config):
         "aug_crop_scale_min":    aug.get('aug_crop_scale_min'),
         "color_jitter_strength": aug.get('color_jitter_strength'),
         "use_grayscale":         aug.get('use_grayscale'),
-        "separate_pipelines":    aug.get('separate_pipelines'),
         "batch_size":            config.get('training', {}).get('batch_size'),
         "epochs":                config.get('training', {}).get('epochs'),
         "use_grad_cache":        config.get('training', {}).get('use_grad_cache', False),
