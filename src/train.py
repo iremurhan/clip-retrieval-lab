@@ -115,9 +115,16 @@ class Trainer:
         else:
             self.hard_neg_generator = None
 
-        # Initialize multi-label classification auxiliary loss
+        # Initialize multi-label classification auxiliary loss (B4 — COCO only)
         self.cls_weight = config['loss'].get('cls_weight', 0.0)
         if self.cls_weight > 0:
+            dataset_name = config['data']['dataset'].lower()
+            if dataset_name != 'coco':
+                raise ValueError(
+                    f"loss.cls_weight={self.cls_weight} (B4 multi-label aux loss) "
+                    f"requires data.dataset=coco, got dataset={dataset_name!r}. "
+                    "B4 uses COCO category labels only."
+                )
             cls_label_path = config['loss'].get('cls_label_path')
             if not cls_label_path or not os.path.isfile(cls_label_path):
                 raise FileNotFoundError(
