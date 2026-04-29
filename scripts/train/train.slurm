@@ -39,7 +39,7 @@
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=64G
 #SBATCH --container-image=biremurhan/image-text-contrast:v0.16
-#SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
+#SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/flickr30k:/workspace/datasets/flickr30k,/users/beyza.urhan/experiments/datasets/sugarcrepe:/workspace/datasets/sugarcrepe,/users/beyza.urhan/experiments/results:/output/results,/users/beyza.urhan/experiments/env:/env
 #SBATCH --output=/users/beyza.urhan/experiments/results/slurm_%j.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/slurm_%j.out
 #SBATCH --container-env=WANDB_API_KEY,WANDB_MODE,PYTHONPATH=/workspace
@@ -68,7 +68,7 @@ if [ ! -f "/workspace/$CONFIG_FILE" ]; then
 fi
 
 # --- Detect dataset ---
-source "$(dirname "$0")/../util/detect_dataset.sh"
+source /workspace/scripts/util/detect_dataset.sh
 DATASET=$(detect_dataset "$CONFIG_FILE") || exit 1
 
 WANDB_PROJECT_AUTO="clip-retrieval"
@@ -145,7 +145,7 @@ echo "Results saved to: $JOB_DIR"
 echo "=========================================="
 
 # --- WandB sync + verify + cleanup ---
-source "$(dirname "$0")/../util/wandb_cleanup.sh"
+source /workspace/scripts/util/wandb_cleanup.sh
 wandb_sync_and_cleanup "$JOB_DIR" "$WANDB_PROJECT_AUTO" "$TRAIN_EXIT_CODE"
 
 # --- Move SLURM log into per-job directory ---

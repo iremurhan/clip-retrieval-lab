@@ -6,8 +6,11 @@
 # and ablation_train.slurm.
 #
 # Usage (source, then call):
-#   source "$(dirname "$0")/../util/wandb_cleanup.sh"
+#   source /workspace/scripts/util/wandb_cleanup.sh   # SLURM (in-container)
+#   source "$(dirname "${BASH_SOURCE[0]}")/../util/wandb_cleanup.sh"  # local bash
 #   wandb_sync_and_cleanup "$JOB_DIR" "$WANDB_PROJECT" "$TRAIN_EXIT_CODE"
+# Note: in SLURM, $0 points to a copied script under /var/spool/slurm — use the
+# absolute /workspace path (or BASH_SOURCE) instead.
 # =============================================================================
 
 wandb_sync_and_cleanup() {

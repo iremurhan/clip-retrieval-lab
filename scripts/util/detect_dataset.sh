@@ -6,8 +6,11 @@
 # resume.slurm, start_training.sh).
 #
 # Usage (source, then call):
-#   source "$(dirname "$0")/../util/detect_dataset.sh"
+#   source /workspace/scripts/util/detect_dataset.sh   # SLURM (in-container)
+#   source "$(dirname "${BASH_SOURCE[0]}")/../util/detect_dataset.sh"  # local bash
 #   DATASET=$(detect_dataset "$CONFIG_FILE") || exit 1
+# Note: in SLURM, $0 points to a copied script under /var/spool/slurm — use the
+# absolute /workspace path (or BASH_SOURCE) instead.
 # =============================================================================
 
 detect_dataset() {

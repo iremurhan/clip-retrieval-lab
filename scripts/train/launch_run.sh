@@ -108,11 +108,13 @@ for DATASET in $DATASETS; do
 
         # Submit training job
         # train.slurm positional args: <RUN_ID> <CONFIG_PATH> [extra args forwarded to run.py]
+        # Pass the registry key ($RUN_ID), not the expanded $RUN_NAME — the latter
+        # is only a SLURM --job-name label and won't match a registry entry.
         TRAIN_JOB_ID=$(sbatch \
             --parsable \
             --job-name="${RUN_NAME}" \
             "$TRAIN_SLURM" \
-            "$RUN_NAME" \
+            "$RUN_ID" \
             "$CONFIG" \
             --seed "${SEED}" \
         )
