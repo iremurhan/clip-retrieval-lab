@@ -535,6 +535,34 @@ class CaptionImageDataset(Dataset):
         )
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
 
+        # Fail-fast integrity check: verify every referenced image exists
+        # before the DataLoader is built. Mirrors the path resolution in
+        # __getitem__ but runs once on unique (filepath, filename) pairs.
+        unique_pairs = set(zip(filepaths, filenames))
+        missing = []
+        for fp, fn in unique_pairs:
+            fp_clean = fp.strip() if fp else ''
+            if fp_clean:
+                p1 = os.path.join(self.images_root_path, fp_clean, fn)
+                if os.path.exists(p1):
+                    continue
+                p2 = os.path.join(self.images_root_path, fn)
+                if os.path.exists(p2):
+                    continue
+                missing.append(p1)
+            else:
+                p = os.path.join(self.images_root_path, fn)
+                if not os.path.exists(p):
+                    missing.append(p)
+        if missing:
+            preview = '\n  '.join(missing[:20])
+            more = f"\n  ... and {len(missing) - 20} more" if len(missing) > 20 else ''
+            raise FileNotFoundError(
+                f"Dataset integrity check failed for split '{split}': "
+                f"{len(missing)} of {len(unique_pairs)} referenced images are missing "
+                f"under {self.images_root_path}.\n  {preview}{more}"
+            )
+
     def __len__(self):
         return len(self.samples)
 

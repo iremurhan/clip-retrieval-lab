@@ -61,7 +61,7 @@ if [ ! -f "$RESUME_PATH" ]; then
 fi
 
 # --- Detect dataset ---
-source "$(dirname "$0")/../util/detect_dataset.sh"
+source /workspace/scripts/util/detect_dataset.sh
 DATASET=$(detect_dataset "$CONFIG_FILE") || exit 1
 
 WANDB_PROJECT_AUTO="clip-retrieval"
@@ -128,7 +128,7 @@ echo "Results saved to: $JOB_DIR"
 echo "=========================================="
 
 # --- WandB sync + verify + cleanup ---
-source "$(dirname "$0")/../util/wandb_cleanup.sh"
+source /workspace/scripts/util/wandb_cleanup.sh
 wandb_sync_and_cleanup "$JOB_DIR" "$WANDB_PROJECT_AUTO" "$TRAIN_EXIT_CODE"
 
 # --- Move SLURM log into per-job directory ---

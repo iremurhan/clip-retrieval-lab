@@ -168,12 +168,24 @@ class Trainer:
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         # SugarCrepe data-dir check at init (fail-fast on misconfig)
-        _sc_data_dir = "datasets/sugarcrepe"
-        if not os.path.isdir(_sc_data_dir):
+        # Check both project-local and shared experiments paths
+        _sc_data_dirs = [
+            "datasets/sugarcrepe",  # Local project path
+            "/users/beyza.urhan/experiments/datasets/sugarcrepe",  # Shared experiments path
+        ]
+        self.sugarcrepe_data_dir = None
+        for path in _sc_data_dirs:
+            if os.path.isdir(path):
+                self.sugarcrepe_data_dir = path
+                break
+        
+        if self.sugarcrepe_data_dir is None:
             logger.warning(
-                f"SugarCrepe data_dir does not exist: '{_sc_data_dir}'. "
+                f"SugarCrepe data_dir not found in any of: {_sc_data_dirs}. "
                 "End-of-training SugarCrepe eval will be skipped."
             )
+        else:
+            logger.info(f"SugarCrepe data_dir found at: {self.sugarcrepe_data_dir}")
         
         # Initialize WandB run reference and define summary metrics
         self.wandb_run = None
@@ -1126,11 +1138,8 @@ class Trainer:
         Non-critical: errors are logged and a WandB alert is sent, but never raised.
         Results logged to WandB summary under 'sugarcrepe/<subcat>'.
         """
-        data_dir = "datasets/sugarcrepe"
-        if not os.path.isdir(data_dir):
-            logger.info(
-                f"SugarCrepe data_dir not found ({data_dir}), skipping."
-            )
+        if self.sugarcrepe_data_dir is None:
+            logger.info("SugarCrepe data_dir not configured, skipping evaluation.")
             return
 
         logger.info("Running SugarCrepe compositional evaluation...")
@@ -1152,7 +1161,7 @@ class Trainer:
                 tokenizer=self.tokenizer,
                 transform=transform,
                 device=self.device,
-                data_dir=data_dir,
+                data_dir=self.sugarcrepe_data_dir,
                 images_dir=images_dir,
                 max_length=max_length,
                 splits=("replace", "swap", "add"),
