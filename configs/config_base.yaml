@@ -61,6 +61,13 @@ data:
   num_workers: 4
   image_size: 336
 
+debug:
+  # Truncates BOTH train and val splits to debug_samples after dataset load,
+  # so smoke tests exercise eval / post-training test metrics at small scale.
+  # See create_image_text_dataloader in src/data.py.
+  debug_mode: false
+  debug_samples: 100
+
 augment:
   # Number of photometric transforms sampled from the pool per image.
   # Pool size depends on use_grayscale: 3 with grayscale, 2 without. k <= pool_size.
