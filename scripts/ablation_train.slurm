@@ -84,10 +84,24 @@ else
     export WANDB_MODE=offline
 fi
 
-echo "Starting training..."
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# spaCy bootstrap for B2 (POS-tag hard-neg generator). Idempotent — installs
+# only if `import spacy` or `spacy.load('en_core_web_sm')` fails.
+# TODO: bake `spacy + en_core_web_sm` into the next biremurhan/image-text-contrast
+# image tag and drop this block.
+if ! python3 -c "import spacy" 2>/dev/null; then
+    echo "[bootstrap] Installing spacy..."
+    pip install --quiet spacy
+fi
+if ! python3 -c "import spacy; spacy.load('en_core_web_sm')" 2>/dev/null; then
+    echo "[bootstrap] Downloading spacy model en_core_web_sm..."
+    python3 -m spacy download en_core_web_sm --quiet
+fi
+
+echo "Starting training..."
 
 set +e
 python3 -u run.py \
