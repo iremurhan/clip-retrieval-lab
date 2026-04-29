@@ -67,7 +67,7 @@ Resume: `--resume /path/to/checkpoint.pth`
 **HPC (Slurm)**
 
 ```bash
-./scripts/start_training.sh <run_name> [config_path]
+./scripts/train/start_training.sh <run_name> [config_path]
 ```
 
 Logs & checkpoints: `~/experiments/results/{coco|flickr30k}/{job_id}/`

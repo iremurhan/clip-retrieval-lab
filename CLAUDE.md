@@ -46,7 +46,7 @@ python run.py --config configs/config_flickr30k.yaml --resume checkpoints/best_m
 
 **Training (HPC/SLURM)**
 ```bash
-./scripts/start_training.sh <run_name> [config_path]
+./scripts/train/start_training.sh <run_name> [config_path]
 ```
 
 **Debug mode (fast iteration, uses train set for val)**
@@ -95,12 +95,31 @@ configs/
   config_base.yaml      All defaults.
   config_{coco,flickr30k}.yaml   Dataset-specific paths (images, captions, paraphraser rewrites,
                                   seg_map_dir, cls_label_path).
-  registry.yaml         Named ablation entries with parent: inheritance.
+  registry.yaml         Named ablation entries with parent: inheritance and research hypotheses.
 scripts/
-  *.slurm               SLURM job scripts.
-  start_training.sh     HPC training wrapper.
-  precompute_sam.py     Two-stage SAM precompute pipeline (B5 prep).
-  eval_sugarcrepe.py    SugarCrepe CLI (loads checkpoint, calls into src/eval/sugarcrepe.py).
+  train/                Training and experiment launching.
+    train.slurm         Unified SLURM training job (merged train + ablation).
+    resume.slurm        Resume from existing checkpoint + WandB run.
+    launch_run.sh       Batch SLURM submission (multi-dataset, multi-seed).
+    launch_ablation.sh  Single ablation job submission.
+    start_training.sh   Simple HPC training wrapper.
+  eval/                 Evaluation scripts.
+    eval_sugarcrepe.py  SugarCrepe CLI (loads checkpoint, calls src/eval/sugarcrepe.py).
+    eval_sugarcrepe.slurm  SLURM wrapper for SugarCrepe eval.
+    eval_zero_shot.slurm   Zero-shot CLIP retrieval eval (rgb / mask modes).
+    extract_failures.py    Worst-failure extraction + HTML report.
+    extract_failures.slurm SLURM wrapper for failure analysis.
+  preprocess/           Data preprocessing pipelines.
+    precompute_sam.py   Two-stage SAM segment precompute (B5 prep).
+    precompute_sam.slurm       SAM stage 1 SLURM array job.
+    precompute_sam_stage2.slurm  SAM stage 2 per-mode post-processing.
+  setup/                Environment, Docker, and dataset setup.
+    Dockerfile, build.sh, download_coco.sh, download_flickr.sh,
+    build_multilabel.slurm
+  util/                 Shared helpers and maintenance scripts.
+    detect_dataset.sh   Dataset name extraction from config YAML.
+    wandb_cleanup.sh    WandB sync + server-side verify + cleanup.
+    wandb_sync.slurm    Manual WandB sync for crashed/offline runs.
 legacy/                 Archived (paraphrase generation slurm, etc.) — not on the active training path.
 ```
 
@@ -112,7 +131,7 @@ legacy/                 Archived (paraphrase generation slurm, etc.) — not on 
 
 **B2 hard negatives (`src/data.py::HardNegativeGenerator`):** spaCy POS-tag word-swap against a per-batch noun/verb/adjective pool, with a word-order shuffle fallback. Loss extends i2t similarity to N×2N (NegCLIP-asymmetric: t2i stays N×N because there are no negative images by construction).
 
-**B5 segment-aware patches (`src/model.py`, `src/data.py::SegmentFeatureLoader`, `scripts/precompute_sam.py`):** Three modes — `spatial` (28-bin discrete), `semantic` (81-class discrete; COCO categories), `continuous` (5-d MLP-projected). Per-patch tensors are precomputed offline (two-stage SAM pipeline) and packed COW-safe in shared memory. Forward path injects the segment embedding into `vm.embeddings(...)` output before the encoder; CLS gets a zero vector. Augmented views skip seg injection (RandomResizedCrop breaks alignment).
+**B5 segment-aware patches (`src/model.py`, `src/data.py::SegmentFeatureLoader`, `scripts/preprocess/precompute_sam.py`):** Three modes — `spatial` (28-bin discrete), `semantic` (81-class discrete; COCO categories), `continuous` (5-d MLP-projected). Per-patch tensors are precomputed offline (two-stage SAM pipeline) and packed COW-safe in shared memory. Forward path injects the segment embedding into `vm.embeddings(...)` output before the encoder; CLS gets a zero vector. Augmented views skip seg injection (RandomResizedCrop breaks alignment).
 
 **B4 multi-label aux loss (`src/model.py::cls_head`, `src/train.py`):** Linear head on `pooler_output`, BCE-with-logits against precomputed COCO category targets. Strict COCO-only (`data.dataset == 'coco'` enforced at Trainer init). Mutually exclusive with B5.
 

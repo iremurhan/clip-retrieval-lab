@@ -8,7 +8,7 @@ DualEncoder (no checkpoint I/O) and returns a dict of per-subcategory
 accuracies plus a macro_avg.
 
 Used by:
-  - scripts/eval_sugarcrepe.py (standalone CLI; loads a checkpoint then calls in)
+  - scripts/eval/eval_sugarcrepe.py (standalone CLI; loads a checkpoint then calls in)
   - src/train.py::Trainer.evaluate (in-pipeline hook; future, Task 2)
 """
 
