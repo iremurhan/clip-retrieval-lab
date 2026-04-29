@@ -72,9 +72,9 @@ augment:
   # Number of photometric transforms sampled from the pool per image.
   # Pool size depends on use_grayscale: 3 with grayscale, 2 without. k <= pool_size.
   k_photometric_augs: 2
-  aug_crop_scale_min: 0.4       # lower bound of RandomResizedCrop scale for augmented view
-  color_jitter_strength: 0.4    # brightness/contrast/saturation magnitude; hue = 0.25x
-  use_grayscale: true            # include RandomGrayscale in photometric pool
+  aug_crop_scale_min: 0.7       # lower bound of RandomResizedCrop scale for augmented view
+  color_jitter_strength: 0.2    # brightness/contrast/saturation magnitude; hue = 0.25x
+  use_grayscale: false           # include RandomGrayscale in photometric pool
 
 logging:
   use_wandb: true
@@ -84,3 +84,11 @@ logging:
   eval_epoch_zero: false
   save_freq: 3
   checkpoint_dir: "checkpoints"
+  # Provenance tags forwarded to WandB as both flat lineage.* config keys and
+  # tags on the run (one tag per lineage entry: "lineage.<key>:<value>").
+  # Bump the value here whenever a default that affects past comparisons
+  # changes, so old vs new runs can be filtered apart in the UI.
+  lineage:
+    # v2 = post-B0v3 magnitude promotion (crop_scale_min=0.7, jitter=0.2,
+    # use_grayscale=false). v1 = pre-promotion (0.4, 0.4, true).
+    aug_magnitudes: v2

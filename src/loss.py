@@ -109,7 +109,9 @@ class SigLIPLoss(nn.Module):
                 txt_aug_a_embeds=None, txt_aug_b_embeds=None,
                 neg_txt_embeds=None):
         """
-        Compute SigLIP loss with optional B0v3 pair-based intra-modal terms.
+        Compute SigLIP loss with optional intra-modal terms (image-image and
+        text-text), each computed between two independent augmented or
+        paraphrased views of the same sample.
 
         Args:
             img_embeds: [N, D] L2-normalized image embeddings (inter-modal anchor — clean view).
@@ -267,8 +269,10 @@ class SymmetricInfoNCELoss(nn.Module):
                 txt_aug_a_embeds=None, txt_aug_b_embeds=None,
                 neg_txt_embeds=None):
         """
-        Compute the complete InfoNCE retrieval loss with optional B0v3 pair-based
-        intra-modal regularization and optional NegCLIP-style hard negatives.
+        Compute the complete InfoNCE retrieval loss with optional intra-modal
+        regularization (image-image and text-text, each between two independent
+        augmented or paraphrased views of the same sample) and optional
+        NegCLIP-style hard negatives.
 
         Args:
             img_embeds: [N, D] L2-normalized image embeddings (inter-modal anchor — clean view).

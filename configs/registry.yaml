@@ -47,18 +47,6 @@ runs:
       branch from this configuration.
     overrides: {}  # current config_base.yaml defaults
 
-  B0v3:
-    description: >-
-      B0+ with tuned augmentation magnitudes and leak-free pair-based
-      intra-modal contrast. Tests whether milder augmentation (crop scale
-      0.7 vs 0.4, jitter 0.2 vs 0.4, no grayscale) and clean inter-modal
-      / augmented-only intra-modal separation improve over B0+ defaults.
-    parent: B0plus
-    overrides:
-      augment.aug_crop_scale_min: 0.7
-      augment.color_jitter_strength: 0.2
-      augment.use_grayscale: false
-
   B1:
     description: >-
       Loss function ablation: SigLIP vs InfoNCE. Tests whether the

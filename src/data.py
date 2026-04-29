@@ -370,7 +370,13 @@ class SegmentFeatureLoader:
                     f"Continuous features for {stem!r} have shape {tuple(feat.shape)}, "
                     f"expected ({self.num_patches}, {self.seg_feature_dim})."
                 )
-            return feat.float()
+            feat = feat.float()
+            if not torch.isfinite(feat).all():
+                raise ValueError(
+                    f"Continuous features for {stem!r} contain NaN/Inf "
+                    f"(seg_mode={self.seg_mode}, dir={self.seg_map_dir})."
+                )
+            return feat
 
         if feat.dim() != 1 or feat.numel() != self.num_patches:
             raise ValueError(
@@ -428,6 +434,7 @@ class CaptionImageDataset(Dataset):
         transform=None,
         transform_aug=None,
         seg_loader=None,
+        emit_aug_views=False,
     ):
         """
         Args:
@@ -442,19 +449,26 @@ class CaptionImageDataset(Dataset):
             transform_aug (callable, optional): Intra-modal image transform
                 (random augmentation). Applied TWICE per sample to produce two
                 independent augmented views (image_aug_a, image_aug_b) for the
-                intra-modal image-image contrast (B0v3 pair design).
+                intra-modal image-image contrast. Required iff
+                emit_aug_views=True.
             seg_loader (SegmentFeatureLoader, optional): If set, __getitem__
                 also returns 'seg_ids' for the inter-modal image only
                 (B5a/B5b/B5c). Augmented views drop seg_ids since
                 RandomResizedCrop breaks spatial alignment with the
                 precomputed map.
+            emit_aug_views (bool): If True, __getitem__ returns image_aug_a /
+                image_aug_b keys (two independent rolls of transform_aug).
+                If False (B0 minimal baseline, val, test), the augmented
+                transform is never invoked and the keys are not emitted —
+                feature-off / no work invariant.
 
         Note:
             LaCLIP-style caption rewrites are loaded by the trainer-side
             PrecomputedLLMParaphraser, NOT by the dataset. The dataset always
             returns the ORIGINAL caption; paraphrase pairs for the intra-modal
-            text-text loss are produced in the training loop via
-            paraphraser.generate_pair(sentids).
+            text-text loss are sampled (without replacement) from the
+            precomputed JSON in the training loop via
+            paraphraser.sample_pair(sentids).
         """
         self.images_root_path = images_root_path
         self.tokenizer = tokenizer
@@ -463,6 +477,12 @@ class CaptionImageDataset(Dataset):
         self.transform = transform
         self.transform_aug = transform_aug
         self.seg_loader = seg_loader
+        self.emit_aug_views = bool(emit_aug_views)
+        if self.emit_aug_views and transform_aug is None:
+            raise ValueError(
+                "emit_aug_views=True but transform_aug is None. "
+                "Provide a transform_aug or set emit_aug_views=False."
+            )
 
         # Load Captions (Karpathy JSON)
         logger.info(f"Loading captions from {captions_path} for split: {split}")
@@ -521,7 +541,7 @@ class CaptionImageDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         image_id = sample['image_id']
-        caption = sample['caption']  # original — no random.choice mixing (B0v3)
+        caption = sample['caption']  # original — no random.choice mixing
 
         # Load Image
         filepath = sample.get('filepath', '').strip()
@@ -542,12 +562,10 @@ class CaptionImageDataset(Dataset):
 
         # Inter-modal image: clean (eval-style transform applied to training image)
         img_tensor = self.transform(image)
-        # Intra-modal image: TWO independent augmented views (B0v3 pair design)
-        img_aug_a_tensor = self.transform_aug(image)
-        img_aug_b_tensor = self.transform_aug(image)
 
-        # Tokenize Text (original caption only — paraphrase pair is handled in
-        # the training loop via paraphraser.generate_pair).
+        # Tokenize Text (original caption only — paraphrase pair is sampled
+        # from the precomputed JSON in the training loop via
+        # paraphraser.sample_pair).
         tokenized = self.tokenizer(
             caption,
             padding='max_length',
@@ -558,14 +576,19 @@ class CaptionImageDataset(Dataset):
 
         out = {
             'image': img_tensor,
-            'image_aug_a': img_aug_a_tensor,
-            'image_aug_b': img_aug_b_tensor,
             'caption': caption,
             'input_ids': tokenized['input_ids'].squeeze(0),
             'attention_mask': tokenized['attention_mask'].squeeze(0),
             'image_id': image_id,
             'sentid': sample['sentid'],
         }
+        # Intra-modal image: TWO independent augmented views (the original image
+        # is fed only into the inter-modal contrast above, never into intra-modal).
+        # Gated: if emit_aug_views=False (e.g. B0 baseline with intra_img_weight=0,
+        # or val/test), transform_aug is not invoked and keys are not emitted.
+        if self.emit_aug_views:
+            out['image_aug_a'] = self.transform_aug(image)
+            out['image_aug_b'] = self.transform_aug(image)
         # B5a/B5b/B5c: per-patch seg_ids for the inter-modal image only.
         # Augmented views skip this — RandomResizedCrop breaks alignment.
         if self.seg_loader is not None:
@@ -600,35 +623,47 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     # Resolve image size from data config (defined in config_base.yaml)
     image_size = config['data']['image_size']
 
+    # Aug-view emission is gated on the intra-modal image-image loss weight:
+    # feature-off (intra_img_weight=0) ⇒ no transform_aug build, no rolls in
+    # __getitem__, no batch keys. Val/test never need augmented views.
+    intra_img_weight = config['loss']['intra_img_weight']
+    emit_aug_views = (split == 'train') and (intra_img_weight > 0)
+
     if split == 'train':
-        # STRICT CONFIG: k_photometric_augs MUST exist. No fallback.
-        aug_cfg = config['augment']
-        k = aug_cfg['k_photometric_augs']
-        aug_crop_scale_min = aug_cfg['aug_crop_scale_min']
-        color_jitter_strength = aug_cfg['color_jitter_strength']
-        use_grayscale = aug_cfg['use_grayscale']
-
-        # B0v3 pair design: inter-modal uses eval-style clean transform; the
-        # intra-modal pair (image_aug_a, image_aug_b) is sampled from
-        # transform_aug applied twice in __getitem__.
         transform = build_eval_transform(image_size)
-        transform_aug = build_augmented_transform(
-            image_size, k,
-            aug_crop_scale_min=aug_crop_scale_min,
-            color_jitter_strength=color_jitter_strength,
-            use_grayscale=use_grayscale,
-        )
+        if emit_aug_views:
+            # STRICT CONFIG: aug fields MUST exist when intra-modal img loss is on.
+            aug_cfg = config['augment']
+            k = aug_cfg['k_photometric_augs']
+            aug_crop_scale_min = aug_cfg['aug_crop_scale_min']
+            color_jitter_strength = aug_cfg['color_jitter_strength']
+            use_grayscale = aug_cfg['use_grayscale']
 
-        logger.info(
-            f"Train transforms built (B0v3 pair design): "
-            f"inter-modal=eval-clean, "
-            f"intra-modal=2× augmented(crop_min={aug_crop_scale_min}, k={k}, "
-            f"jitter={color_jitter_strength}, grayscale={use_grayscale})"
-        )
+            # Inter-modal uses the eval-style clean transform; the intra-modal
+            # pair (image_aug_a, image_aug_b) is produced by applying
+            # transform_aug twice (independent rolls) in __getitem__.
+            transform_aug = build_augmented_transform(
+                image_size, k,
+                aug_crop_scale_min=aug_crop_scale_min,
+                color_jitter_strength=color_jitter_strength,
+                use_grayscale=use_grayscale,
+            )
+            logger.info(
+                f"Train transforms built: "
+                f"inter-modal=eval-clean, "
+                f"intra-modal=2× augmented(crop_min={aug_crop_scale_min}, k={k}, "
+                f"jitter={color_jitter_strength}, grayscale={use_grayscale})"
+            )
+        else:
+            transform_aug = None
+            logger.info(
+                "Train transforms built: inter-modal=eval-clean, intra-modal=disabled "
+                "(intra_img_weight=0)."
+            )
     else:
         # Validation/Test: deterministic, no augmentation
         transform = build_eval_transform(image_size)
-        transform_aug = transform
+        transform_aug = None
 
     # B5a/B5b/B5c gating: build SegmentFeatureLoader only when model.seg_mode
     # is set. Every other variant pays zero overhead (no I/O, no batch keys).
@@ -673,6 +708,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform=transform,
         transform_aug=transform_aug,
         seg_loader=seg_loader,
+        emit_aug_views=emit_aug_views,
     )
 
     # Debug truncation: rebuild the columnar store with sliced numpy buffers.

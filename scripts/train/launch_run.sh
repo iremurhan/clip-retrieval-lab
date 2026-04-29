@@ -6,7 +6,6 @@
 # scripts/train/train.slurm, which forwards --run and --seed to run.py.
 # Registry overrides from configs/registry.yaml are applied automatically by
 # run.py via --run.
-# For COCO jobs, a WiSE-FT evaluation job is chained via --dependency=afterok.
 #
 # Arguments:
 #   --run      RUN_ID     Registry entry to use (required). Must exist in
@@ -66,17 +65,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # Validate that required SLURM scripts exist
 # --------------------------------------------------------------------------
 TRAIN_SLURM="${SCRIPT_DIR}/train.slurm"
-WISE_FT_SLURM="${SCRIPT_DIR}/wise_ft_job.slurm"
 
 if [ ! -f "$TRAIN_SLURM" ]; then
     echo "ERROR: ${TRAIN_SLURM} not found."
     exit 1
-fi
-WISE_FT_AVAILABLE=false
-if [ -f "$WISE_FT_SLURM" ]; then
-    WISE_FT_AVAILABLE=true
-else
-    echo "WARNING: ${WISE_FT_SLURM} not found — WiSE-FT jobs will be skipped."
 fi
 
 # --------------------------------------------------------------------------
@@ -88,8 +80,8 @@ echo "  Run ID   : ${RUN_ID}"
 echo "  Datasets : ${DATASETS}"
 echo "  Seeds    : ${SEEDS}"
 echo "========================================================"
-printf "  %-20s  %-10s  %-6s  %-14s  %-14s\n" "RUN_NAME" "DATASET" "SEED" "TRAIN_JOB_ID" "WISE_JOB_ID"
-printf "  %-20s  %-10s  %-6s  %-14s  %-14s\n" "--------------------" "----------" "------" "--------------" "--------------"
+printf "  %-20s  %-10s  %-6s  %-14s\n" "RUN_NAME" "DATASET" "SEED" "TRAIN_JOB_ID"
+printf "  %-20s  %-10s  %-6s  %-14s\n" "--------------------" "----------" "------" "--------------"
 
 # --------------------------------------------------------------------------
 # Submit jobs
@@ -125,22 +117,8 @@ for DATASET in $DATASETS; do
             --seed "${SEED}" \
         )
 
-        CKPT_DIR="/output/results/${DATASET}/${TRAIN_JOB_ID}"
-
-        WISE_JOB_ID="-"
-        if [ "$WISE_FT_AVAILABLE" = true ]; then
-            WISE_JOB_ID=$(sbatch \
-                --parsable \
-                --job-name="${RUN_NAME}_wise" \
-                --dependency="afterok:${TRAIN_JOB_ID}" \
-                "$WISE_FT_SLURM" \
-                --checkpoint "$CKPT_DIR" \
-                --config     "$CONFIG" \
-            )
-        fi
-
-        printf "  %-20s  %-10s  %-6s  %-14s  %-14s\n" \
-            "$RUN_NAME" "$DATASET" "$SEED" "$TRAIN_JOB_ID" "$WISE_JOB_ID"
+        printf "  %-20s  %-10s  %-6s  %-14s\n" \
+            "$RUN_NAME" "$DATASET" "$SEED" "$TRAIN_JOB_ID"
     done
 done
 
