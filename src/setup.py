@@ -145,7 +145,6 @@ def make_wandb_config(config):
         "model":                 config.get('model', {}).get('image_model_name'),
         "loss_type":             config.get('loss', {}).get('type', 'infonce'),
         "hard_negatives":        config.get('loss', {}).get('hard_negatives', False),
-        "lora_rank":             config.get('model', {}).get('lora_rank', 0),
         "unfreeze_layers":       config.get('model', {}).get('unfreeze_vision_layers', 0),
         "intra_img_weight":      config.get('loss', {}).get('intra_img_weight', 0),
         "intra_txt_weight":      config.get('loss', {}).get('intra_txt_weight', 0),
