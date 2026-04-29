@@ -166,6 +166,14 @@ class Trainer:
 
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        # SugarCrepe data-dir check at init (fail-fast on misconfig)
+        _sc_data_dir = "datasets/sugarcrepe"
+        if not os.path.isdir(_sc_data_dir):
+            logger.warning(
+                f"SugarCrepe data_dir does not exist: '{_sc_data_dir}'. "
+                "End-of-training SugarCrepe eval will be skipped."
+            )
         
         # Initialize WandB run reference and define summary metrics
         self.wandb_run = None
@@ -992,6 +1000,9 @@ class Trainer:
         logger.info("Training complete. Running final test evaluation...")
         self._evaluate_test()
 
+        # --- SUGARCREPE EVALUATION ---
+        self._evaluate_sugarcrepe()
+
     def _evaluate_test(self):
         """
         Runs evaluation on the test split using the best saved checkpoint.
@@ -1108,3 +1119,62 @@ class Trainer:
         logger.info("Test Results:")
         for k, v in test_metrics.items():
             logger.info(f"  {k}: {v:.4f}")
+
+    def _evaluate_sugarcrepe(self):
+        """
+        Runs SugarCrepe compositional understanding evaluation at end of training.
+        Non-critical: errors are logged and a WandB alert is sent, but never raised.
+        Results logged to WandB summary under 'sugarcrepe/<subcat>'.
+        """
+        data_dir = "datasets/sugarcrepe"
+        if not os.path.isdir(data_dir):
+            logger.info(
+                f"SugarCrepe data_dir not found ({data_dir}), skipping."
+            )
+            return
+
+        logger.info("Running SugarCrepe compositional evaluation...")
+        try:
+            from .eval.sugarcrepe import evaluate_sugarcrepe
+            from .data import build_eval_transform
+
+            images_dir = os.path.join(
+                self.config['data']['images_path'], 'val2014'
+            )
+            max_length = self.config['data']['max_length']
+            transform = build_eval_transform(self.config['data']['image_size'])
+
+            # model is already in eval mode + best weights from _evaluate_test()
+            self.model.eval()
+
+            results = evaluate_sugarcrepe(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                transform=transform,
+                device=self.device,
+                data_dir=data_dir,
+                images_dir=images_dir,
+                max_length=max_length,
+                splits=("replace", "swap", "add"),
+            )
+
+            # Log to WandB as summary metrics (same pattern as _evaluate_test)
+            if self.use_wandb and wandb.run is not None:
+                for key, val in results.items():
+                    wandb.run.summary[f"sugarcrepe/{key}"] = val
+
+            logger.info("SugarCrepe Results:")
+            for key, val in results.items():
+                logger.info(f"  sugarcrepe/{key}: {val:.4f}")
+
+        except Exception as e:
+            logger.error(f"SugarCrepe evaluation failed: {e}", exc_info=True)
+            if self.use_wandb and wandb.run is not None:
+                try:
+                    wandb.alert(
+                        title="SugarCrepe eval failed",
+                        text=str(e),
+                        level=wandb.AlertLevel.WARN,
+                    )
+                except Exception:
+                    pass
