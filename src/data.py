@@ -672,6 +672,26 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         seg_loader=seg_loader,
     )
 
+    # Debug truncation: rebuild the columnar store with sliced numpy buffers.
+    # Applied to BOTH train and val splits so the eval path also runs at small
+    # scale during smoke tests. Removed in PR #64; restored here per the
+    # consolidation plan (debug runs need fast eval to verify Trainer.evaluate
+    # and post-training test metrics paths).
+    if config.get('debug', {}).get('debug_mode', False):
+        debug_limit = int(config['debug'].get('debug_samples', 100))
+        if len(dataset.samples) > debug_limit:
+            s = dataset.samples
+            dataset.samples = _ColumnarSampleStore(
+                image_ids=s.image_ids[:debug_limit],
+                sentids=s.sentids[:debug_limit],
+                captions=s.captions[:debug_limit],
+                filepaths=s.filepaths[:debug_limit],
+                filenames=s.filenames[:debug_limit],
+            )
+            logger.warning(
+                f"DEBUG MODE: truncated {split} dataset to {debug_limit} samples."
+            )
+
     seed = config['training']['seed']
 
     def _worker_init_fn(worker_id):
@@ -689,13 +709,17 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
     else:
         g = None
 
+    # In debug mode, keep the partial last batch so the truncated dataset
+    # produces at least one step per epoch (debug_samples is typically smaller
+    # than batch_size, so drop_last=True would produce zero batches).
+    debug_active = bool(config.get('debug', {}).get('debug_mode', False))
     loader = DataLoader(
         dataset,
         batch_size=config['training']['batch_size'],  # defined in config_base.yaml
         shuffle=shuffle,
         num_workers=config['data']['num_workers'],  # defined in config_base.yaml
         pin_memory=True,
-        drop_last=(split == 'train'),
+        drop_last=(split == 'train' and not debug_active),
         worker_init_fn=_worker_init_fn,
         generator=g,
     )
