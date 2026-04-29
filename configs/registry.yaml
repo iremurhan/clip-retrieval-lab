@@ -124,3 +124,19 @@ runs:
       model.seg_mode: continuous
       model.seg_feature_dim: 5
       model.seg_proj_hidden: 128
+
+  BLIP_TEXT:
+    description: >-
+      Diagnostic encoder ablation: bidirectional text encoder. Replaces CLIP's
+      causal-masked text transformer with BLIP's BERT-base encoder
+      (Salesforce/blip-itm-base-coco, unimodal mode — cross-attention layers
+      skipped) to test whether bidirectional context improves compositional
+      understanding. Image encoder (CLIP ViT-L/14@336) unchanged. BLIP text
+      encoder is fully frozen; only the text_projection head (Linear 768→768)
+      is trainable. max_length raised to 512 (BERT native) to give bidirectional
+      context its best shot. Not part of the B0–B5 ladder.
+    parent: B0plus
+    overrides:
+      model.text_encoder: blip
+      model.text_model_name: "Salesforce/blip-itm-base-coco"
+      data.max_length: 512

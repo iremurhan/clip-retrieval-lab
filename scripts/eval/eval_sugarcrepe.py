@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.data import build_eval_transform
 from src.eval.sugarcrepe import evaluate_sugarcrepe
 from src.model import DualEncoder
+from src.model_blip import DualEncoderBLIPText
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,11 @@ def load_model_from_checkpoint(checkpoint_path, device):
         )
 
     config = checkpoint["config"]
-    model = DualEncoder(config).to(device)
+    text_encoder_type = config.get("model", {}).get("text_encoder")
+    if text_encoder_type == "blip":
+        model = DualEncoderBLIPText(config).to(device)
+    else:
+        model = DualEncoder(config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -86,11 +91,15 @@ def main():
 
     # Load checkpoint once and reuse config for all downstream needs.
     model, config = load_model_from_checkpoint(args.checkpoint, device)
-    model_name = config["model"]["image_model_name"]
     image_size = config["data"]["image_size"]
     max_length = config["data"]["max_length"]
 
-    tokenizer = CLIPTokenizer.from_pretrained(model_name)
+    text_encoder_type = config.get("model", {}).get("text_encoder")
+    if text_encoder_type == "blip":
+        from transformers import BertTokenizer
+        tokenizer = BertTokenizer.from_pretrained(config["model"]["text_model_name"])
+    else:
+        tokenizer = CLIPTokenizer.from_pretrained(config["model"]["image_model_name"])
     transform = build_eval_transform(image_size)
 
     # Resolve images directory
