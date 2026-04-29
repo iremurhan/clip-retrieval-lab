@@ -591,7 +591,10 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         - config['augment']['k_photometric_augs']  (REQUIRED, raises KeyError if missing)
     """
     shuffle = (split == 'train')
-    images_root = config['data']['images_path']
+    # Resolve to absolute path so DataLoader workers do not depend on os.getcwd()
+    # when PIL calls realpath -> abspath. A vanished/unmounted CWD inside the
+    # container otherwise raises FileNotFoundError from getcwd() in workers.
+    images_root = os.path.abspath(config['data']['images_path'])
     captions_path = config['data']['captions_path']
 
     # Resolve image size from data config (defined in config_base.yaml)
