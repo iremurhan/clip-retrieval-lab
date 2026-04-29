@@ -996,9 +996,16 @@ class Trainer:
         sims = chunked_matmul(img_embeds_unique, txt_embeds)
 
         is_coco = self.config['data']['dataset'] == 'coco'
+        # ECCV-corrected metrics are defined over the full COCO test set
+        # (~5000 caption IDs / 1000 image folds). When debug truncation is
+        # active, the eccv_caption library raises KeyError because its
+        # n-fold ground-truth references image_ids that aren't in our
+        # truncated retrieved_items. Skip in debug mode — the standard
+        # R@K computed on the truncated set is enough for smoke testing.
+        debug_active = bool(self.config.get('debug', {}).get('debug_mode', False))
 
-        if is_coco:
-            # ECCV metrics — only on test, only for COCO
+        if is_coco and not debug_active:
+            # ECCV metrics — only on test, only for COCO, only for full runs
             sims_np = sims.t().numpy()  # [N_txts, N_imgs]
             eccv_scores = compute_eccv_metrics(
                 sims_np,
