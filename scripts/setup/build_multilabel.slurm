@@ -9,7 +9,7 @@
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=48G
-#SBATCH --container-image=biremurhan/image-text-contrast:v0.16
+#SBATCH --container-image=biremurhan/image-text-contrast:b5
 #SBATCH --container-mounts=/users/beyza.urhan/clip-retrieval-lab:/workspace,/users/beyza.urhan/experiments/datasets/coco:/workspace/datasets/coco,/users/beyza.urhan/experiments/datasets/coco/caption_datasets:/workspace/datasets/coco/caption_datasets
 #SBATCH --output=/users/beyza.urhan/experiments/results/slurm_%j_multilabel.out
 #SBATCH --error=/users/beyza.urhan/experiments/results/slurm_%j_multilabel.out
