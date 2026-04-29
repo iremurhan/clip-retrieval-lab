@@ -8,6 +8,10 @@
 model:
   image_model_name: "openai/clip-vit-large-patch14-336"
   embed_dim: null
+  # Diagnostic ablation: swap CLIP's causal text encoder for a bidirectional one.
+  # null = use CLIP text encoder (default). "blip" = BLIP BERT-base.
+  text_encoder: null
+  text_model_name: null
   unfreeze_vision_layers: 4
   unfreeze_strategy: "full"
   # B5a/B5b/B5c only: segment-aware patch enrichment. Leave seg_mode=null to

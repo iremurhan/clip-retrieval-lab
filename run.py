@@ -201,13 +201,23 @@ def main():
     log.info(f"Using device: {device}")
 
     # 5. Tokenizer and dataloaders
-    model_name = config["model"]["image_model_name"]
-    tokenizer = CLIPTokenizer.from_pretrained(model_name)
+    text_encoder_type = config.get("model", {}).get("text_encoder")
+    if text_encoder_type == "blip":
+        from transformers import BertTokenizer
+        tokenizer = BertTokenizer.from_pretrained(config["model"]["text_model_name"])
+        log.info(f"Using BertTokenizer for BLIP text encoder: {config['model']['text_model_name']}")
+    else:
+        model_name = config["model"]["image_model_name"]
+        tokenizer = CLIPTokenizer.from_pretrained(model_name)
     train_loader = create_image_text_dataloader(config, tokenizer, split="train")
     val_loader = create_image_text_dataloader(config, tokenizer, split="val")
 
     # 6. Model, loss, optimizer, scheduler
-    model = DualEncoder(config).to(device)
+    if text_encoder_type == "blip":
+        from src.model_blip import DualEncoderBLIPText
+        model = DualEncoderBLIPText(config).to(device)
+    else:
+        model = DualEncoder(config).to(device)
     criterion = build_loss(config)
     optimizer = create_clip_optimizer(model, config)
     if hasattr(criterion, 'bias') and isinstance(criterion.bias, torch.nn.Parameter):
