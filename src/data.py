@@ -247,7 +247,7 @@ class SegmentFeatureLoader:
     Loads a precomputed per-patch tensor for the B5a / B5b / B5c variants.
 
     All patch assignments are materialized offline by
-    scripts/precompute_sam.py --seg_mode {spatial,semantic,continuous} and
+    scripts/preprocess/precompute_sam.py --seg_mode {spatial,semantic,continuous} and
     serialized as a single torch dict keyed by filename stem.
 
     Layout (under <seg_map_dir>):
@@ -283,7 +283,7 @@ class SegmentFeatureLoader:
         if not os.path.isdir(seg_map_dir):
             raise FileNotFoundError(
                 f"seg_map_dir does not exist: {seg_map_dir}. "
-                "Run scripts/precompute_sam.py --seg_mode {spatial,semantic,continuous} first."
+                "Run scripts/preprocess/precompute_sam.py --seg_mode {spatial,semantic,continuous} first."
             )
         if image_size % patch_size != 0:
             raise ValueError(
@@ -302,7 +302,7 @@ class SegmentFeatureLoader:
         if not os.path.isfile(pt_path):
             raise FileNotFoundError(
                 f"Precomputed segment features not found: {pt_path}. "
-                f"Run: python scripts/precompute_sam.py --seg_mode {seg_mode} ..."
+                f"Run: python scripts/preprocess/precompute_sam.py --seg_mode {seg_mode} ..."
             )
 
         logger.info(f"Loading segment features: {pt_path}")

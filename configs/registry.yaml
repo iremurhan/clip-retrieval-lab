@@ -1,6 +1,10 @@
 runs:
   B0:
-    description: "Minimal FT — InfoNCE, projection layers only, no aug, no intra-modal"
+    description: >-
+      Minimal fine-tune baseline. Tests whether training only the CLIP
+      projection layers with vanilla InfoNCE (no augmentation, no intra-modal
+      contrast) is sufficient for competitive retrieval. Establishes the
+      performance floor for all ablations.
     overrides:
       logging.eval_epoch_zero: true
       loss.intra_img_weight: 0
@@ -8,29 +12,47 @@ runs:
       augment.k_photometric_augs: 0
 
   B0_uf5:
-    description: "B0 + unfreeze last 5 vision blocks"
+    description: >-
+      B0 + unfreeze last 5 vision blocks. Tests whether deeper backbone
+      fine-tuning improves retrieval when augmentation and intra-modal
+      contrast are disabled.
     parent: B0
     overrides:
       model.unfreeze_vision_layers: 5
 
   B0_uf6:
-    description: "B0 + unfreeze last 6 vision blocks"
+    description: >-
+      B0 + unfreeze last 6 vision blocks. Part of the unfreezing depth
+      sweep (B0_uf5/6/7) to find the optimal number of trainable vision
+      blocks under the minimal-augmentation regime.
     parent: B0
     overrides:
       model.unfreeze_vision_layers: 6
 
   B0_uf7:
-    description: "B0 + unfreeze last 7 vision blocks"
+    description: >-
+      B0 + unfreeze last 7 vision blocks. Upper end of the unfreezing
+      depth sweep. Tests whether unfreezing more than half the vision
+      encoder causes overfitting when augmentation is disabled.
     parent: B0
     overrides:
       model.unfreeze_vision_layers: 7
 
   B0plus:
-    description: "B0+ baseline — bipartite augmentation + paraphrase pair + intra-modal + 4-layer unfreeze"
+    description: >-
+      Full-featured baseline (default config). Adds bipartite crop
+      augmentation, LLM-paraphrased captions for text diversity, symmetric
+      intra-modal contrast (image-image + text-text), and 4-layer vision
+      backbone unfreezing on top of B0. All subsequent B-series ablations
+      branch from this configuration.
     overrides: {}  # current config_base.yaml defaults
 
   B0v3:
-    description: "B0+ with B0v2-tuned augmentation magnitudes; leak-free pair-based intra-modal"
+    description: >-
+      B0+ with tuned augmentation magnitudes and leak-free pair-based
+      intra-modal contrast. Tests whether milder augmentation (crop scale
+      0.7 vs 0.4, jitter 0.2 vs 0.4, no grayscale) and clean inter-modal
+      / augmented-only intra-modal separation improve over B0+ defaults.
     parent: B0plus
     overrides:
       augment.aug_crop_scale_min: 0.7
@@ -38,45 +60,77 @@ runs:
       augment.use_grayscale: false
 
   B1:
-    description: "B0+ + SigLIP loss (replaces InfoNCE)"
+    description: >-
+      Loss function ablation: SigLIP vs InfoNCE. Tests whether the
+      pairwise sigmoid formulation (SigLIP) improves over the softmax-based
+      contrastive objective (InfoNCE). SigLIP removes the implicit
+      cross-sample coupling in the softmax denominator, which may improve
+      robustness with hard negatives.
     parent: B0plus
     overrides:
       loss.type: siglip
 
   B2:
-    description: "B0+ + syntactic hard negatives (NegCLIP-style POS-tag swapping)"
+    description: >-
+      Hard negative mining via syntactic perturbation. Tests whether
+      NegCLIP-style POS-tag swapping (nouns, verbs, adjectives shuffled
+      from the batch pool) forces the model to attend to compositional
+      semantics rather than bag-of-words shortcuts. Loss is asymmetric:
+      I2T sees both original + negative captions (Nx2N), T2I stays NxN
+      because there are no negative images by construction.
     parent: B0plus
     overrides:
       loss.hard_negatives: true
 
   B4:
-    description: "B0+ + multi-label classification auxiliary loss (80 COCO categories, COCO-only)"
+    description: >-
+      Multi-task learning with object recognition. Tests whether a BCE
+      auxiliary loss over 80 COCO category labels grounds the visual
+      encoder to recognize individual objects, improving fine-grained
+      retrieval. COCO-only (Flickr30k lacks exhaustive category
+      annotations). Mutually exclusive with B5.
     parent: B0plus
     overrides:
       loss.cls_weight: 1.0
       loss.cls_num_classes: 80
 
   B5a_seg_spatial:
-    description: "B0+ + segment-aware patches with spatial binning (3x3 grid x 3 size bins = 27 + bg = 28)"
+    description: >-
+      Segment-aware patch enrichment: spatial layout encoding. Each patch
+      receives a discrete token encoding the spatial position (3x3 grid)
+      and relative size (small/medium/large) of its dominant SAM segment.
+      Tests whether explicit spatial structure information improves over
+      CLIP's implicit positional encoding. 27 foreground bins + 1 bg = 28.
     parent: B0plus
     overrides:
       model.seg_mode: spatial
       model.seg_vocab_size: 28
 
   # B5b semantic uses 81-element vocab: 0 = background, 1..80 = COCO categories.
-  # Label sources differ by dataset (see scripts/precompute_sam.py):
+  # Label sources differ by dataset (see scripts/preprocess/precompute_sam.py):
   #   - COCO:      IoU-match SAM masks against instances_{train,val}2014 (threshold = 0.3).
   #   - Flickr30k: zero-shot CLIP top-1 over the 80 COCO category prompts (prob >= 0.3 else bg);
   #                SAM segments with bbox <4 px on either side are dropped to background.
   B5b_seg_semantic:
-    description: "B0+ + segment-aware patches with COCO 80-category IDs"
+    description: >-
+      Segment-aware patch enrichment: semantic category encoding. Each
+      patch receives a learnable embedding for its dominant segment's
+      COCO-80 category (IoU-matched on COCO, CLIP zero-shot on Flickr30k).
+      Tests whether injecting object-level semantic identity into the
+      vision encoder improves compositional understanding.
     parent: B0plus
     overrides:
       model.seg_mode: semantic
       model.seg_vocab_size: 81
 
   B5c_seg_continuous:
-    description: "B0+ + segment-aware patches with continuous 5-d geometric MLP projection"
+    description: >-
+      Segment-aware patch enrichment: continuous geometric features. Each
+      patch receives a 5-d vector (centroid x/y, area fraction, log aspect
+      ratio, patch coverage) projected through a 2-layer MLP. Tests a
+      soft, geometric alternative to the discrete B5a/B5b approaches —
+      the MLP can learn nonlinear spatial relationships without a fixed
+      vocabulary.
     parent: B0plus
     overrides:
       model.seg_mode: continuous

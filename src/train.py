@@ -4,7 +4,7 @@ src/train.py
 Training engine for Cross-Modal Retrieval.
 
 Usage:
-    This module is typically invoked via `run.py` or the Slurm script `scripts/train.slurm`.
+    This module is typically invoked via `run.py` or the Slurm script `scripts/train/train.slurm`.
     
     python run.py --config configs/config_val.yaml
     
