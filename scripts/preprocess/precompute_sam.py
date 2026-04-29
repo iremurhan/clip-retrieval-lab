@@ -322,6 +322,8 @@ def segmap_to_continuous_patches(
         lut[sid] = [cx, cy, area_frac, log_aspect, patch_frac]
 
     feats = lut[patch_ids_full]  # (576, 5) fp32, bg rows are zero
+    if not np.isfinite(feats).all():
+        raise ValueError("continuous features contain NaN/Inf")
     return torch.from_numpy(feats).float()
 
 
@@ -480,6 +482,8 @@ def segmap_to_semantic_flickr(
     seg_resized = _resize_nn(seg_map, image_size)
     patch_ids = _majority_vote_patches(seg_resized, grid, patch_size)
     cats = lut[patch_ids]
+    if cats.min() < 0 or cats.max() >= 81:
+        raise ValueError(f"semantic cat out of range: min={cats.min()} max={cats.max()}")
     return torch.from_numpy(cats).long()
 
 

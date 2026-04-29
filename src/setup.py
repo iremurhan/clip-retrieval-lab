@@ -202,6 +202,13 @@ def setup_tracker(config):
         f"dataset:{dataset_name}",
         f"seed:{seed}",
     ]
+    # Forward each logging.lineage entry as a filterable WandB tag so that
+    # default-bumps (e.g. augmentation magnitudes v1 → v2) split cleanly in
+    # the runs page without needing a config-key query.
+    lineage = config.get("logging", {}).get("lineage")
+    if isinstance(lineage, dict):
+        for k, v in lineage.items():
+            tags.append(f"lineage.{k}:{v}")
 
     wandb_id = config.get("logging", {}).get("wandb_id")
 

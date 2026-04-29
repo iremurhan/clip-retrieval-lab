@@ -84,10 +84,11 @@ class PrecomputedLLMParaphraser:
             tokenized['attention_mask'].to(self.device),  # [N, max_length]
         )
 
-    def generate_pair(self, sentids: list) -> tuple:
+    def sample_pair(self, sentids: list) -> tuple:
         """
-        Pick TWO distinct random rewrites per sentid for paraphrase ↔ paraphrase
-        intra-modal text loss (B0v3 pair-based design).
+        Sample TWO distinct rewrites per sentid (without replacement) from the
+        offline-precomputed JSON, for the paraphrase ↔ paraphrase intra-modal
+        text loss. No runtime LLM generation — selection only.
 
         Each sentid must have at least 2 rewrites available; otherwise a ValueError
         is raised so the caller fails loud rather than silently sampling the same
@@ -108,8 +109,9 @@ class PrecomputedLLMParaphraser:
             n = len(rw_list) if rw_list else 0
             if n < 2:
                 raise ValueError(
-                    f"sentid {sid_int}: need >= 2 rewrites for B0v3 paraphrase pair, "
-                    f"got {n}. Re-run scripts/generate_rewrites.py with --num_rewrites>=2."
+                    f"sentid {sid_int}: need >= 2 precomputed rewrites for the "
+                    f"paraphrase pair, got {n}. Re-run the offline rewrite script "
+                    "with --num_rewrites>=2."
                 )
             a, b = self.rng.sample(rw_list, 2)  # 2 distinct rewrites
             texts_a.append(a)

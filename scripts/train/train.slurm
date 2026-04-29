@@ -20,7 +20,7 @@
 #   sbatch scripts/train/train.slurm B0 configs/config_coco.yaml --seed 42
 #
 #   # With extra overrides
-#   sbatch scripts/train/train.slurm B0v3 configs/config_flickr30k.yaml \
+#   sbatch scripts/train/train.slurm B0plus configs/config_flickr30k.yaml \
 #       --seed 123 --override paraphraser.type=llama
 #
 #   # Debug run (no W&B, fast)

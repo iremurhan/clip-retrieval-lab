@@ -5,9 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 CLIP-based cross-modal image–text retrieval. Fine-tunes `openai/clip-vit-large-patch14-336` on **Flickr30k** and **MS-COCO** through a registry of ablations:
-- **B0 / B0+** — InfoNCE baselines (no aug / full aug)
+- **B0** — InfoNCE baseline, no augmentation, no intra-modal contrast
+- **B0+** — full-featured baseline: intra-modal contrast (image-image between
+  two augmented views, text-text between two paraphrases), retrieval-safe
+  augmentation magnitudes, paraphrase positives sampled from precomputed JSON
 - **B0_uf5/6/7** — B0 with deeper vision-block unfreezing
-- **B0v3** — B0+ with B0v2-tuned augmentation magnitudes; leak-free pair-based intra-modal
 - **B1** — SigLIP loss
 - **B2** — NegCLIP-style syntactic hard negatives (spaCy POS-tag swap)
 - **B4** — multi-label classification auxiliary loss (COCO categories)
@@ -75,13 +77,15 @@ run.py                  Training entry point: config → dataloader → DualEnco
 src/
   setup.py              Config loading (deep-merge + CLI overrides + registry parent inheritance),
                         WandB init (with logging.lineage forwarding), seed setup.
-  data.py               CaptionImageDataset (Karpathy JSON), B0v3 pair-based __getitem__,
+  data.py               CaptionImageDataset (Karpathy JSON), __getitem__ with
+                        emit_aug_views gate (skipped when intra_img_weight=0),
                         HardNegativeGenerator (B2), SegmentFeatureLoader (B5), DataLoader factory.
   model.py              DualEncoder: CLIP backbone + selective freezing + B4 cls_head + B5
                         seg_embedding/seg_projection (segment-aware vision forward).
   loss.py               SymmetricInfoNCELoss + SigLIPLoss + build_loss factory; both losses
-                        accept B0v3 pair args (img/txt _aug_a/b) and NegCLIP-asymmetric hard-neg.
-  paraphraser.py        PrecomputedLLMParaphraser: generate() + generate_pair() (B0v3).
+                        accept pair args (img/txt _aug_a/b) and NegCLIP-asymmetric hard-neg.
+  paraphraser.py        PrecomputedLLMParaphraser: generate() (single rewrite lookup) +
+                        sample_pair() (two distinct rewrites per sentid, no runtime LLM).
   train.py              Trainer: train_epoch, evaluate, checkpoint save/load, WandB logging.
   grad_cache.py         Gradient caching for large effective batch sizes (inter-modal only).
   metrics.py            compute_recall_at_k, compute_map_at_k (Recall@1/5/10, MAP@5/10).
@@ -127,7 +131,9 @@ legacy/                 Archived (paraphrase generation slurm, etc.) — not on 
 
 **DualEncoder (`src/model.py`):** Wraps `CLIPModel` from HuggingFace. CLIP backbone is frozen by default; only the CLIP projection layers (`visual_projection`, `text_projection`) and optionally the last N vision transformer blocks are trainable. Set `model.embed_dim: null` to use CLIP's native projection dimension (no extra head).
 
-**B0v3 pair-based intra-modal (`src/data.py`, `src/loss.py`, `src/train.py`):** The inter-modal contrast uses a clean image (eval-style transform) and the original caption. The intra-modal image-image contrast uses two independent augmented views (`image_aug_a`, `image_aug_b`); the intra-modal text-text contrast uses two distinct paraphrases per sentid via `paraphraser.generate_pair()`. The previous random.choice mixing of original + paraphrases inside `__getitem__` is gone.
+**Intra-modal contrast (`src/data.py`, `src/loss.py`, `src/train.py`):** The inter-modal contrast uses a clean image (eval-style transform) and the original caption — these anchors are never augmented or paraphrased. The intra-modal image-image contrast is computed between two independent augmented views (`image_aug_a`, `image_aug_b`), gated on `loss.intra_img_weight > 0` (when off, `transform_aug` is not built and the keys are not emitted — feature-off / no work). The intra-modal text-text contrast uses two distinct paraphrases per sentid sampled without replacement from the precomputed JSON via `paraphraser.sample_pair()`. No runtime LLM generation. No `random.choice([orig, *rewrites])` mixing in `__getitem__` (the previous design polluted the inter-modal text anchor; removed in the consolidation).
+
+**Augmentation magnitudes:** `aug_crop_scale_min=0.7`, `color_jitter_strength=0.2`, `use_grayscale=false`. These are the retrieval-safe magnitudes promoted into base from the historical B0v3 ablation; runs under the previous defaults (0.4 / 0.4 / true) are tagged `lineage.aug_magnitudes:v1`, runs under the current defaults are tagged `v2` via `logging.lineage.aug_magnitudes` (forwarded to WandB as both a config key and a filterable run tag).
 
 **B2 hard negatives (`src/data.py::HardNegativeGenerator`):** spaCy POS-tag word-swap against a per-batch noun/verb/adjective pool, with a word-order shuffle fallback. Loss extends i2t similarity to N×2N (NegCLIP-asymmetric: t2i stays N×N because there are no negative images by construction).
 

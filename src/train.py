@@ -132,8 +132,6 @@ class Trainer:
                     f"'{cls_label_path}'. Run tools/build_coco_multilabel.py first."
                 )
             self.cls_label_map = torch.load(cls_label_path, map_location=self.device)
-            num_cls = config['loss']['cls_num_classes']
-            self._cls_zero_vec = torch.zeros(num_cls, dtype=torch.float32, device=self.device)
             logger.info(
                 f"Multi-label classification enabled: weight={self.cls_weight}, "
                 f"{len(self.cls_label_map)} images loaded from {cls_label_path}"
@@ -287,18 +285,13 @@ class Trainer:
                     )
                 seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
 
-            neg_input_ids = batch.get('negative_input_ids')
-            neg_attention_mask = batch.get('negative_attention_mask')
-            if neg_input_ids is not None:
-                neg_input_ids = neg_input_ids.to(self.device, non_blocking=True)
-                neg_attention_mask = neg_attention_mask.to(self.device, non_blocking=True)
-
             if step == 0 and epoch == 0:
                 loss_type = self.config['loss']['type']
                 w_img = self.config['loss']['intra_img_weight']
                 w_txt = self.config['loss']['intra_txt_weight']
-                # B0v3 pair design: dataset returns image_aug_a + image_aug_b for the
-                # intra-modal image-image pair, NOT a single image_aug.
+                # The dataset emits image_aug_a + image_aug_b (two independent
+                # augmented views) for the intra-modal image-image contrast,
+                # NOT a single image_aug.
                 pair_available = ('image_aug_a' in batch) and ('image_aug_b' in batch)
                 txt_aug_available = self.paraphraser is not None
                 logger.info(
@@ -310,7 +303,8 @@ class Trainer:
                 if w_img > 0 and not pair_available:
                     raise RuntimeError(
                         f"intra_img_weight={w_img} but image_aug_a/image_aug_b are not in batch. "
-                        "Check that k_photometric_augs > 0 and the dataset returns the B0v3 pair."
+                        "The dataset gates emission on intra_img_weight>0 — check that "
+                        "create_image_text_dataloader saw the same loss config used here."
                     )
                 if w_txt > 0 and not txt_aug_available:
                     raise RuntimeError(
@@ -322,20 +316,33 @@ class Trainer:
             # ============================================================
             if self.use_grad_cache:
                 # GRADIENT CACHING MODE
-                # GradCache currently does NOT support B0v3 pair-based intra-modal
-                # (would require threading both aug views and both paraphrase pairs
-                # through the cache phases). Fail loud rather than silently degrade.
+                # GradCache currently only supports inter-modal contrast.
+                # Anything that adds extra forward terms (intra-modal aug pairs,
+                # hard-negative captions, the B4 cls head) needs threading
+                # through the cache phases — not implemented. Fail loud rather
+                # than silently degrade to an inter-modal-only run.
                 if intra_img_weight > 0 or intra_txt_weight > 0:
                     raise RuntimeError(
-                        "GradCache does not yet support B0v3 pair-based intra-modal "
-                        "(intra_img_weight>0 or intra_txt_weight>0). "
-                        "Either disable training.use_grad_cache or extend src/grad_cache.py "
-                        "to thread image_aug_a/image_aug_b + paraphrase pairs."
+                        "GradCache is incompatible with intra-modal contrast "
+                        "(intra_img_weight>0 or intra_txt_weight>0). GradCache does not "
+                        "yet thread image_aug_a/image_aug_b or paraphrase pairs through "
+                        "its cache phases. Either disable training.use_grad_cache or "
+                        "extend src/grad_cache.py."
                     )
-                if neg_input_ids is not None:
-                    logger.warning("Hard negatives (neg_input_ids) are not supported with GradCache yet. Ignoring.")
                 if self.use_hard_negatives:
-                    logger.warning("Syntactic hard negatives (loss.hard_negatives) are not supported with GradCache yet. Ignoring.")
+                    raise RuntimeError(
+                        "loss.hard_negatives=true (B2) is incompatible with "
+                        "training.use_grad_cache=true. GradCache does not yet thread "
+                        "neg_txt_embeds through its cache phases; running silently would "
+                        "skip hard negatives and produce a B0+-equivalent run mislabeled as B2."
+                    )
+                if self.cls_weight > 0:
+                    raise RuntimeError(
+                        "loss.cls_weight>0 (B4) is incompatible with "
+                        "training.use_grad_cache=true. The GradCache forward path does not "
+                        "compute cls_logits; running silently would skip the BCE auxiliary "
+                        "loss and produce a B0+-equivalent run mislabeled as B4."
+                    )
 
                 # Zero gradients before GradCache forward (which accumulates gradients)
                 self.optimizer.zero_grad()
@@ -389,7 +396,7 @@ class Trainer:
                         txt_aug_b_embeds = None
                         neg_txt_embeds = None
 
-                        # B0v3: encode the two augmented image views for image-image
+                        # Encode the two augmented image views for the image-image
                         # intra-modal pair. Both views are produced independently by
                         # transform_aug applied twice in __getitem__.
                         if intra_img_weight > 0:
@@ -408,7 +415,7 @@ class Trainer:
                         _neg_n = 0
 
                         if intra_txt_weight > 0 and self.paraphraser is not None:
-                            pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.generate_pair(
+                            pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.sample_pair(
                                 batch['sentid'].tolist())
                             nograd_ids_parts.append(pa_ids)
                             nograd_mask_parts.append(pa_mask)
@@ -462,7 +469,8 @@ class Trainer:
                             if w_img > 0 and (img_aug_a_embeds is None or img_aug_b_embeds is None):
                                 raise RuntimeError(
                                     f"intra_img_weight={w_img} but image_aug pair is None. "
-                                    "Check that k_photometric_augs > 0 and dataset returns image_aug_a/image_aug_b."
+                                    "Dataset gates aug-view emission on intra_img_weight>0 — "
+                                    "verify create_image_text_dataloader saw the same loss config."
                                 )
                             if w_txt > 0 and (txt_aug_a_embeds is None or txt_aug_b_embeds is None):
                                 raise RuntimeError(
@@ -501,14 +509,25 @@ class Trainer:
                         )
                         loss = loss_dict["loss_total"]
 
-                        # Multi-label classification auxiliary loss
+                        # Multi-label classification auxiliary loss.
+                        # build_coco_multilabel.py only emits entries for images with
+                        # at least one annotation. Images without any COCO instance
+                        # annotation are excluded from L_cls per-sample (no zero-vector
+                        # fallback — that would silently train the model to predict
+                        # "no objects" and corrupt the gradient).
                         if cls_logits is not None:
                             image_ids = batch['image_id']
-                            label_vecs = torch.stack(
-                                [self.cls_label_map.get(iid.item(), self._cls_zero_vec) for iid in image_ids]
-                            )  # [B, 80]
-                            loss_cls = F.binary_cross_entropy_with_logits(
-                                cls_logits, label_vecs)  # scalar
+                            mask_list = [iid.item() in self.cls_label_map for iid in image_ids]
+                            mask = torch.tensor(mask_list, dtype=torch.bool, device=self.device)
+                            if mask.any():
+                                label_vecs = torch.stack([
+                                    self.cls_label_map[iid.item()]
+                                    for iid, keep in zip(image_ids, mask_list) if keep
+                                ])  # [M, 80] on self.device
+                                loss_cls = F.binary_cross_entropy_with_logits(
+                                    cls_logits[mask], label_vecs)  # scalar
+                            else:
+                                loss_cls = torch.zeros((), device=self.device)
                             loss = loss + self.cls_weight * loss_cls
                             loss_dict["loss_cls"] = loss_cls
                             loss_dict["loss_total"] = loss
@@ -542,7 +561,7 @@ class Trainer:
                     txt_aug_b_embeds = None
                     neg_txt_embeds = None
 
-                    # B0v3: encode the two augmented image views for image-image
+                    # Encode the two augmented image views for the image-image
                     # intra-modal pair.
                     if intra_img_weight > 0:
                         with torch.no_grad():
@@ -560,7 +579,7 @@ class Trainer:
                     _neg_n = 0
 
                     if intra_txt_weight > 0 and self.paraphraser is not None:
-                        pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.generate_pair(
+                        pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.sample_pair(
                             batch['sentid'].tolist())
                         nograd_ids_parts.append(pa_ids)
                         nograd_mask_parts.append(pa_mask)
@@ -614,7 +633,8 @@ class Trainer:
                         if w_img > 0 and (img_aug_a_embeds is None or img_aug_b_embeds is None):
                             raise RuntimeError(
                                 f"intra_img_weight={w_img} but image_aug pair is None. "
-                                "Check that k_photometric_augs > 0 and dataset returns image_aug_a/image_aug_b."
+                                "Dataset gates aug-view emission on intra_img_weight>0 — "
+                                "verify create_image_text_dataloader saw the same loss config."
                             )
                         if w_txt > 0 and (txt_aug_a_embeds is None or txt_aug_b_embeds is None):
                             raise RuntimeError(
@@ -653,14 +673,21 @@ class Trainer:
                     )
                     loss = loss_dict["loss_total"]
 
-                    # Multi-label classification auxiliary loss
+                    # Multi-label classification auxiliary loss.
+                    # See note above: per-sample mask, no zero-vector fallback.
                     if cls_logits is not None:
                         image_ids = batch['image_id']
-                        label_vecs = torch.stack(
-                            [self.cls_label_map.get(iid.item(), self._cls_zero_vec) for iid in image_ids]
-                        )  # [B, 80]
-                        loss_cls = F.binary_cross_entropy_with_logits(
-                            cls_logits, label_vecs)  # scalar
+                        mask_list = [iid.item() in self.cls_label_map for iid in image_ids]
+                        mask = torch.tensor(mask_list, dtype=torch.bool, device=self.device)
+                        if mask.any():
+                            label_vecs = torch.stack([
+                                self.cls_label_map[iid.item()]
+                                for iid, keep in zip(image_ids, mask_list) if keep
+                            ])  # [M, 80] on self.device
+                            loss_cls = F.binary_cross_entropy_with_logits(
+                                cls_logits[mask], label_vecs)  # scalar
+                        else:
+                            loss_cls = torch.zeros((), device=self.device)
                         loss = loss + self.cls_weight * loss_cls
                         loss_dict["loss_cls"] = loss_cls
                         loss_dict["loss_total"] = loss
@@ -745,8 +772,8 @@ class Trainer:
             attention_mask = batch['attention_mask'].to(self.device, non_blocking=True)
 
             # B5: thread per-patch seg_ids through eval batches too. Augmented
-            # views aren't generated during eval (transform_aug=transform), so
-            # only the inter-modal forward needs seg_ids here.
+            # views aren't generated during eval (emit_aug_views=False for
+            # val/test), so only the inter-modal forward needs seg_ids here.
             seg_ids = None
             if self.use_seg_ids:
                 if 'seg_ids' not in batch:
