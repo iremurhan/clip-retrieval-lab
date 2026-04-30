@@ -105,8 +105,15 @@ class PrecomputedLLMParaphraser:
         texts_b = []
         for sid in sentids:
             sid_int = int(sid)
-            rw_list = self.rewrites.get(sid_int)
-            n = len(rw_list) if rw_list else 0
+            if sid_int not in self.rewrites:
+                raise KeyError(
+                    f"sentid {sid_int} not found in rewrites file. It was "
+                    f"excluded by the offline rewrite script (paraphrase "
+                    f"collapse — < num_rewrites unique candidates). Run a "
+                    f"retry pass over the .failed.jsonl log to recover."
+                )
+            rw_list = self.rewrites[sid_int]
+            n = len(rw_list)
             if n < 2:
                 raise ValueError(
                     f"sentid {sid_int}: need >= 2 precomputed rewrites for the "

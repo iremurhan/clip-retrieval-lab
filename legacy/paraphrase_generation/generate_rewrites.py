@@ -32,6 +32,8 @@ import argparse
 import json
 import logging
 import os
+import random
+import re
 import sys
 import time
 
@@ -105,14 +107,19 @@ def build_chat_messages(caption: str) -> list[dict]:
     ]
 
 
+_DEDUP_TRAIL_PUNCT = " .!?,;:"
+
+
 def select_unique_rewrites(
-    candidates: list[str], original: str, num_rewrites: int,
+    candidates: list[str], num_rewrites: int,
 ) -> list[str]:
     """Pick the most distinct rewrites from candidates.
 
-    Deduplicates by lowercased text. If fewer than num_rewrites unique
-    candidates remain, pads with whatever was found, then fills remaining
-    slots with the original caption.
+    Deduplicates by normalized text: lowercased, whitespace-collapsed,
+    trailing punctuation stripped. Returns whatever unique candidates are
+    available — the caller is responsible for handling lists shorter than
+    num_rewrites (no silent padding with the original caption, which would
+    leak the inter-modal anchor into the intra-modal positive pair).
     """
     seen = set()
     unique = []
@@ -120,19 +127,12 @@ def select_unique_rewrites(
         c_stripped = c.strip()
         if not c_stripped:
             continue
-        key = c_stripped.lower()
+        key = re.sub(r"\s+", " ", c_stripped.lower()).rstrip(_DEDUP_TRAIL_PUNCT)
+        if not key:
+            continue
         if key not in seen:
             seen.add(key)
             unique.append(c_stripped)
-
-    if len(unique) < num_rewrites:
-        logger.warning(
-            f"Only {len(unique)}/{num_rewrites} unique rewrites for: "
-            f"{original[:80]!r}. Padding with original."
-        )
-        while len(unique) < num_rewrites:
-            unique.append(original)
-
     return unique[:num_rewrites]
 
 
@@ -199,8 +199,9 @@ def generate_for_batch(
             max_new_tokens=128,
             num_return_sequences=num_candidates,
             do_sample=True,
-            temperature=0.7,
-            top_p=0.9,
+            temperature=0.9,
+            top_p=0.95,
+            top_k=50,
             pad_token_id=tokenizer.eos_token_id,
         )  # [B * num_candidates, prompt_len + new_tokens]
 
@@ -215,7 +216,11 @@ def generate_for_batch(
         end = start + num_candidates
         cands = []
         for text in decoded[start:end]:
-            first_line = text.strip().split("\n")[0].strip()
+            # Use the first non-empty line; tolerates leading blank lines
+            # that some chat-tuned models emit before the actual response.
+            first_line = next(
+                (l.strip() for l in text.split("\n") if l.strip()), "",
+            )
             if first_line:
                 cands.append(first_line)
         batch_candidates.append(cands)
@@ -236,14 +241,41 @@ def _save(rewrites: dict, path: str) -> None:
     os.replace(tmp, path)
 
 
+def _failed_path_for(output_path: str) -> str:
+    """Derive the JSONL failure-log path from the main output path."""
+    base, _ = os.path.splitext(output_path)
+    return f"{base}.failed.jsonl"
+
+
+def _append_failure(
+    failed_path: str, sentid: int, caption: str, rewrites: list,
+) -> None:
+    """Append a single failed-sentid record to the JSONL log (one record/line).
+
+    Records the partial rewrites we did get so a retry pass or later analysis
+    can decide whether to top up or regenerate from scratch.
+    """
+    record = {
+        "sentid": int(sentid),
+        "caption": caption,
+        "n_unique": len(rewrites),
+        "rewrites": list(rewrites),
+    }
+    os.makedirs(os.path.dirname(failed_path) or ".", exist_ok=True)
+    with open(failed_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def generate_rewrites(
     captions: list,
     output_path: str,
     model_name: str,
-    num_rewrites: int = 3,
+    num_rewrites: int = 2,
     batch_size: int = 8,
     checkpoint_every: int = 200,
     resume: bool = False,
+    shard_id: int = 0,
+    num_shards: int = 1,
 ) -> None:
     """Main generation loop with batched inference, checkpointing, and resume.
 
@@ -251,7 +283,26 @@ def generate_rewrites(
     one ``.generate()`` call, producing ``batch_size * NUM_CANDIDATES`` output
     sequences. ``checkpoint_every`` is measured in number of processed
     captions (not batches), and is rounded up to the nearest batch boundary.
+
+    When ``num_shards > 1``, the caption list is partitioned by stride
+    (``i % num_shards == shard_id``) and the output path is suffixed with
+    ``.shard{id}of{N}`` so disjoint SLURM array tasks write to disjoint
+    files. Stride sharding (vs. contiguous slicing) keeps checkpoint
+    progress and dataset diversity uniform across shards.
     """
+
+    if num_shards < 1 or shard_id < 0 or shard_id >= num_shards:
+        raise ValueError(
+            f"Invalid shard config: shard_id={shard_id}, num_shards={num_shards}"
+        )
+    if num_shards > 1:
+        captions = [c for i, c in enumerate(captions) if i % num_shards == shard_id]
+        base, ext = os.path.splitext(output_path)
+        output_path = f"{base}.shard{shard_id}of{num_shards}{ext}"
+        logger.info(
+            f"Sharded run: shard {shard_id}/{num_shards}, "
+            f"{len(captions)} captions on this shard, output={output_path}"
+        )
 
     # Load existing progress if resuming
     existing = {}
@@ -261,6 +312,10 @@ def generate_rewrites(
         existing = {int(k): v for k, v in raw.items()}
         logger.info(f"Resuming: {len(existing)} sentids already processed")
 
+    # TODO(retry-pass): when resume=True, also read failed_path to skip
+    # previously-failed sentids on resume — otherwise they are re-generated
+    # every resume (extra GPU). The clean fix is the explicit retry pass
+    # (Commit 2) which consumes failed_path as input and writes back.
     remaining = [c for c in captions if c["sentid"] not in existing]
     logger.info(f"{len(remaining)} captions to process ({len(existing)} done)")
 
@@ -272,6 +327,8 @@ def generate_rewrites(
 
     all_rewrites = dict(existing)
     skipped_sentids = []
+    failed_path = _failed_path_for(output_path)
+    n_failed = 0
     total = len(remaining)
     processed_since_save = 0
     t_start = time.time()
@@ -294,9 +351,16 @@ def generate_rewrites(
                         model, tokenizer, sub_caps, NUM_CANDIDATES,
                     )
                     for sid, cap, cands in zip(sub_sids, sub_caps, cand_lists):
-                        all_rewrites[sid] = select_unique_rewrites(
-                            cands, cap, num_rewrites,
-                        )
+                        rewrites = select_unique_rewrites(cands, num_rewrites)
+                        if len(rewrites) < num_rewrites:
+                            # Don't write to all_rewrites — paraphraser.sample_pair
+                            # raises KeyError on missing sentid (fail-fast). The
+                            # failure record is appended to a sidecar .failed.jsonl
+                            # for diagnostics / methodology evidence / retry pass.
+                            _append_failure(failed_path, sid, cap, rewrites)
+                            n_failed += 1
+                        else:
+                            all_rewrites[sid] = rewrites
                 success = True
                 break
             except torch.cuda.OutOfMemoryError:
@@ -340,6 +404,12 @@ def generate_rewrites(
 
     _save(all_rewrites, output_path)
     logger.info(f"Done. {len(all_rewrites)} sentids written to {output_path}")
+    if n_failed:
+        logger.warning(
+            f"{n_failed} sentids failed dedup (< {num_rewrites} unique "
+            f"rewrites) — logged to {failed_path}. Excluded from the output "
+            f"JSON; paraphraser.sample_pair will raise KeyError if requested."
+        )
     if skipped_sentids:
         logger.warning(
             f"{len(skipped_sentids)} sentids skipped due to errors. "
@@ -364,8 +434,9 @@ def main():
         help=f"HuggingFace model ID (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
-        "--num_rewrites", type=int, default=3,
-        help="Number of rewrites per caption (default: 3)",
+        "--num_rewrites", type=int, default=2,
+        help="Number of rewrites per caption (default: 2 — paraphraser.sample_pair "
+             "needs 2 distinct rewrites; the single-rewrite generate() path is unused).",
     )
     parser.add_argument(
         "--batch_size", type=int, default=8,
@@ -383,12 +454,30 @@ def main():
         "--resume", action="store_true",
         help="Resume from existing output file",
     )
+    parser.add_argument(
+        "--shard_id", type=int, default=0,
+        help="Zero-indexed shard ID for SLURM array sharding (default: 0).",
+    )
+    parser.add_argument(
+        "--num_shards", type=int, default=1,
+        help="Total number of shards across the SLURM array (default: 1 = single "
+             "shard, no suffixing). When > 1, captions are striped by "
+             "i %% num_shards == shard_id and output is suffixed "
+             "with .shard{id}of{N}.",
+    )
     args = parser.parse_args()
 
     captions = load_captions(args.captions_path)
     if args.smoke_test > 0:
-        captions = captions[:args.smoke_test]
-        logger.info(f"SMOKE TEST mode: limiting to first {len(captions)} captions")
+        # Seed-fixed random sample so smoke runs are comparable across
+        # parameter changes (same caption set every time, not the first N
+        # which are clustered around the first ~40 images).
+        smoke_rng = random.Random(42)
+        n = min(args.smoke_test, len(captions))
+        captions = smoke_rng.sample(captions, n)
+        logger.info(
+            f"SMOKE TEST mode: random sample (seed=42) of {len(captions)} captions"
+        )
 
     generate_rewrites(
         captions,
@@ -398,6 +487,8 @@ def main():
         batch_size=args.batch_size,
         checkpoint_every=args.checkpoint_every,
         resume=args.resume,
+        shard_id=args.shard_id,
+        num_shards=args.num_shards,
     )
 
 
