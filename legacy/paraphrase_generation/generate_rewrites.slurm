@@ -13,6 +13,16 @@
 #   sbatch legacy/paraphrase_generation/generate_rewrites.slurm flickr
 #   sbatch legacy/paraphrase_generation/generate_rewrites.slurm coco meta-llama/Meta-Llama-3-8B-Instruct
 #
+# Multi-GPU sharded run (data parallel via SLURM array):
+#   sbatch --array=0-3%2 legacy/paraphrase_generation/generate_rewrites.slurm coco meta-llama/Meta-Llama-3-8B-Instruct
+#   → 4 array tasks total, max 2 concurrent. Concurrency cap (%2) is REQUIRED
+#     to avoid pyxis /run tmpfs squashfs contention: each container extraction
+#     writes ~8GB to /run, and /run is shared (~50GB tmpfs) across all users.
+#     Without the cap, simultaneous extractions race and tasks fail with
+#     "No space left on device" before any work starts.
+#     Per-shard outputs: caption_rewrites_<model>.shard{i}of4.json
+#     After all complete, run tools/merge_rewrite_shards.py to fuse.
+#
 # Smoke test (process only first N captions, e.g. 32):
 #   SMOKE_TEST=32 sbatch legacy/paraphrase_generation/generate_rewrites.slurm coco
 #
@@ -24,6 +34,7 @@
 #
 # Outputs:
 #   datasets/{dataset}/caption_rewrites_{model_slug}.json
+#     (or .shard{i}of{N}.json under sharded runs)
 #   /output/results/rewrites/{job_id}/generate.log
 # =============================================================================
 #SBATCH --time=7-00:00:00
@@ -42,6 +53,17 @@ DATASET="${1:-coco}"
 MODEL="${2:-mistralai/Mistral-7B-Instruct-v0.2}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 SMOKE_TEST="${SMOKE_TEST:-0}"
+
+# Sharding: auto-detect from SLURM array context.
+# Single-job submission (no --array) → SHARD_ID=0, NUM_SHARDS=1 (no suffixing).
+#
+# NUM_SHARDS uses SLURM_ARRAY_TASK_MAX+1, NOT SLURM_ARRAY_TASK_COUNT, to be
+# robust to skip-form arrays. Example: --array=0,1,3%2 (re-running failed
+# shards 0/1/3 of an originally 4-way split) reports COUNT=3 but MAX=3, so
+# MAX+1=4 keeps the shard partition consistent with the original 4-way run.
+# COUNT-based math would mis-compute as 3 and corrupt the partition.
+SHARD_ID="${SLURM_ARRAY_TASK_ID:-0}"
+NUM_SHARDS="${PARAPHRASE_NUM_SHARDS:-$((${SLURM_ARRAY_TASK_MAX:-0} + 1))}"
 
 case "$DATASET" in
     coco)
@@ -79,11 +101,32 @@ echo "Captions:    ${CAPTIONS_PATH}"
 echo "Output:      ${OUTPUT_PATH}"
 echo "Batch size:  ${BATCH_SIZE}"
 echo "Smoke test:  ${SMOKE_TEST} (0 = full run)"
+if [ "$NUM_SHARDS" -gt 1 ]; then
+    echo "Shard:       ${SHARD_ID}/${NUM_SHARDS}"
+fi
 echo "Log:         ${JOB_DIR}/generate.log"
 echo "=========================================="
 
 cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
+
+# Pre-flight: fail fast if essential data paths are missing. Doing this BEFORE
+# any heavy I/O (model download, file opens) avoids the "Kill task failed"
+# scenario where SLURM cannot cleanly kill a process holding handles to files
+# that have been deleted out from under it (which can lead to node DRAIN).
+for required in "$CAPTIONS_PATH"; do
+    if [ ! -f "/workspace/${required}" ]; then
+        echo "ERROR: required input file missing: /workspace/${required}"
+        echo "Aborting before opening any file handles."
+        exit 1
+    fi
+done
+
+# Snapshot key logs to a deletion-safe archive at job start so the breadcrumb
+# survives even if the dataset/results dir is wiped while the job is running.
+LOG_ARCHIVE="/users/beyza.urhan/log_archive/rewrites/${SLURM_JOB_ID}"
+mkdir -p "$LOG_ARCHIVE"
+echo "Log archive: $LOG_ARCHIVE"
 
 echo "Starting rewrite generation..."
 
@@ -95,9 +138,11 @@ python3 -u legacy/paraphrase_generation/generate_rewrites.py \
     --captions_path "$CAPTIONS_PATH" \
     --output_path "$OUTPUT_PATH" \
     --model "$MODEL" \
-    --num_rewrites 3 \
+    --num_rewrites 2 \
     --batch_size "$BATCH_SIZE" \
     --smoke_test "$SMOKE_TEST" \
+    --shard_id "$SHARD_ID" \
+    --num_shards "$NUM_SHARDS" \
     --resume 2>&1 | tee "$JOB_DIR/generate.log"
 EXIT_CODE=${PIPESTATUS[0]}
 set -e
@@ -115,6 +160,14 @@ echo "=========================================="
 SLURM_LOG="/users/beyza.urhan/experiments/results/slurm_${SLURM_JOB_ID}.out"
 if [ -f "$SLURM_LOG" ]; then
     mv "$SLURM_LOG" "$JOB_DIR/slurm.out"
+fi
+
+# Also copy the generate.log to the deletion-safe archive (cheap, ~few MB).
+if [ -f "$JOB_DIR/generate.log" ]; then
+    cp "$JOB_DIR/generate.log" "$LOG_ARCHIVE/generate.log"
+fi
+if [ -f "$JOB_DIR/slurm.out" ]; then
+    cp "$JOB_DIR/slurm.out" "$LOG_ARCHIVE/slurm.out"
 fi
 
 exit $EXIT_CODE
