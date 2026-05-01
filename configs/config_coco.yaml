@@ -6,6 +6,9 @@ data:
   # (spatial_bins.pt / semantic_ids.pt / continuous_features.pt).
   # Produced by scripts/preprocess/precompute_sam.py.
   seg_map_dir: "datasets/coco/sam_segments"
+  # B5d: directory containing sam_encoder_features_pool{pool_size}.pt.
+  # Produced by scripts/preprocess/precompute_sam.py --encoder_features.
+  sam_feature_dir: "datasets/coco/sam_encoder_features"
 
 loss:
   cls_label_path: "datasets/coco/coco_multilabel_map.pt"

@@ -86,7 +86,7 @@ fi
 python3 -u scripts/eval/eval_sugarcrepe.py \
     --checkpoint "$CKPT_PATH" \
     --data_dir datasets/sugarcrepe \
-    --images_dir datasets/coco/val2014 \
+    --images_dir datasets/coco/val2017 \
     $WANDB_ARGS \
     > "$JOB_DIR/eval.log" 2>&1
 

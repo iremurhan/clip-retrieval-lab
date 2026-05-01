@@ -61,7 +61,7 @@ python run.py --config configs/config_flickr30k.yaml --override debug.debug_mode
 Configs are hierarchical YAML files merged at runtime:
 
 1. `configs/config_base.yaml` — all defaults (model, loss, training, augment, paraphraser, logging)
-2. `configs/config_{coco,flickr30k}.yaml` — dataset-specific paths (images, captions, paraphraser rewrites, B5 `seg_map_dir`, B4 `cls_label_path`); deep-merged on top of base
+2. `configs/config_{coco,flickr30k}.yaml` — dataset-specific paths (images, captions, paraphraser rewrites, B5 `seg_map_dir` / `sam_feature_dir`, B4 `cls_label_path`); deep-merged on top of base
 3. `configs/registry.yaml` — named ablation entries. Optional `parent:` field per entry resolves recursively (depth-first, parent → child). Selected via `--run <name>`.
 4. `--override key.subkey=value` — CLI overrides applied last (highest priority).
 
@@ -79,9 +79,10 @@ src/
                         WandB init (with logging.lineage forwarding), seed setup.
   data.py               CaptionImageDataset (Karpathy JSON), __getitem__ with
                         emit_aug_views gate (skipped when intra_img_weight=0),
-                        HardNegativeGenerator (B2), SegmentFeatureLoader (B5), DataLoader factory.
+                        HardNegativeGenerator (B2), SegmentFeatureLoader/SAMFeatureLoader (B5),
+                        DataLoader factory.
   model.py              DualEncoder: CLIP backbone + selective freezing + B4 cls_head + B5
-                        seg_embedding/seg_projection (segment-aware vision forward).
+                        seg_embedding/seg_projection plus B5d fusion_module.
   loss.py               SymmetricInfoNCELoss + SigLIPLoss + build_loss factory; both losses
                         accept pair args (img/txt _aug_a/b) and NegCLIP-asymmetric hard-neg.
   paraphraser.py        PrecomputedLLMParaphraser: generate() (single rewrite lookup) +
@@ -98,7 +99,7 @@ tools/
 configs/
   config_base.yaml      All defaults.
   config_{coco,flickr30k}.yaml   Dataset-specific paths (images, captions, paraphraser rewrites,
-                                  seg_map_dir, cls_label_path).
+                                  seg_map_dir, sam_feature_dir, cls_label_path).
   registry.yaml         Named ablation entries with parent: inheritance and research hypotheses.
 scripts/
   train/                Training and experiment launching.
@@ -114,8 +115,8 @@ scripts/
     extract_failures.py    Worst-failure extraction + HTML report.
     extract_failures.slurm SLURM wrapper for failure analysis.
   preprocess/           Data preprocessing pipelines.
-    precompute_sam.py   Two-stage SAM segment precompute (B5 prep).
-    precompute_sam.slurm       SAM stage 1 SLURM array job.
+    precompute_sam.py   SAM masks/segments (B5a/b/c) and encoder features (B5d).
+    precompute_sam.slurm       SAM mask/encoder-feature SLURM array job.
     precompute_sam_stage2.slurm  SAM stage 2 per-mode post-processing.
   setup/                Environment, Docker, and dataset setup.
     Dockerfile, build.sh, download_coco.sh, download_flickr.sh,
@@ -139,14 +140,16 @@ legacy/                 Archived (paraphrase generation slurm, etc.) — not on 
 
 **B5 segment-aware patches (`src/model.py`, `src/data.py::SegmentFeatureLoader`, `scripts/preprocess/precompute_sam.py`):** Three modes — `spatial` (28-bin discrete), `semantic` (81-class discrete; COCO categories), `continuous` (5-d MLP-projected). Per-patch tensors are precomputed offline (two-stage SAM pipeline) and packed COW-safe in shared memory. Forward path injects the segment embedding into `vm.embeddings(...)` output before the encoder; CLS gets a zero vector. Augmented views skip seg injection (RandomResizedCrop breaks alignment).
 
+**B5d multistream fusion (`src/model.py`, `src/data.py::SAMFeatureLoader`, `scripts/preprocess/precompute_sam.py --encoder_features`):** `seg_mode: multistream` loads frozen SAM ViT-B image-encoder features (`[256, pool, pool]`, usually pool=8) and fuses them with CLIP's post-encoder CLS token before `visual_projection`. Fusion types are `gate`, `cross_attn`, and `concat_proj`. This path does not inject patch embeddings and does not enable CLIP gradient checkpointing.
+
 **B4 multi-label aux loss (`src/model.py::cls_head`, `src/train.py`):** Linear head on `pooler_output`, BCE-with-logits against precomputed COCO category targets. Strict COCO-only (`data.dataset == 'coco'` enforced at Trainer init). Mutually exclusive with B5.
 
 **Checkpointing:** Single file `best_model.pth`, written every `save_freq` epochs (and at the final epoch). After training, this file is loaded and evaluated on the test split.
 
 **Mixed Precision:** AMP (bfloat16) is automatically enabled when CUDA is available.
 
-**Optimizer (`run.py`):** Five named parameter groups with separate LRs:
-`clip_proj` (cosine) → `cls_head` (constant, B4) → `seg_embedding` (constant, B5a/b) → `seg_projection` (constant, B5c) → `backbone` (cosine).
+**Optimizer (`run.py`):** Six named parameter groups with separate LRs:
+`clip_proj` (cosine) → `cls_head` (constant, B4) → `seg_embedding` (constant, B5a/b) → `seg_projection` (constant, B5c) → `fusion_module` (constant, B5d) → `backbone` (cosine).
 Constant groups (in `_CONSTANT_LR_GROUPS`) keep their base LR throughout training; cosine groups follow the standard cosine-with-warmup schedule via `LambdaLR`. Implementation lives in `create_clip_optimizer` and `create_lr_scheduler`.
 
 ## Dataset Structure
@@ -158,11 +161,13 @@ datasets/
     caption_datasets/dataset_flickr30k.json      # Karpathy JSON
     caption_rewrites_*.json                      # LLM paraphrases (paraphraser.paths)
     sam_segments/                                # B5 precomputed: spatial_bins.pt / semantic_ids.pt / continuous_features.pt
+    sam_encoder_features/                        # B5d precomputed: sam_encoder_features_pool8.pt
   coco/
     train2014/  val2014/
     caption_datasets/dataset_coco.json
     caption_rewrites_*.json
     sam_segments/
+    sam_encoder_features/
     coco_multilabel_map.pt                       # B4 precomputed (tools/build_coco_multilabel.py)
 ```
 

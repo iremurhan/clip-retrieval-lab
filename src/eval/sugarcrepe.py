@@ -56,13 +56,17 @@ def evaluate_subcategory(model, tokenizer, transform, data, images_dir, max_leng
 
         img_path = os.path.join(images_dir, filename)
         if not os.path.isfile(img_path):
-            # SugarCrepe uses bare IDs (e.g. 000000085329.jpg) but COCO images
-            # are prefixed with COCO_val2014_.  Try the prefixed name as fallback.
-            prefixed = os.path.join(images_dir, f"COCO_val2014_{filename}")
-            if os.path.isfile(prefixed):
-                img_path = prefixed
-            else:
-                logger.warning(f"Image not found, skipping: {img_path}")
+            # Official COCO 2017 images use bare IDs, but keep compatibility
+            # with older local COCO 2014 layouts that may use split prefixes.
+            prefixed_paths = [
+                os.path.join(images_dir, f"COCO_val2017_{filename}"),
+                os.path.join(images_dir, f"COCO_val2014_{filename}"),
+            ]
+            img_path = next((p for p in prefixed_paths if os.path.isfile(p)), None)
+            if img_path is None:
+                logger.warning(
+                    f"Image not found, skipping: {os.path.join(images_dir, filename)}"
+                )
                 continue
 
         image = Image.open(img_path).convert("RGB")
@@ -125,7 +129,7 @@ def evaluate_sugarcrepe(
         device: torch.device on which the model lives.
         data_dir: directory containing {subcategory}.json files.
         images_dir: directory containing the referenced images (typically
-            datasets/coco/val2014).
+            datasets/coco/val2017).
         max_length: tokenizer max_length, default 77 (CLIP standard).
         splits: tuple of parent-category prefixes to evaluate. Default covers all.
 
