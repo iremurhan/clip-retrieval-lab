@@ -99,81 +99,94 @@ class DualEncoder(nn.Module):
             self.clip.logit_scale.fill_(2.6593)  # ln(1/0.07) = 2.6593
         logger.info("logit_scale reset to 2.6593 (τ=0.07)")
 
-        # 6. B5a / B5b / B5c only: segment-aware patch enrichment.
+        # 6. B5a / B5b / B5c / B5d optional visual-side modules.
         # Strictly gated by config.model.seg_mode; absent for all other variants
         # so that nothing in the forward path changes for them.
         #   seg_mode == "spatial"    | "semantic" : nn.Embedding(vocab, d_model)
         #   seg_mode == "continuous"              : nn.Sequential(Linear, GELU, Linear)
+        #   seg_mode == "multistream"             : post-encoder CLS + SAM fusion
         seg_mode = config.get('model', {}).get('seg_mode')
         self.seg_mode = seg_mode
         self.seg_embedding = None
         self.seg_projection = None
+        self.fusion_module = None
         self.seg_vocab_size = None
         self.seg_feature_dim = None
         if seg_mode is not None:
-            if seg_mode not in ("spatial", "semantic", "continuous"):
+            if seg_mode not in ("spatial", "semantic", "continuous", "multistream"):
                 raise ValueError(
-                    f"model.seg_mode must be one of 'spatial','semantic','continuous'; got {seg_mode!r}"
+                    "model.seg_mode must be one of "
+                    f"'spatial','semantic','continuous','multistream'; got {seg_mode!r}"
                 )
             d_model = self.clip.vision_model.config.hidden_size  # 1024 for ViT-L
-            patch_size = self.clip.vision_model.config.patch_size
-            image_size = self.clip.vision_model.config.image_size
-            self._seg_grid_size = image_size // patch_size
-            self._seg_num_patches = self._seg_grid_size * self._seg_grid_size
-
-            if seg_mode in ("spatial", "semantic"):
-                vocab = config['model'].get('seg_vocab_size')
-                if not isinstance(vocab, int) or vocab < 1:
-                    raise ValueError(
-                        f"model.seg_vocab_size must be a positive int for seg_mode={seg_mode}, "
-                        f"got {vocab!r}"
-                    )
-                init_std = float(config['model'].get('seg_init_std', 0.02))
-                self.seg_vocab_size = vocab
-                self.seg_embedding = nn.Embedding(vocab, d_model)
-                # Normal init at CLIP positional-embedding scale. Zero-init combined
-                # with cosine LR decay produced a dead embedding on b5-aware that
-                # never learned; std=0.02 matches HF CLIP's positional_embedding.
-                nn.init.normal_(self.seg_embedding.weight, mean=0.0, std=init_std)
-                self.seg_embedding.weight.requires_grad = True
+            if seg_mode == "multistream":
+                fusion_type = config['model'].get('fusion_type') or 'gate'
+                self.fusion_module = build_fusion_module(fusion_type, config, d_model=d_model)
                 logger.info(
-                    f"B5[{seg_mode}]: seg_embedding vocab={vocab}, d_model={d_model}, "
-                    f"init_std={init_std}, num_patches={self._seg_num_patches}"
+                    f"B5d[multistream]: fusion_type={fusion_type}, "
+                    f"sam_feature_dim={config['model'].get('sam_feature_dim', 256)}, "
+                    f"pool_size={config['model'].get('sam_feature_pool_size', 8)}"
                 )
-            else:  # continuous
-                feat_dim = int(config['model'].get('seg_feature_dim', 5))
-                hidden = int(config['model'].get('seg_proj_hidden', 128))
-                if feat_dim < 1 or hidden < 1:
-                    raise ValueError(
-                        f"seg_feature_dim and seg_proj_hidden must be positive, "
-                        f"got {feat_dim}, {hidden}"
-                    )
-                self.seg_feature_dim = feat_dim
-                self.seg_projection = nn.Sequential(
-                    nn.Linear(feat_dim, hidden),
-                    nn.GELU(),
-                    nn.Linear(hidden, d_model),
-                )
-                # Xavier init is a reasonable default for a 2-layer MLP whose
-                # output is added to CLIP token activations at init scale.
-                for m in self.seg_projection.modules():
-                    if isinstance(m, nn.Linear):
-                        nn.init.xavier_uniform_(m.weight)
-                        nn.init.zeros_(m.bias)
-                for p in self.seg_projection.parameters():
-                    p.requires_grad = True
-                logger.info(
-                    f"B5[continuous]: seg_projection MLP {feat_dim}->{hidden}->{d_model}, "
-                    f"num_patches={self._seg_num_patches}"
-                )
+            else:
+                patch_size = self.clip.vision_model.config.patch_size
+                image_size = self.clip.vision_model.config.image_size
+                self._seg_grid_size = image_size // patch_size
+                self._seg_num_patches = self._seg_grid_size * self._seg_grid_size
 
-            # Activation memory: segment injection sits BEFORE the 24-layer ViT
-            # encoder, so autograd must retain every layer's activations to
-            # backprop into seg_embedding / seg_projection. Enable gradient
-            # checkpointing on the vision encoder to drop them.
-            self.clip.gradient_checkpointing_enable()
-            self.clip.config.use_cache = False
-            logger.info(f"B5[{seg_mode}]: enabled gradient checkpointing on CLIPModel")
+                if seg_mode in ("spatial", "semantic"):
+                    vocab = config['model'].get('seg_vocab_size')
+                    if not isinstance(vocab, int) or vocab < 1:
+                        raise ValueError(
+                            f"model.seg_vocab_size must be a positive int for seg_mode={seg_mode}, "
+                            f"got {vocab!r}"
+                        )
+                    init_std = float(config['model'].get('seg_init_std', 0.02))
+                    self.seg_vocab_size = vocab
+                    self.seg_embedding = nn.Embedding(vocab, d_model)
+                    # Normal init at CLIP positional-embedding scale. Zero-init combined
+                    # with cosine LR decay produced a dead embedding on b5-aware that
+                    # never learned; std=0.02 matches HF CLIP's positional_embedding.
+                    nn.init.normal_(self.seg_embedding.weight, mean=0.0, std=init_std)
+                    self.seg_embedding.weight.requires_grad = True
+                    logger.info(
+                        f"B5[{seg_mode}]: seg_embedding vocab={vocab}, d_model={d_model}, "
+                        f"init_std={init_std}, num_patches={self._seg_num_patches}"
+                    )
+                else:  # continuous
+                    feat_dim = int(config['model'].get('seg_feature_dim', 5))
+                    hidden = int(config['model'].get('seg_proj_hidden', 128))
+                    if feat_dim < 1 or hidden < 1:
+                        raise ValueError(
+                            f"seg_feature_dim and seg_proj_hidden must be positive, "
+                            f"got {feat_dim}, {hidden}"
+                        )
+                    self.seg_feature_dim = feat_dim
+                    self.seg_projection = nn.Sequential(
+                        nn.Linear(feat_dim, hidden),
+                        nn.GELU(),
+                        nn.Linear(hidden, d_model),
+                    )
+                    # Xavier init is a reasonable default for a 2-layer MLP whose
+                    # output is added to CLIP token activations at init scale.
+                    for m in self.seg_projection.modules():
+                        if isinstance(m, nn.Linear):
+                            nn.init.xavier_uniform_(m.weight)
+                            nn.init.zeros_(m.bias)
+                    for p in self.seg_projection.parameters():
+                        p.requires_grad = True
+                    logger.info(
+                        f"B5[continuous]: seg_projection MLP {feat_dim}->{hidden}->{d_model}, "
+                        f"num_patches={self._seg_num_patches}"
+                    )
+
+                # Activation memory: segment injection sits BEFORE the 24-layer ViT
+                # encoder, so autograd must retain every layer's activations to
+                # backprop into seg_embedding / seg_projection. Enable gradient
+                # checkpointing on the vision encoder to drop them. B5d multistream
+                # fuses after the encoder and intentionally does not use this.
+                self.clip.gradient_checkpointing_enable()
+                self.clip.config.use_cache = False
+                logger.info(f"B5[{seg_mode}]: enabled gradient checkpointing on CLIPModel")
 
     def _apply_freezing_strategy(self):
         """
@@ -291,27 +304,56 @@ class DualEncoder(nn.Module):
                         if m.bias is not None:
                             nn.init.constant_(m.bias, 0)
 
-    def _get_image_features(self, images, seg_ids=None):
+    def _get_image_features(self, images, seg_ids=None, sam_features=None):
         """
         Extract image features and standardize embeddings to float32.
 
         `seg_ids` carries either per-patch integer IDs (LongTensor [B, 576],
         seg_mode in {spatial, semantic}) or per-patch continuous features
         (FloatTensor [B, 576, F], seg_mode='continuous').
+        `sam_features` carries B5d dense SAM encoder features
+        (FloatTensor [B, 256, H, W], seg_mode='multistream').
 
         Behavior matrix:
-            seg_mode | seg_ids | path
-            ---------+---------+--------------------------------------
-            None     | None    | standard CLIP (B0/B0+/B1/B2/B4/etc)
-            None     | tensor  | ValueError (gating mismatch)
-            set      | None    | standard CLIP (no seg injection)
-            set      | tensor  | explicit forward with seg injection
+            seg_mode      | side input        | path
+            --------------+-------------------+--------------------------------------
+            None          | None              | standard CLIP (B0/B0+/B1/B2/B4/etc)
+            spatial/etc   | seg_ids tensor    | explicit forward with seg injection
+            spatial/etc   | None              | standard CLIP (aug views)
+            multistream   | sam_features      | CLS + SAM fusion before projection
+            multistream   | None              | standard CLIP fallback
 
-        The (set, None) cell is intentional: the augmented intra-modal views use
-        RandomResizedCrop(scale=(aug_crop_scale_min, 1.0)) which destroys spatial
-        alignment with the precomputed segment map. The clean inter-modal view
-        uses seg_ids; the augmented views drop them.
+        The (spatial/etc, None) cell is intentional: the augmented intra-modal
+        views use RandomResizedCrop(scale=(aug_crop_scale_min, 1.0)) which
+        destroys spatial alignment with the precomputed segment map. B5d can
+        reuse sam_features for clean and augmented views because fusion happens
+        after CLIP's vision encoder.
         """
+        if sam_features is not None and self.seg_mode != "multistream":
+            raise ValueError(
+                "sam_features was provided but model.seg_mode is not 'multistream'. "
+                "Either configure B5d or stop passing sam_features."
+            )
+        if seg_ids is not None and self.seg_mode == "multistream":
+            raise ValueError("seg_ids cannot be used with B5d multistream mode; pass sam_features instead.")
+
+        if self.seg_mode == "multistream" and sam_features is not None:
+            if self.fusion_module is None:
+                raise RuntimeError("model.seg_mode='multistream' but fusion_module is not initialized.")
+            if sam_features.dim() != 4:
+                raise ValueError(
+                    f"sam_features must have shape [B, C, H, W], got {tuple(sam_features.shape)}."
+                )
+            if sam_features.size(0) != images.size(0):
+                raise ValueError(
+                    f"sam_features batch size {sam_features.size(0)} does not match images batch {images.size(0)}."
+                )
+            vision_out = self.clip.vision_model(pixel_values=images)
+            pooled = vision_out.pooler_output.float()          # [B, 1024]
+            fused = self.fusion_module(pooled, sam_features)   # [B, 1024]
+            image_features = self.clip.visual_projection(fused)
+            return image_features.float()
+
         if seg_ids is None:
             image_embeds = self.clip.get_image_features(pixel_values=images)
             return image_embeds.float()
@@ -397,7 +439,7 @@ class DualEncoder(nn.Module):
         )
         return text_embeds.float()
 
-    def forward(self, images, input_ids, attention_mask, seg_ids=None):
+    def forward(self, images, input_ids, attention_mask, seg_ids=None, sam_features=None):
         """
         Forward pass returning L2-normalized embeddings.
 
@@ -407,13 +449,15 @@ class DualEncoder(nn.Module):
             attention_mask: [Batch, SeqLen] - Attention mask
             seg_ids: [Batch, 576] LongTensor (spatial/semantic) or
                      [Batch, 576, F] FloatTensor (continuous) — REQUIRED iff
-                     config.model.seg_mode is set, must be None otherwise.
+                     config.model.seg_mode is spatial/semantic/continuous.
+            sam_features: [Batch, 256, H, W] FloatTensor for
+                     config.model.seg_mode='multistream'.
 
         Returns:
             img_embeds: [Batch, embed_dim] - L2 normalized image embeddings
             txt_embeds: [Batch, embed_dim] - L2 normalized text embeddings
         """
-        image_embeds = self._get_image_features(images, seg_ids=seg_ids)
+        image_embeds = self._get_image_features(images, seg_ids=seg_ids, sam_features=sam_features)
         text_embeds = self._get_text_features(input_ids, attention_mask)
 
         # Optional: Additional projection to match target embed_dim
@@ -427,18 +471,17 @@ class DualEncoder(nn.Module):
 
         return image_embeds, text_embeds
 
-    def encode_image(self, images, seg_ids=None):
+    def encode_image(self, images, seg_ids=None, sam_features=None):
         """
         Encode images only (L2-normalized). For use with separate text encoding
         (e.g. hard negatives, intra-modal augmented views).
 
         Args:
             images:  [B, 3, 336, 336]
-            seg_ids: optional per-patch tensor — REQUIRED iff config.model.seg_mode
-                     is set; otherwise must be None. See _get_image_features for
-                     the four-quadrant gating.
+            seg_ids: optional per-patch tensor for spatial/semantic/continuous.
+            sam_features: optional dense SAM encoder features for multistream.
         """
-        image_embeds = self._get_image_features(images, seg_ids=seg_ids)
+        image_embeds = self._get_image_features(images, seg_ids=seg_ids, sam_features=sam_features)
         if self.image_proj is not None:
             image_embeds = self.image_proj(image_embeds)
         return F.normalize(image_embeds, p=2, dim=1)
@@ -483,3 +526,96 @@ class DualEncoder(nn.Module):
             text_embeds = self.text_proj(text_embeds)
         return F.normalize(text_embeds, p=2, dim=1)
 
+
+class GatedFusion(nn.Module):
+    """B5d: gated residual fusion of CLIP CLS + SAM spatial features."""
+
+    def __init__(self, d_model=1024, sam_feature_dim=256):
+        super().__init__()
+        self.sam_pool = nn.AdaptiveAvgPool2d(1)
+        self.sam_proj = nn.Linear(sam_feature_dim, d_model)
+        self.gate_proj = nn.Linear(d_model * 2, d_model)
+        self.last_gate_mean = None
+        nn.init.xavier_uniform_(self.sam_proj.weight)
+        nn.init.zeros_(self.sam_proj.bias)
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.zeros_(self.gate_proj.bias)
+
+    def forward(self, cls, sam_features):
+        sam_features = sam_features.to(device=cls.device, dtype=cls.dtype)
+        sam_vec = self.sam_pool(sam_features).flatten(1)
+        sam_vec = self.sam_proj(sam_vec)
+        gate = torch.sigmoid(self.gate_proj(torch.cat([cls, sam_vec], dim=-1)))
+        self.last_gate_mean = gate.detach().float().mean()
+        return (1.0 - gate) * cls + gate * sam_vec
+
+
+class CrossAttentionFusion(nn.Module):
+    """B5d: CLIP CLS attends to SAM spatial tokens via cross-attention."""
+
+    def __init__(self, d_model=1024, sam_feature_dim=256, num_heads=8):
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by num_heads={num_heads}.")
+        self.sam_proj = nn.Linear(sam_feature_dim, d_model)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+        self.norm = nn.LayerNorm(d_model)
+        nn.init.xavier_uniform_(self.sam_proj.weight)
+        nn.init.zeros_(self.sam_proj.bias)
+
+    def forward(self, cls, sam_features):
+        sam_features = sam_features.to(device=cls.device, dtype=cls.dtype)
+        sam_tokens = sam_features.flatten(2).transpose(1, 2)  # [B, H*W, C]
+        sam_tokens = self.sam_proj(sam_tokens)
+        query = cls.unsqueeze(1)
+        attn_out, _ = self.cross_attn(query, sam_tokens, sam_tokens, need_weights=False)
+        return self.norm(cls + attn_out.squeeze(1))
+
+
+class ConcatFusion(nn.Module):
+    """B5d: concatenation + MLP projection fusion."""
+
+    def __init__(self, d_model=1024, sam_feature_dim=256):
+        super().__init__()
+        self.sam_pool = nn.AdaptiveAvgPool2d(1)
+        self.sam_proj = nn.Linear(sam_feature_dim, d_model)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        nn.init.xavier_uniform_(self.sam_proj.weight)
+        nn.init.zeros_(self.sam_proj.bias)
+        for m in self.mlp.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, cls, sam_features):
+        sam_features = sam_features.to(device=cls.device, dtype=cls.dtype)
+        sam_vec = self.sam_pool(sam_features).flatten(1)
+        sam_vec = self.sam_proj(sam_vec)
+        return self.mlp(torch.cat([cls, sam_vec], dim=-1))
+
+
+def build_fusion_module(fusion_type, config, d_model=1024):
+    sam_feature_dim = int(config['model'].get('sam_feature_dim', 256))
+    if fusion_type == "gate":
+        return GatedFusion(d_model=d_model, sam_feature_dim=sam_feature_dim)
+    if fusion_type == "cross_attn":
+        num_heads = int(config['model'].get('fusion_num_heads', 8))
+        return CrossAttentionFusion(
+            d_model=d_model,
+            sam_feature_dim=sam_feature_dim,
+            num_heads=num_heads,
+        )
+    if fusion_type == "concat_proj":
+        return ConcatFusion(d_model=d_model, sam_feature_dim=sam_feature_dim)
+    raise ValueError(
+        f"Unknown model.fusion_type={fusion_type!r}. "
+        "Expected one of 'gate', 'cross_attn', 'concat_proj'."
+    )

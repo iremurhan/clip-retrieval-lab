@@ -14,9 +14,10 @@ model:
   text_model_name: null
   unfreeze_vision_layers: 4
   unfreeze_strategy: "full"
-  # B5a/B5b/B5c only: segment-aware patch enrichment. Leave seg_mode=null to
+  # B5a/B5b/B5c/B5d only. Leave seg_mode=null to
   # disable the variant entirely (zero overhead for B0/B0+/B1/B2/B4).
-  # seg_mode: "spatial" (B5a) | "semantic" (B5b) | "continuous" (B5c) | null
+  # seg_mode: "spatial" (B5a) | "semantic" (B5b) | "continuous" (B5c) |
+  #           "multistream" (B5d) | null
   seg_mode: null
   # Discrete modes (spatial/semantic): size of the embedding table.
   seg_vocab_size: null
@@ -25,6 +26,11 @@ model:
   # Continuous mode only: per-segment feature dim and MLP hidden width.
   seg_feature_dim: 5
   seg_proj_hidden: 128
+  # B5d multistream fusion. Used only when seg_mode="multistream".
+  fusion_type: null          # "gate" | "cross_attn" | "concat_proj"
+  sam_feature_pool_size: 8
+  sam_feature_dim: 256
+  fusion_num_heads: 8        # cross_attn only
 
 loss:
   type: infonce
@@ -54,9 +60,11 @@ training:
   clip_projection_lr: 0.00005
   backbone_lr: 0.000002
   # B5a/B5b/B5c: base LR for seg_embedding / seg_projection groups.
+  # B5d:         base LR for fusion_module group.
   # B4:           base LR for cls_head group.
-  # All three groups use a flat (non-cosine) schedule; see _CONSTANT_LR_GROUPS in run.py.
+  # These fresh groups use a flat (non-cosine) schedule; see _CONSTANT_LR_GROUPS in run.py.
   seg_lr: 0.001
+  fusion_lr: 0.001
   cls_lr: 0.001
   weight_decay: 0.01
 

@@ -394,6 +394,99 @@ class SegmentFeatureLoader:
 
 
 # ============================================================================
+# SAM Encoder-Feature Loader (B5d multistream only)
+# ============================================================================
+
+class SAMFeatureLoader:
+    """
+    Loads precomputed dense SAM image-encoder features for B5d multistream fusion.
+
+    Layout (under <sam_feature_dir>):
+        sam_encoder_features_pool8.pt dict[str -> FloatTensor (256, 8, 8)]
+
+    The file is packed into one shared-memory tensor so DataLoader workers do not
+    repeatedly copy a large Python dict after fork.
+    """
+
+    def __init__(self, sam_feature_dir, pool_size=8, sam_feature_dim=256):
+        if not os.path.isdir(sam_feature_dir):
+            raise FileNotFoundError(
+                f"sam_feature_dir does not exist: {sam_feature_dir}. "
+                "Run scripts/preprocess/precompute_sam.py --encoder_features first."
+            )
+        self.sam_feature_dir = sam_feature_dir
+        self.pool_size = int(pool_size)
+        self.sam_feature_dim = int(sam_feature_dim)
+        if self.pool_size < 1:
+            raise ValueError(f"pool_size must be >= 1, got {pool_size!r}")
+        if self.sam_feature_dim < 1:
+            raise ValueError(f"sam_feature_dim must be >= 1, got {sam_feature_dim!r}")
+
+        pt_path = os.path.join(
+            sam_feature_dir,
+            f"sam_encoder_features_pool{self.pool_size}.pt",
+        )
+        if not os.path.isfile(pt_path):
+            raise FileNotFoundError(
+                f"Precomputed SAM encoder features not found: {pt_path}. "
+                "Run scripts/preprocess/precompute_sam.py --merge_encoder_features after extraction."
+            )
+
+        logger.info(f"Loading SAM encoder features: {pt_path}")
+        raw = torch.load(pt_path, map_location="cpu", weights_only=True)
+        if not isinstance(raw, dict):
+            raise TypeError(
+                f"{pt_path} must contain a dict[str, Tensor], got {type(raw).__name__}"
+            )
+        if not raw:
+            raise ValueError(f"{pt_path} contains an empty feature dict.")
+
+        stems = list(raw.keys())
+        first = raw[stems[0]]
+        expected_shape = (self.sam_feature_dim, self.pool_size, self.pool_size)
+        if tuple(first.shape) != expected_shape:
+            raise ValueError(
+                f"First SAM feature has shape {tuple(first.shape)}, expected {expected_shape}."
+            )
+
+        packed = torch.empty((len(stems), *expected_shape), dtype=first.dtype)
+        for i, s in enumerate(stems):
+            tensor = raw[s]
+            if tuple(tensor.shape) != expected_shape:
+                raise ValueError(
+                    f"SAM features for {s!r} have shape {tuple(tensor.shape)}, "
+                    f"expected {expected_shape}."
+                )
+            packed[i] = tensor
+        del raw
+        packed.share_memory_()
+        self._packed = packed
+        order = np.argsort(np.asarray(stems, dtype=np.str_))
+        self._stems_sorted = np.asarray(stems, dtype=np.str_)[order]
+        self._stems_order = order.astype(np.int64)
+        logger.info(
+            f"Loaded {len(stems)} SAM encoder-feature entries (packed, shared) from {pt_path}"
+        )
+
+    def load(self, filename):
+        """Return FloatTensor [C, H, W] for one image."""
+        stem = os.path.splitext(os.path.basename(filename))[0]
+        pos = int(np.searchsorted(self._stems_sorted, stem))
+        if pos >= self._stems_sorted.shape[0] or str(self._stems_sorted[pos]) != stem:
+            raise KeyError(
+                f"Precomputed SAM encoder features missing for '{stem}' "
+                f"(dir={self.sam_feature_dir}). Every training image must be covered."
+            )
+        feat = self._packed[int(self._stems_order[pos])].float()
+        if not torch.isfinite(feat).all():
+            raise ValueError(
+                f"SAM encoder features for {stem!r} contain NaN/Inf "
+                f"(dir={self.sam_feature_dir})."
+            )
+        return feat
+
+
+# ============================================================================
 # Dataset
 # ============================================================================
 
@@ -434,6 +527,7 @@ class CaptionImageDataset(Dataset):
         transform=None,
         transform_aug=None,
         seg_loader=None,
+        sam_feature_loader=None,
         emit_aug_views=False,
     ):
         """
@@ -456,6 +550,10 @@ class CaptionImageDataset(Dataset):
                 (B5a/B5b/B5c). Augmented views drop seg_ids since
                 RandomResizedCrop breaks spatial alignment with the
                 precomputed map.
+            sam_feature_loader (SAMFeatureLoader, optional): If set, __getitem__
+                returns 'sam_features' for B5d multistream fusion. The trainer
+                reuses the same frozen SAM encoder feature map for clean and
+                augmented image views.
             emit_aug_views (bool): If True, __getitem__ returns image_aug_a /
                 image_aug_b keys (two independent rolls of transform_aug).
                 If False (B0 minimal baseline, val, test), the augmented
@@ -477,6 +575,7 @@ class CaptionImageDataset(Dataset):
         self.transform = transform
         self.transform_aug = transform_aug
         self.seg_loader = seg_loader
+        self.sam_feature_loader = sam_feature_loader
         self.emit_aug_views = bool(emit_aug_views)
         if self.emit_aug_views and transform_aug is None:
             raise ValueError(
@@ -536,24 +635,18 @@ class CaptionImageDataset(Dataset):
         logger.info(f"Found {len(self.samples)} samples for split '{split}'.")
 
         # Fail-fast integrity check: verify every referenced image exists
-        # before the DataLoader is built. Mirrors the path resolution in
-        # __getitem__ but runs once on unique (filepath, filename) pairs.
+        # before the DataLoader is built. Strict path resolution: image lives
+        # at images_root_path/filepath/filename (no fallback). A missing
+        # subdirectory must surface as a hard failure, not a silent reroute
+        # to a flat layout that masks bind-mount problems.
         unique_pairs = set(zip(filepaths, filenames))
         missing = []
         for fp, fn in unique_pairs:
             fp_clean = fp.strip() if fp else ''
-            if fp_clean:
-                p1 = os.path.join(self.images_root_path, fp_clean, fn)
-                if os.path.exists(p1):
-                    continue
-                p2 = os.path.join(self.images_root_path, fn)
-                if os.path.exists(p2):
-                    continue
-                missing.append(p1)
-            else:
-                p = os.path.join(self.images_root_path, fn)
-                if not os.path.exists(p):
-                    missing.append(p)
+            p = os.path.join(self.images_root_path, fp_clean, fn) if fp_clean \
+                else os.path.join(self.images_root_path, fn)
+            if not os.path.exists(p):
+                missing.append(p)
         if missing:
             preview = '\n  '.join(missing[:20])
             more = f"\n  ... and {len(missing) - 20} more" if len(missing) > 20 else ''
@@ -575,12 +668,11 @@ class CaptionImageDataset(Dataset):
         filepath = sample.get('filepath', '').strip()
         filename = sample['filename']
 
-        if filepath:
-            image_path = os.path.join(self.images_root_path, filepath, filename)
-            if not os.path.exists(image_path):
-                image_path = os.path.join(self.images_root_path, filename)
-        else:
-            image_path = os.path.join(self.images_root_path, filename)
+        # Strict path resolution: images_root_path/filepath/filename. No flat
+        # fallback — a missing val2014/ (or train2014/) subdirectory must fail
+        # loudly so bind-mount or NFS issues are not silently masked.
+        image_path = os.path.join(self.images_root_path, filepath, filename) if filepath \
+            else os.path.join(self.images_root_path, filename)
 
         # Fail fast on missing images
         if not os.path.exists(image_path):
@@ -621,6 +713,8 @@ class CaptionImageDataset(Dataset):
         # Augmented views skip this — RandomResizedCrop breaks alignment.
         if self.seg_loader is not None:
             out['seg_ids'] = self.seg_loader.load(filename)
+        if self.sam_feature_loader is not None:
+            out['sam_features'] = self.sam_feature_loader.load(filename)
         return out
 
 
@@ -693,11 +787,25 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform = build_eval_transform(image_size)
         transform_aug = None
 
-    # B5a/B5b/B5c gating: build SegmentFeatureLoader only when model.seg_mode
-    # is set. Every other variant pays zero overhead (no I/O, no batch keys).
+    # B5 gating: build exactly one side-input loader when model.seg_mode requests
+    # it. Every other variant pays zero overhead (no I/O, no batch keys).
     seg_loader = None
+    sam_feature_loader = None
     seg_mode = config.get('model', {}).get('seg_mode')
-    if seg_mode is not None:
+    if seg_mode == "multistream":
+        sam_feature_dir = config['data']['sam_feature_dir']
+        pool_size = int(config['model'].get('sam_feature_pool_size', 8))
+        sam_feature_dim = int(config['model'].get('sam_feature_dim', 256))
+        sam_feature_loader = SAMFeatureLoader(
+            sam_feature_dir=sam_feature_dir,
+            pool_size=pool_size,
+            sam_feature_dim=sam_feature_dim,
+        )
+        logger.info(
+            f"B5d SAM feature loader: dir={sam_feature_dir}, "
+            f"shape=({sam_feature_dim}, {pool_size}, {pool_size})"
+        )
+    elif seg_mode is not None:
         seg_map_dir = config['data']['seg_map_dir']
         # patch_size is derived from the CLIP model name, not hardcoded:
         # 'clip-vit-large-patch14-336' -> patch=14.
@@ -736,6 +844,7 @@ def create_image_text_dataloader(config, tokenizer, split='train'):
         transform=transform,
         transform_aug=transform_aug,
         seg_loader=seg_loader,
+        sam_feature_loader=sam_feature_loader,
         emit_aug_views=emit_aug_views,
     )
 

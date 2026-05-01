@@ -1,7 +1,7 @@
 """
 scripts/preprocess/precompute_sam.py
 -------------------------------------
-Two-stage SAM (Segment Anything) precomputation for the B5a/B5b/B5c variants.
+SAM (Segment Anything) precomputation for B5 variants.
 
 Stage 1 — SAM mask generation (default mode, --seg_mode not set):
     For each image, runs SamAutomaticMaskGenerator and serializes the aggregated
@@ -28,6 +28,13 @@ Stage 2 — per-mode post-processing (--seg_mode spatial|semantic|continuous):
 
 Stage 2 does NOT run SAM; it only reads npz files, so it is fast.
 
+B5d — SAM encoder feature extraction (--encoder_features):
+    Runs only sam.image_encoder and saves dense frozen encoder features for
+    multistream fusion. Per-image shards are written under
+    <output_dir>/pool{pool_size}_shards/<stem>.pt; after all shards complete,
+    --merge_encoder_features writes the single dict consumed by training:
+    <output_dir>/sam_encoder_features_pool{pool_size}.pt.
+
 Usage (stage 1 — SLURM array, 8 shards):
     sbatch --array=0-7 ... \
         --wrap "python scripts/precompute_sam.py \
@@ -42,6 +49,14 @@ Usage (stage 2 — single process per mode):
         --dataset coco --image_dir datasets/coco \
         --coco_annotations datasets/coco/annotations
     python scripts/preprocess/precompute_sam.py --seg_mode continuous  --output_dir datasets/coco/sam_masks
+
+Usage (B5d encoder features):
+    python scripts/preprocess/precompute_sam.py --encoder_features \
+        --dataset coco --image_dir datasets/coco \
+        --output_dir datasets/coco/sam_encoder_features \
+        --sam_checkpoint checkpoints/sam_vit_b.pth --pool_size 8
+    python scripts/preprocess/precompute_sam.py --merge_encoder_features \
+        --output_dir datasets/coco/sam_encoder_features --pool_size 8
 """
 
 import argparse
@@ -51,6 +66,7 @@ import sys
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
 
@@ -547,13 +563,20 @@ def _load_coco_instance_annotations(ann_dir: str) -> dict:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Precompute SAM segment maps (stage 1) or per-patch features (stage 2)."
+        description=(
+            "Precompute SAM segment maps/per-patch features (B5a/b/c) or "
+            "SAM encoder features (B5d)."
+        )
     )
     # Stage-selection flag. If set, runs the post-processing pipeline against
     # existing .npz files in --output_dir and writes a single .pt file.
     p.add_argument("--seg_mode", type=str, default=None,
                    choices=["spatial", "semantic", "continuous"],
                    help="Stage 2: post-process existing .npz files into per-patch tensors.")
+    p.add_argument("--encoder_features", action="store_true",
+                   help="B5d: extract sam.image_encoder features into per-image shard .pt files.")
+    p.add_argument("--merge_encoder_features", action="store_true",
+                   help="B5d: merge per-image encoder feature shards into one dict.")
 
     # Stage 1 requires --dataset / --image_dir / --sam_checkpoint.
     # Stage 2 requires --output_dir always; --dataset / --image_dir / --coco_annotations
@@ -575,6 +598,10 @@ def parse_args() -> argparse.Namespace:
                    help="Stage 1 only: total number of shards.")
     p.add_argument("--points_per_side", type=int, default=32,
                    help="Stage 1 only: SamAutomaticMaskGenerator.points_per_side.")
+    p.add_argument("--pool_size", type=int, default=8,
+                   help="B5d only: adaptive-average-pool SAM's 64x64 encoder map to this size.")
+    p.add_argument("--max_images", type=int, default=None,
+                   help="B5d/debug only: cap images after deterministic enumeration.")
 
     # Stage 2 knobs.
     p.add_argument("--image_size", type=int, default=336,
@@ -709,6 +736,127 @@ def _run_stage2(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _sam_feature_shard_dir(output_dir: str, pool_size: int) -> str:
+    return os.path.join(output_dir, f"pool{pool_size}_shards")
+
+
+def _sam_feature_final_path(output_dir: str, pool_size: int) -> str:
+    return os.path.join(output_dir, f"sam_encoder_features_pool{pool_size}.pt")
+
+
+def _preprocess_image_for_sam_encoder(sam, resize_transform, image_path: str, device: str) -> torch.Tensor:
+    image = Image.open(image_path).convert("RGB")
+    image_np = resize_transform.apply_image(np.array(image))
+    tensor = torch.as_tensor(image_np, device=device)
+    tensor = tensor.permute(2, 0, 1).contiguous()[None].float()
+    return sam.preprocess(tensor)
+
+
+@torch.inference_mode()
+def _extract_sam_encoder_feature(sam, resize_transform, image_path: str,
+                                 device: str, pool_size: int) -> torch.Tensor:
+    sam_input = _preprocess_image_for_sam_encoder(sam, resize_transform, image_path, device)
+    feat = sam.image_encoder(sam_input)  # [1, 256, 64, 64] for SAM ViT-B
+    if pool_size != feat.shape[-1]:
+        feat = F.adaptive_avg_pool2d(feat, (pool_size, pool_size))
+    return feat.squeeze(0).detach().cpu().to(torch.float16)
+
+
+def _merge_sam_encoder_features(args: argparse.Namespace) -> None:
+    """Merge B5d per-image SAM encoder feature shards into one training dict."""
+    src_dir = _sam_feature_shard_dir(args.output_dir, args.pool_size)
+    if not os.path.isdir(src_dir):
+        raise FileNotFoundError(f"SAM encoder feature shard directory does not exist: {src_dir}")
+
+    files = sorted(
+        os.path.join(src_dir, f)
+        for f in os.listdir(src_dir)
+        if f.endswith(".pt") and not f.endswith(".tmp")
+    )
+    if not files:
+        raise RuntimeError(f"No per-image .pt files found under {src_dir}")
+
+    table = {}
+    for path in tqdm(files, desc=f"merge_encoder:pool{args.pool_size}", file=sys.stdout):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        tensor = torch.load(path, map_location="cpu", weights_only=True)
+        if tensor.dim() != 3:
+            raise ValueError(f"{path} has shape {tuple(tensor.shape)}, expected [C, H, W].")
+        table[stem] = tensor
+
+    out_path = _sam_feature_final_path(args.output_dir, args.pool_size)
+    tmp_path = out_path + ".tmp"
+    torch.save(table, tmp_path)
+    os.replace(tmp_path, out_path)
+    logger.info(f"Wrote merged SAM encoder features: {out_path} ({len(table)} entries)")
+
+
+def _run_encoder_features(args: argparse.Namespace) -> None:
+    """Extract B5d SAM image-encoder features as restartable per-image shards."""
+    if args.dataset is None or args.image_dir is None or args.sam_checkpoint is None:
+        raise ValueError(
+            "B5d encoder feature extraction requires --dataset, --image_dir, "
+            "and --sam_checkpoint."
+        )
+    if args.pool_size < 1:
+        raise ValueError(f"--pool_size must be >= 1, got {args.pool_size}")
+    if not os.path.isfile(args.sam_checkpoint):
+        raise FileNotFoundError(f"SAM checkpoint not found: {args.sam_checkpoint}")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    from segment_anything import sam_model_registry
+    from segment_anything.utils.transforms import ResizeLongestSide
+
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Loading SAM checkpoint: {args.sam_checkpoint} (type={args.sam_model_type}) on {device}")
+    sam = sam_model_registry[args.sam_model_type](checkpoint=args.sam_checkpoint)
+    sam.to(device=device)
+    sam.eval()
+    resize_transform = ResizeLongestSide(sam.image_encoder.img_size)
+
+    all_paths = enumerate_images(args.dataset, args.image_dir)
+    if args.max_images is not None:
+        all_paths = all_paths[:int(args.max_images)]
+    shard = shard_paths(all_paths, args.shard_id, args.num_shards)
+
+    out_dir = _sam_feature_shard_dir(args.output_dir, args.pool_size)
+    os.makedirs(out_dir, exist_ok=True)
+    logger.info(
+        f"Encoder feature shard {args.shard_id}/{args.num_shards}: "
+        f"processing {len(shard)} images -> {out_dir}"
+    )
+
+    n_done = 0
+    n_skipped = 0
+    n_failed = 0
+    for img_path in tqdm(shard, desc=f"encoder {args.shard_id}/{args.num_shards}", file=sys.stdout):
+        stem = os.path.splitext(os.path.basename(img_path))[0]
+        out_path = os.path.join(out_dir, f"{stem}.pt")
+        if os.path.isfile(out_path):
+            n_skipped += 1
+            continue
+        try:
+            feat = _extract_sam_encoder_feature(
+                sam, resize_transform, img_path, device, args.pool_size)
+            tmp_path = out_path + ".tmp"
+            torch.save(feat, tmp_path)
+            os.replace(tmp_path, out_path)
+            n_done += 1
+        except Exception as e:  # noqa: BLE001
+            n_failed += 1
+            logger.error(f"FAILED on {img_path}: {type(e).__name__}: {e}")
+
+    logger.info(
+        f"Encoder feature shard {args.shard_id}/{args.num_shards} done. "
+        f"written={n_done}, skipped={n_skipped}, failed={n_failed}"
+    )
+    if n_failed > 0:
+        sys.exit(1)
+    if args.num_shards == 1:
+        _merge_sam_encoder_features(args)
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -716,6 +864,26 @@ def main() -> None:
         datefmt="%m/%d/%Y %H:%M:%S",
     )
     args = parse_args()
+
+    selected_modes = sum([
+        args.seg_mode is not None,
+        bool(args.encoder_features),
+        bool(args.merge_encoder_features),
+    ])
+    if selected_modes > 1:
+        raise ValueError(
+            "Choose only one of --seg_mode, --encoder_features, or --merge_encoder_features."
+        )
+
+    # B5d dispatches before mask-generation setup. Merge does not need SAM.
+    if args.merge_encoder_features:
+        if args.pool_size < 1:
+            raise ValueError(f"--pool_size must be >= 1, got {args.pool_size}")
+        _merge_sam_encoder_features(args)
+        return
+    if args.encoder_features:
+        _run_encoder_features(args)
+        return
 
     # Stage 2 dispatches before any SAM setup.
     if args.seg_mode is not None:

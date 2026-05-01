@@ -11,6 +11,16 @@ runs:
       loss.intra_txt_weight: 0
       augment.k_photometric_augs: 0
 
+  B0_proj1024:
+    description: >-
+      B0 with an additional learned projection from CLIP's native 768-d joint
+      space into 1024 dimensions for both image and text embeddings. Tests
+      whether a wider retrieval embedding improves the minimal fine-tune
+      baseline.
+    parent: B0
+    overrides:
+      model.embed_dim: 1024
+
   B0_uf5:
     description: >-
       B0 + unfreeze last 5 vision blocks. Tests whether deeper backbone
@@ -124,6 +134,45 @@ runs:
       model.seg_mode: continuous
       model.seg_feature_dim: 5
       model.seg_proj_hidden: 128
+
+  B5d_multistream_gate:
+    description: >-
+      Multi-stream fusion: frozen SAM ViT-B encoder features fused with CLIP
+      CLS token via learned gate. Tests whether dense spatial features from a
+      complementary vision model improve retrieval when combined post-encoder.
+    parent: B0plus
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: gate
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      training.fusion_lr: 0.001
+
+  B5d_multistream_crossattn:
+    description: >-
+      Multi-stream fusion: frozen SAM ViT-B encoder features fused via
+      cross-attention (CLIP CLS attends to SAM spatial tokens). Tests whether
+      attention-based feature selection outperforms gated mixing.
+    parent: B0plus
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: cross_attn
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      model.fusion_num_heads: 8
+      training.fusion_lr: 0.001
+
+  B5d_multistream_concat:
+    description: >-
+      Multi-stream fusion: frozen SAM ViT-B encoder features fused via
+      concatenation + 2-layer MLP. Baseline fusion with no attention mechanism.
+    parent: B0plus
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: concat_proj
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      training.fusion_lr: 0.001
 
   BLIP_TEXT:
     description: >-

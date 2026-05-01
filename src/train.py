@@ -139,26 +139,30 @@ class Trainer:
         else:
             self.cls_label_map = None
 
-        # B5a/B5b/B5c gating: cached at init so the hot loop is a single bool check.
+        # B5 gating: cached at init so the hot loop is a single bool check.
         self.seg_mode = config.get('model', {}).get('seg_mode')
-        self.use_seg_ids = self.seg_mode is not None
-        if self.use_seg_ids:
+        self.use_seg_ids = self.seg_mode in ("spatial", "semantic", "continuous")
+        self.use_sam_features = self.seg_mode == "multistream"
+        self.last_fusion_grad_norm = 0.0
+        if self.seg_mode is not None:
             if self.cls_weight > 0:
                 raise RuntimeError(
                     "B4 (loss.cls_weight > 0) and B5 (model.seg_mode set) are mutually exclusive: "
-                    "cls_head reads pooler_output while seg-injection rewrites hidden_states. "
+                    "cls_head reads pooler_output while B5 changes the image feature path. "
                     "Either disable cls_weight or unset seg_mode."
                 )
             if self.use_grad_cache:
                 raise RuntimeError(
                     "B5 (model.seg_mode set) is incompatible with training.use_grad_cache=true. "
-                    "GradCache does not yet thread seg_ids; either disable grad_cache or extend "
-                    "src/grad_cache.py to forward seg_ids."
+                    "GradCache does not yet thread B5 side inputs; either disable grad_cache or "
+                    "extend src/grad_cache.py."
                 )
             logger.info(
                 f"B5 active in Trainer: model.seg_mode={self.seg_mode}, "
                 f"vocab={config['model'].get('seg_vocab_size')}, "
-                f"feat_dim={config['model'].get('seg_feature_dim')}"
+                f"feat_dim={config['model'].get('seg_feature_dim')}, "
+                f"sam_feature_dim={config['model'].get('sam_feature_dim')}, "
+                f"sam_pool={config['model'].get('sam_feature_pool_size')}"
             )
 
         # SIGTERM flag — set externally via signal handler in run.py
@@ -175,7 +179,7 @@ class Trainer:
         ]
         self.sugarcrepe_data_dir = None
         for path in _sc_data_dirs:
-            if os.path.isdir(path):
+            if os.path.isfile(os.path.join(path, "replace_obj.json")):
                 self.sugarcrepe_data_dir = path
                 break
         
@@ -186,6 +190,31 @@ class Trainer:
             )
         else:
             logger.info(f"SugarCrepe data_dir found at: {self.sugarcrepe_data_dir}")
+
+        # SugarCrepe uses COCO 2017 val images, independent of the training
+        # dataset. Check both container-relative and shared host paths.
+        configured_sc_images_dir = (
+            config.get("eval", {}).get("sugarcrepe_images_dir")
+        )
+        _sc_image_dirs = [
+            configured_sc_images_dir,
+            "datasets/coco/val2017",
+            "/users/beyza.urhan/experiments/datasets/coco/val2017",
+        ]
+        self.sugarcrepe_images_dir = None
+        for path in _sc_image_dirs:
+            if path and os.path.isfile(os.path.join(path, "000000000139.jpg")):
+                self.sugarcrepe_images_dir = path
+                break
+
+        if self.sugarcrepe_images_dir is None:
+            logger.warning(
+                f"SugarCrepe COCO val2017 images not found in any of: "
+                f"{[p for p in _sc_image_dirs if p]}. "
+                "End-of-training SugarCrepe eval will be skipped."
+            )
+        else:
+            logger.info(f"SugarCrepe images_dir found at: {self.sugarcrepe_images_dir}")
         
         # Initialize WandB run reference and define summary metrics
         self.wandb_run = None
@@ -231,6 +260,18 @@ class Trainer:
         logger.info(f"Resuming successfully from epoch {start_epoch} with Best R@1: {self.best_r1:.2f}")
         
         return start_epoch
+
+    def _compute_fusion_grad_norm(self):
+        fusion = getattr(self.model, "fusion_module", None)
+        if fusion is None:
+            return 0.0
+        total_sq = 0.0
+        for p in fusion.parameters():
+            if p.grad is None:
+                continue
+            param_norm = p.grad.detach().data.norm(2)
+            total_sq += param_norm.item() ** 2
+        return math.sqrt(total_sq)
 
     def save_checkpoint(self, epoch):
         """
@@ -304,6 +345,14 @@ class Trainer:
                         "Check the dataloader factory."
                     )
                 seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
+            sam_features = None
+            if self.use_sam_features:
+                if 'sam_features' not in batch:
+                    raise KeyError(
+                        "B5d active (model.seg_mode='multistream') but batch is missing "
+                        "'sam_features'. Check the dataloader factory."
+                    )
+                sam_features = batch['sam_features'].to(self.device, non_blocking=True)
 
             if step == 0 and epoch == 0:
                 loss_type = self.config['loss']['type']
@@ -408,7 +457,8 @@ class Trainer:
                         if self.cls_weight > 0 and self.model.cls_head is not None:
                             img_embeds, cls_logits = self.model.encode_image_with_cls(images)
                         else:
-                            img_embeds = self.model.encode_image(images, seg_ids=seg_ids)
+                            img_embeds = self.model.encode_image(
+                                images, seg_ids=seg_ids, sam_features=sam_features)
                         txt_embeds = self.model.encode_text(input_ids, attention_mask)
                         img_aug_a_embeds = None
                         img_aug_b_embeds = None
@@ -422,9 +472,11 @@ class Trainer:
                         if intra_img_weight > 0:
                             with torch.no_grad():
                                 img_aug_a_embeds = self.model.encode_image(
-                                    batch['image_aug_a'].to(self.device, non_blocking=True))
+                                    batch['image_aug_a'].to(self.device, non_blocking=True),
+                                    sam_features=sam_features)
                                 img_aug_b_embeds = self.model.encode_image(
-                                    batch['image_aug_b'].to(self.device, non_blocking=True))
+                                    batch['image_aug_b'].to(self.device, non_blocking=True),
+                                    sam_features=sam_features)
 
                         # Merge paraphrase pair + hard-neg text into a single no_grad
                         # encode_text call to avoid redundant kernel launches.
@@ -558,6 +610,7 @@ class Trainer:
                     # Unscale gradients to compute true grad norm
                     self.scaler.unscale_(self.optimizer)
                     grad_norm = compute_grad_norm(self.model)
+                    self.last_fusion_grad_norm = self._compute_fusion_grad_norm()
                     if math.isfinite(grad_norm):
                         self.scaler.step(self.optimizer)
                     else:
@@ -573,7 +626,8 @@ class Trainer:
                     if self.cls_weight > 0 and self.model.cls_head is not None:
                         img_embeds, cls_logits = self.model.encode_image_with_cls(images)
                     else:
-                        img_embeds = self.model.encode_image(images, seg_ids=seg_ids)
+                        img_embeds = self.model.encode_image(
+                            images, seg_ids=seg_ids, sam_features=sam_features)
                     txt_embeds = self.model.encode_text(input_ids, attention_mask)
                     img_aug_a_embeds = None
                     img_aug_b_embeds = None
@@ -586,9 +640,11 @@ class Trainer:
                     if intra_img_weight > 0:
                         with torch.no_grad():
                             img_aug_a_embeds = self.model.encode_image(
-                                batch['image_aug_a'].to(self.device, non_blocking=True))
+                                batch['image_aug_a'].to(self.device, non_blocking=True),
+                                sam_features=sam_features)
                             img_aug_b_embeds = self.model.encode_image(
-                                batch['image_aug_b'].to(self.device, non_blocking=True))
+                                batch['image_aug_b'].to(self.device, non_blocking=True),
+                                sam_features=sam_features)
 
                     # Merge paraphrase pair + hard-neg text into a single no_grad
                     # encode_text call to avoid redundant kernel launches.
@@ -716,6 +772,7 @@ class Trainer:
 
                     # Compute grad norm before optimizer step
                     grad_norm = compute_grad_norm(self.model)
+                    self.last_fusion_grad_norm = self._compute_fusion_grad_norm()
                     if math.isfinite(grad_norm):
                         self.optimizer.step()
                     else:
@@ -766,6 +823,8 @@ class Trainer:
                         }
                         if "loss_cls" in loss_dict:
                             log_dict["train/loss_cls"] = loss_dict["loss_cls"].item()
+                        if self.use_sam_features:
+                            log_dict["train/fusion_module_grad_norm"] = self.last_fusion_grad_norm
                         log_dict.update(lr_dict)
                         wandb.log(log_dict)
                     except Exception as e:
@@ -802,9 +861,21 @@ class Trainer:
                         "Check the dataloader factory."
                     )
                 seg_ids = batch['seg_ids'].to(self.device, non_blocking=True)
+            sam_features = None
+            if self.use_sam_features:
+                if 'sam_features' not in batch:
+                    raise KeyError(
+                        "B5d active but eval batch is missing 'sam_features'. "
+                        "Check the dataloader factory."
+                    )
+                sam_features = batch['sam_features'].to(self.device, non_blocking=True)
 
             with torch.amp.autocast(device_type='cuda', dtype=self.amp_dtype, enabled=self.use_amp):
-                img_emb, txt_emb = self.model(images, input_ids, attention_mask, seg_ids=seg_ids)
+                img_emb, txt_emb = self.model(
+                    images, input_ids, attention_mask,
+                    seg_ids=seg_ids,
+                    sam_features=sam_features,
+                )
             img_embeds_list.append(img_emb.cpu())
             txt_embeds_list.append(txt_emb.cpu())
             image_ids_list.append(batch['image_id'].cpu())
@@ -879,6 +950,12 @@ class Trainer:
         sims = chunked_matmul(img_embeds_unique, txt_embeds)
 
         metrics = self._compute_standard_metrics(img_embeds_unique, txt_embeds, image_ids, unique_image_ids, sims, prefix="val")
+        if self.use_sam_features:
+            fusion = getattr(self.model, "fusion_module", None)
+            gate_mean = getattr(fusion, "last_gate_mean", None)
+            if gate_mean is not None:
+                metrics["val/fusion_gate_mean"] = float(gate_mean.item())
+            metrics["val/fusion_module_grad_norm"] = float(self.last_fusion_grad_norm)
 
         logger.info(
             f"Epoch {epoch} Results:\n"
@@ -1141,15 +1218,16 @@ class Trainer:
         if self.sugarcrepe_data_dir is None:
             logger.info("SugarCrepe data_dir not configured, skipping evaluation.")
             return
+        if self.sugarcrepe_images_dir is None:
+            logger.info("SugarCrepe images_dir not configured, skipping evaluation.")
+            return
 
         logger.info("Running SugarCrepe compositional evaluation...")
         try:
             from .eval.sugarcrepe import evaluate_sugarcrepe
             from .data import build_eval_transform
 
-            images_dir = os.path.join(
-                self.config['data']['images_path'], 'val2014'
-            )
+            images_dir = self.sugarcrepe_images_dir
             max_length = self.config['data']['max_length']
             transform = build_eval_transform(self.config['data']['image_size'])
 

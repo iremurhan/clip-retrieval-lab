@@ -24,12 +24,14 @@ from src.train import Trainer
 
 
 # Param-group names that use a flat LR schedule instead of cosine-with-warmup.
+#   custom_head:  optional image_proj / text_proj when model.embed_dim != native CLIP dim
 #   B5a/B5b: seg_embedding   — fresh nn.Embedding(vocab, d_model)
 #   B5c:     seg_projection  — fresh 2-layer MLP
+#   B5d:     fusion_module   — fresh post-encoder fusion module
 #   B4:      cls_head        — fresh nn.Linear(vision_hidden, num_cls)
 # These are all freshly-initialized parameters; a cosine decay would crush their
 # LR to ~1e-8 by the first epoch, leaving them effectively untrained.
-_CONSTANT_LR_GROUPS = frozenset({"seg_embedding", "seg_projection", "cls_head"})
+_CONSTANT_LR_GROUPS = frozenset({"custom_head", "seg_embedding", "seg_projection", "fusion_module", "cls_head"})
 
 
 def setup_logging():
@@ -53,9 +55,11 @@ def create_clip_optimizer(model, config):
 
     Param groups (created only when their pattern matches >= 1 trainable param):
         clip_proj      visual_projection / text_projection                   lr_clip_proj (cosine)
+        custom_head    optional image_proj / text_proj for non-native dim    lr_clip_proj (constant)
         cls_head       B4 multi-label classifier head                        lr_cls       (constant)
         seg_embedding  B5a/B5b discrete segment embedding table              lr_seg       (constant)
         seg_projection B5c continuous segment MLP                            lr_seg       (constant)
+        fusion_module  B5d multistream fusion module                         lr_fusion    (constant)
         backbone       remaining trainable CLIP layers (last N unfrozen)     lr_backbone  (cosine)
     """
     opt_name = config["training"]["optimizer"].lower()
@@ -64,6 +68,7 @@ def create_clip_optimizer(model, config):
     lr_backbone = float(config["training"].get("backbone_lr", 1e-6))
     lr_seg = float(config["training"].get("seg_lr", 1e-3))
     lr_cls = float(config["training"].get("cls_lr", 1e-3))
+    lr_fusion = float(config["training"].get("fusion_lr", 1e-3))
 
     trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
     clip_proj_params = []
@@ -71,6 +76,7 @@ def create_clip_optimizer(model, config):
     cls_head_params = []
     seg_embed_params = []   # B5a/B5b discrete embedding table
     seg_proj_params = []    # B5c continuous projection MLP
+    fusion_params = []      # B5d multistream post-encoder fusion
     backbone_params = []
 
     for n, p in trainable:
@@ -84,6 +90,8 @@ def create_clip_optimizer(model, config):
             seg_embed_params.append(p)
         elif "seg_projection" in n:
             seg_proj_params.append(p)
+        elif "fusion_module" in n:
+            fusion_params.append(p)
         else:
             backbone_params.append(p)
 
@@ -91,17 +99,15 @@ def create_clip_optimizer(model, config):
     if clip_proj_params:
         param_groups.append({"name": "clip_proj", "params": clip_proj_params, "lr": lr_clip_proj})
     if custom_head_params:
-        raise RuntimeError(
-            "custom_head_params is non-empty but embed_dim is expected to be null. "
-            "This indicates image_proj/text_proj layers exist unexpectedly. "
-            "Check config['model']['embed_dim']."
-        )
+        param_groups.append({"name": "custom_head", "params": custom_head_params, "lr": lr_clip_proj})
     if cls_head_params:
         param_groups.append({"name": "cls_head", "params": cls_head_params, "lr": lr_cls})
     if seg_embed_params:
         param_groups.append({"name": "seg_embedding", "params": seg_embed_params, "lr": lr_seg})
     if seg_proj_params:
         param_groups.append({"name": "seg_projection", "params": seg_proj_params, "lr": lr_seg})
+    if fusion_params:
+        param_groups.append({"name": "fusion_module", "params": fusion_params, "lr": lr_fusion})
     if backbone_params:
         param_groups.append({"name": "backbone", "params": backbone_params, "lr": lr_backbone})
 
@@ -116,7 +122,7 @@ def create_lr_scheduler(optimizer, config, num_training_steps):
     """Per-parameter-group LR scheduler.
 
     Every group uses cosine-with-warmup, EXCEPT groups named in
-    `_CONSTANT_LR_GROUPS` (seg_embedding, seg_projection, cls_head), which use
+    `_CONSTANT_LR_GROUPS` (custom_head, seg_embedding, seg_projection, fusion_module, cls_head), which use
     a flat multiplier of 1.0 so the freshly-initialized parameters keep their
     base LR throughout training. A uniform cosine decay would crush these to
     ~1e-8 by the first epoch (observed bug on b5-aware), leaving them

@@ -14,12 +14,14 @@ Usage (HPC):
     srun python scripts/eval/eval_sugarcrepe.py \
         --checkpoint checkpoints/12345_B0_coco_s42/best_model.pth \
         --wandb_run_id abc123 \
-        --data_dir datasets/sugarcrepe
+        --data_dir datasets/sugarcrepe \
+        --images_dir datasets/coco/val2017
 
 Usage (local, no WandB):
     python scripts/eval/eval_sugarcrepe.py \
         --checkpoint checkpoints/best_model.pth \
-        --data_dir datasets/sugarcrepe
+        --data_dir datasets/sugarcrepe \
+        --images_dir /users/beyza.urhan/experiments/datasets/coco/val2017
 """
 
 import argparse
@@ -74,7 +76,7 @@ def main():
     parser.add_argument("--wandb_run_id", type=str, default=None, help="WandB run ID to resume and log results")
     parser.add_argument("--data_dir", type=str, default="datasets/sugarcrepe", help="Path to SugarCrepe JSON files")
     parser.add_argument("--images_dir", type=str, default=None,
-                        help="Path to COCO val2014 images (default: inferred from checkpoint config)")
+                        help="Path to COCO val2017 images (default: auto-detected)")
     parser.add_argument("--wandb_project", type=str, default=None,
                         help="WandB project name (default: from checkpoint config)")
     args = parser.parse_args()
@@ -106,9 +108,24 @@ def main():
     if args.images_dir:
         images_dir = args.images_dir
     else:
-        base_images_path = config["data"]["images_path"]
-        images_dir = os.path.join(base_images_path, "val2014")
-        logger.info(f"Inferred images_dir from config: {images_dir}")
+        candidates = [
+            config.get("eval", {}).get("sugarcrepe_images_dir"),
+            "datasets/coco/val2017",
+            "/users/beyza.urhan/experiments/datasets/coco/val2017",
+        ]
+        images_dir = next(
+            (
+                p for p in candidates
+                if p and os.path.isfile(os.path.join(p, "000000000139.jpg"))
+            ),
+            None,
+        )
+        if images_dir is None:
+            raise FileNotFoundError(
+                "Could not find SugarCrepe COCO val2017 images. "
+                f"Checked: {[p for p in candidates if p]}"
+            )
+        logger.info(f"Auto-detected images_dir: {images_dir}")
 
     # WandB resume
     if args.wandb_run_id:
