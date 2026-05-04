@@ -42,7 +42,7 @@ loss:
   cls_label_path: null
 
 paraphraser:
-  type: "mistral"         # "mistral" | "llama" — selects which offline LLM rewrites to load
+  type: "llama"           # "mistral" | "llama" — selects which offline LLM rewrites to load
   # Dataset-specific configs must define:
   #   paraphraser.paths.mistral: <path to mistral rewrites JSON>
   #   paraphraser.paths.llama:   <path to llama rewrites JSON>
