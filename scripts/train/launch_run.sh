@@ -121,6 +121,15 @@ for DATASET in $DATASETS; do
 
         printf "  %-20s  %-10s  %-6s  %-14s\n" \
             "$RUN_NAME" "$DATASET" "$SEED" "$TRAIN_JOB_ID"
+
+        # Stagger pyxis container extractions. Each job extracts a ~8 GB
+        # squashfs to /run/pyxis/ (a 51 GB tmpfs shared with all users on
+        # the node). Submitting the whole batch back-to-back with no delay
+        # makes them all hit /run simultaneously and fail with
+        # "No space left on device" before any job's python code runs.
+        # 30 s is enough for the previous job's container extraction to
+        # finish (cached layers → squashfs creation only, ~30-60 s).
+        sleep 30
     done
 done
 
