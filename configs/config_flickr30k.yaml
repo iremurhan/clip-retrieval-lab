@@ -6,7 +6,7 @@ data:
   # B5b semantic on Flickr30k uses zero-shot CLIP labels over the 80 COCO
   # category prompts (top-1 if prob >= 0.3 else background); SAM segments
   # with bbox <4 px on either side are dropped to background by precompute.
-  seg_map_dir: "datasets/flickr30k/sam_segments"
+  seg_map_dir: "datasets/flickr30k/sam_masks"
   # B5d: directory containing sam_encoder_features_pool{pool_size}.pt.
   # Produced by scripts/preprocess/precompute_sam.py --encoder_features.
   sam_feature_dir: "datasets/flickr30k/sam_encoder_features"
