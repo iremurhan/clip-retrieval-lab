@@ -48,7 +48,7 @@ runs:
     overrides:
       model.unfreeze_vision_layers: 7
 
-  B0plus:
+  B0plus_fixed:
     description: >-
       Full-featured baseline (default config). Adds bipartite crop
       augmentation, LLM-paraphrased captions for text diversity, symmetric
@@ -64,7 +64,7 @@ runs:
       contrastive objective (InfoNCE). SigLIP removes the implicit
       cross-sample coupling in the softmax denominator, which may improve
       robustness with hard negatives.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       loss.type: siglip
 
@@ -76,7 +76,7 @@ runs:
       semantics rather than bag-of-words shortcuts. Loss is asymmetric:
       I2T sees both original + negative captions (Nx2N), T2I stays NxN
       because there are no negative images by construction.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       loss.hard_negatives: true
 
@@ -87,7 +87,7 @@ runs:
       encoder to recognize individual objects, improving fine-grained
       retrieval. COCO-only (Flickr30k lacks exhaustive category
       annotations). Mutually exclusive with B5.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       loss.cls_weight: 1.0
       loss.cls_num_classes: 80
@@ -99,7 +99,7 @@ runs:
       and relative size (small/medium/large) of its dominant SAM segment.
       Tests whether explicit spatial structure information improves over
       CLIP's implicit positional encoding. 27 foreground bins + 1 bg = 28.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       model.seg_mode: spatial
       model.seg_vocab_size: 28
@@ -116,7 +116,7 @@ runs:
       COCO-80 category (IoU-matched on COCO, CLIP zero-shot on Flickr30k).
       Tests whether injecting object-level semantic identity into the
       vision encoder improves compositional understanding.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       model.seg_mode: semantic
       model.seg_vocab_size: 81
@@ -129,7 +129,7 @@ runs:
       soft, geometric alternative to the discrete B5a/B5b approaches —
       the MLP can learn nonlinear spatial relationships without a fixed
       vocabulary.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       model.seg_mode: continuous
       model.seg_feature_dim: 5
@@ -140,7 +140,7 @@ runs:
       Multi-stream fusion: frozen SAM ViT-B encoder features fused with CLIP
       CLS token via learned gate. Tests whether dense spatial features from a
       complementary vision model improve retrieval when combined post-encoder.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       model.seg_mode: multistream
       model.fusion_type: gate
@@ -153,7 +153,7 @@ runs:
       Multi-stream fusion: frozen SAM ViT-B encoder features fused via
       cross-attention (CLIP CLS attends to SAM spatial tokens). Tests whether
       attention-based feature selection outperforms gated mixing.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       model.seg_mode: multistream
       model.fusion_type: cross_attn
@@ -166,12 +166,29 @@ runs:
     description: >-
       Multi-stream fusion: frozen SAM ViT-B encoder features fused via
       concatenation + 2-layer MLP. Baseline fusion with no attention mechanism.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       model.seg_mode: multistream
       model.fusion_type: concat_proj
       model.sam_feature_pool_size: 8
       model.sam_feature_dim: 256
+      training.fusion_lr: 0.001
+
+  B5e_sam_skip:
+    description: >-
+      SAM residual skip connection: CLIP CLS remains the main retrieval
+      representation while attending to frozen SAM ViT-B spatial tokens to
+      produce a gated residual update. The gate is initialized near zero, so
+      training starts close to vanilla CLIP and learns whether SAM should
+      contribute region-aware corrections.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: sam_skip
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      model.fusion_num_heads: 8
+      model.sam_skip_gate_init_bias: -4.0
       training.fusion_lr: 0.001
 
   BLIP_TEXT:
@@ -184,7 +201,7 @@ runs:
       encoder is fully frozen; only the text_projection head (Linear 768→768)
       is trainable. max_length raised to 512 (BERT native) to give bidirectional
       context its best shot. Not part of the B0–B5 ladder.
-    parent: B0plus
+    parent: B0plus_fixed
     overrides:
       model.text_encoder: blip
       model.text_model_name: "Salesforce/blip-itm-base-coco"

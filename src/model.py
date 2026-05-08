@@ -104,7 +104,7 @@ class DualEncoder(nn.Module):
         # so that nothing in the forward path changes for them.
         #   seg_mode == "spatial"    | "semantic" : nn.Embedding(vocab, d_model)
         #   seg_mode == "continuous"              : nn.Sequential(Linear, GELU, Linear)
-        #   seg_mode == "multistream"             : post-encoder CLS + SAM fusion
+        #   seg_mode == "multistream"             : post-encoder CLS + SAM fusion / skip
         seg_mode = config.get('model', {}).get('seg_mode')
         self.seg_mode = seg_mode
         self.seg_embedding = None
@@ -123,7 +123,7 @@ class DualEncoder(nn.Module):
                 fusion_type = config['model'].get('fusion_type') or 'gate'
                 self.fusion_module = build_fusion_module(fusion_type, config, d_model=d_model)
                 logger.info(
-                    f"B5d[multistream]: fusion_type={fusion_type}, "
+                    f"B5d/B5e[multistream]: fusion_type={fusion_type}, "
                     f"sam_feature_dim={config['model'].get('sam_feature_dim', 256)}, "
                     f"pool_size={config['model'].get('sam_feature_pool_size', 8)}"
                 )
@@ -576,6 +576,40 @@ class CrossAttentionFusion(nn.Module):
         return self.norm(cls + attn_out.squeeze(1))
 
 
+class SAMSkipFusion(nn.Module):
+    """B5e: gated SAM residual skip into CLIP's CLS representation."""
+
+    def __init__(self, d_model=1024, sam_feature_dim=256, num_heads=8, gate_init_bias=-4.0):
+        super().__init__()
+        if d_model % num_heads != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by num_heads={num_heads}.")
+        self.sam_proj = nn.Linear(sam_feature_dim, d_model)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+        self.gate_proj = nn.Linear(d_model * 2, d_model)
+        self.last_gate_mean = None
+
+        nn.init.xavier_uniform_(self.sam_proj.weight)
+        nn.init.zeros_(self.sam_proj.bias)
+        # Start close to vanilla CLIP: SAM is a small residual correction at init.
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.constant_(self.gate_proj.bias, float(gate_init_bias))
+
+    def forward(self, cls, sam_features):
+        sam_features = sam_features.to(device=cls.device, dtype=cls.dtype)
+        sam_tokens = sam_features.flatten(2).transpose(1, 2)  # [B, H*W, C]
+        sam_tokens = self.sam_proj(sam_tokens)
+        query = cls.unsqueeze(1)
+        sam_delta, _ = self.cross_attn(query, sam_tokens, sam_tokens, need_weights=False)
+        sam_delta = sam_delta.squeeze(1)
+        gate = torch.sigmoid(self.gate_proj(torch.cat([cls, sam_delta], dim=-1)))
+        self.last_gate_mean = gate.detach().float().mean()
+        return cls + gate * sam_delta
+
+
 class ConcatFusion(nn.Module):
     """B5d: concatenation + MLP projection fusion."""
 
@@ -613,9 +647,18 @@ def build_fusion_module(fusion_type, config, d_model=1024):
             sam_feature_dim=sam_feature_dim,
             num_heads=num_heads,
         )
+    if fusion_type == "sam_skip":
+        num_heads = int(config['model'].get('fusion_num_heads', 8))
+        gate_init_bias = float(config['model'].get('sam_skip_gate_init_bias', -4.0))
+        return SAMSkipFusion(
+            d_model=d_model,
+            sam_feature_dim=sam_feature_dim,
+            num_heads=num_heads,
+            gate_init_bias=gate_init_bias,
+        )
     if fusion_type == "concat_proj":
         return ConcatFusion(d_model=d_model, sam_feature_dim=sam_feature_dim)
     raise ValueError(
         f"Unknown model.fusion_type={fusion_type!r}. "
-        "Expected one of 'gate', 'cross_attn', 'concat_proj'."
+        "Expected one of 'gate', 'cross_attn', 'sam_skip', 'concat_proj'."
     )

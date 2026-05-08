@@ -101,6 +101,7 @@ class Trainer:
                 seed=config['training']['seed'],
             )
             logger.info(f"Using LLM pre-computed paraphraser (LaCLIP-style, type={para_type}).")
+            self._filter_train_dataset_for_paraphrases()
         else:
             logger.info("Paraphraser disabled (intra_txt_weight=0).")
 
@@ -228,6 +229,28 @@ class Trainer:
                 "val/rprecision_i2t", "val/rprecision_t2i",
             ]:
                 wandb.define_metric(metric, summary="max")
+
+    def _filter_train_dataset_for_paraphrases(self):
+        dataset = getattr(self.train_loader, "dataset", None)
+        samples = getattr(dataset, "samples", None)
+        if samples is None or not hasattr(samples, "filter_by_sentids"):
+            logger.warning(
+                "Paraphraser is enabled, but train dataset does not expose "
+                "filter_by_sentids(); missing rewrite sentids may still fail."
+            )
+            return
+
+        before = len(dataset)
+        dropped = samples.filter_by_sentids(self.paraphraser.rewrites.keys())
+        if dropped:
+            logger.info(
+                "Filtered %d/%d train samples without %s paraphrases "
+                "(remaining=%d).",
+                dropped,
+                before,
+                self.config['paraphraser']['type'],
+                len(dataset),
+            )
 
 
     def load_checkpoint(self, checkpoint_path):

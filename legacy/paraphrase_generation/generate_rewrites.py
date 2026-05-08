@@ -163,6 +163,10 @@ def load_model(model_name: str) -> tuple:
 
 def generate_for_batch(
     model, tokenizer, captions: list, num_candidates: int,
+    *,
+    temperature: float = 0.9,
+    top_p: float = 0.95,
+    top_k: int = 50,
 ) -> list:
     """Generate rewrite candidates for a BATCH of captions in a single forward pass.
 
@@ -171,6 +175,11 @@ def generate_for_batch(
         tokenizer:      tokenizer with padding_side='left'
         captions:       list[str] of length B
         num_candidates: number of candidates per caption (num_return_sequences)
+        temperature:    sampling temperature (default 0.9 — main pass).
+                        Retry pass uses 1.0 for higher diversity.
+        top_p:          nucleus sampling cutoff (default 0.95).
+        top_k:          top-k sampling cutoff (default 50). Retry pass uses 100
+                        to widen the candidate pool when the main pass collapsed.
 
     Returns:
         list of length B, each entry is a list[str] of candidate rewrites for
@@ -199,9 +208,9 @@ def generate_for_batch(
             max_new_tokens=128,
             num_return_sequences=num_candidates,
             do_sample=True,
-            temperature=0.9,
-            top_p=0.95,
-            top_k=50,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
             pad_token_id=tokenizer.eos_token_id,
         )  # [B * num_candidates, prompt_len + new_tokens]
 
