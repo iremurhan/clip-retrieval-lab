@@ -515,6 +515,23 @@ class _ColumnarSampleStore:
             "filename": str(self.filenames[idx]),
         }
 
+    def filter_by_sentids(self, allowed_sentids):
+        allowed = np.fromiter((int(s) for s in allowed_sentids), dtype=np.int64)
+        if allowed.size == 0:
+            raise ValueError("allowed_sentids is empty; refusing to drop all samples.")
+
+        keep = np.isin(self.sentids, allowed)
+        before = len(self)
+        if int(keep.sum()) == before:
+            return 0
+
+        self.image_ids = self.image_ids[keep]
+        self.sentids = self.sentids[keep]
+        self.captions = self.captions[keep]
+        self.filepaths = self.filepaths[keep]
+        self.filenames = self.filenames[keep]
+        return before - len(self)
+
 
 class CaptionImageDataset(Dataset):
     def __init__(

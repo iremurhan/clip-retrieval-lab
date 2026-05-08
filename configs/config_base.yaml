@@ -26,11 +26,12 @@ model:
   # Continuous mode only: per-segment feature dim and MLP hidden width.
   seg_feature_dim: 5
   seg_proj_hidden: 128
-  # B5d multistream fusion. Used only when seg_mode="multistream".
-  fusion_type: null          # "gate" | "cross_attn" | "concat_proj"
+  # B5d/B5e multistream fusion. Used only when seg_mode="multistream".
+  fusion_type: null          # "gate" | "cross_attn" | "sam_skip" | "concat_proj"
   sam_feature_pool_size: 8
   sam_feature_dim: 256
-  fusion_num_heads: 8        # cross_attn only
+  fusion_num_heads: 8        # cross_attn / sam_skip only
+  sam_skip_gate_init_bias: -4.0  # sam_skip only; sigmoid(-4) starts near zero
 
 loss:
   type: infonce
