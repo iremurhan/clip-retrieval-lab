@@ -242,6 +242,21 @@ class DualEncoderBLIPText(nn.Module):
         image_embeds = self._get_image_features(images)
         return F.normalize(image_embeds, p=2, dim=1)
 
+    def encode_image_patches(self, images):
+        """
+        Encode CLIP vision patch tokens into the retrieval embedding space.
+
+        Returns Tensor [B, num_patches, 768], L2-normalized on the last dim.
+        The text side is BLIP, but the image tower/projection is still CLIP.
+        """
+        vision_out = self.clip.vision_model(pixel_values=images)
+        patch_tokens = vision_out.last_hidden_state[:, 1:, :].float()
+        patch_tokens = self.clip.vision_model.post_layernorm(patch_tokens)
+        B, P, H = patch_tokens.shape
+        patch_embeds = self.clip.visual_projection(patch_tokens.reshape(B * P, H))
+        patch_embeds = patch_embeds.reshape(B, P, -1)
+        return F.normalize(patch_embeds, p=2, dim=-1)
+
     def encode_text(self, input_ids, attention_mask):
         """Encode text only (L2-normalized)."""
         text_embeds = self._get_text_features(input_ids, attention_mask)

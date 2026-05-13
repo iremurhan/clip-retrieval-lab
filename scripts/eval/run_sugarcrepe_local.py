@@ -216,10 +216,8 @@ def main():
 
     if not args.dry_run:
         print(
-            "\n  ➡️  Next step: When complete, re-export runs_summary.csv "
-            "from WandB and re-run figs/01_sugarcrepe.py\n"
+            "\n  ➡️  Next step: Re-export runs_summary.csv from WandB:\n"
             "     python export_wandb.py\n"
-            "     python figs/01_sugarcrepe.py\n"
         )
 
 

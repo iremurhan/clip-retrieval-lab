@@ -98,7 +98,7 @@ runs:
       contrastive objective (InfoNCE). SigLIP removes the implicit
       cross-sample coupling in the softmax denominator, which may improve
       robustness with hard negatives.
-    parent: B0plus_fixed
+    parent: B0
     overrides:
       loss.type: siglip
 
@@ -110,7 +110,7 @@ runs:
       semantics rather than bag-of-words shortcuts. Loss is asymmetric:
       I2T sees both original + negative captions (Nx2N), T2I stays NxN
       because there are no negative images by construction.
-    parent: B0plus_fixed
+    parent: B0
     overrides:
       loss.hard_negatives: true
 
@@ -121,7 +121,7 @@ runs:
       encoder to recognize individual objects, improving fine-grained
       retrieval. COCO-only (Flickr30k lacks exhaustive category
       annotations). Mutually exclusive with B5.
-    parent: B0plus_fixed
+    parent: B0
     overrides:
       loss.cls_weight: 1.0
       loss.cls_num_classes: 80
