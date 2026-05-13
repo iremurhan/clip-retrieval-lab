@@ -17,11 +17,12 @@ Usage (HPC):
         --data_dir datasets/sugarcrepe \
         --images_dir datasets/coco/val2017
 
-Usage (local, no WandB):
+Usage (local Mac, no WandB):
     python scripts/eval/eval_sugarcrepe.py \
         --checkpoint checkpoints/best_model.pth \
         --data_dir datasets/sugarcrepe \
-        --images_dir /users/beyza.urhan/experiments/datasets/coco/val2017
+        --images_dir /users/beyza.urhan/experiments/datasets/coco/val2017 \
+        --device mps
 """
 
 import argparse
@@ -79,6 +80,11 @@ def main():
                         help="Path to COCO val2017 images (default: auto-detected)")
     parser.add_argument("--wandb_project", type=str, default=None,
                         help="WandB project name (default: from checkpoint config)")
+    parser.add_argument(
+        "--device", type=str, default="auto",
+        choices=["cuda", "mps", "cpu", "auto"],
+        help="Device override (default: auto-detect cuda → mps → cpu)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -88,11 +94,38 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # --- Device selection: CLI override or auto-detect (cuda → mps → cpu) ---
+    if args.device != "auto":
+        device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     logger.info(f"Device: {device}")
 
     # Load checkpoint once and reuse config for all downstream needs.
     model, config = load_model_from_checkpoint(args.checkpoint, device)
+
+    # Smoke-test MPS: some ops may be missing on older PyTorch/macOS combos.
+    if device.type == "mps":
+        try:
+            image_size = config["data"]["image_size"]
+            dummy_img = torch.randn(1, 3, image_size, image_size, device=device)
+            dummy_ids = torch.zeros(1, 5, dtype=torch.long, device=device)
+            dummy_mask = torch.ones(1, 5, dtype=torch.long, device=device)
+            with torch.no_grad():
+                model.encode_image(dummy_img)
+                model.encode_text(dummy_ids, dummy_mask)
+            logger.info("MPS smoke test passed.")
+        except Exception as e:
+            logger.error(
+                f"MPS smoke test failed ({e}). Falling back to CPU. "
+                "Consider updating PyTorch for full MPS op coverage."
+            )
+            device = torch.device("cpu")
+            model = model.to(device)
     image_size = config["data"]["image_size"]
     max_length = config["data"]["max_length"]
 
