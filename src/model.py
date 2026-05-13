@@ -486,6 +486,28 @@ class DualEncoder(nn.Module):
             image_embeds = self.image_proj(image_embeds)
         return F.normalize(image_embeds, p=2, dim=1)
 
+    def encode_image_patches(self, images):
+        """
+        Encode spatial patch tokens into the retrieval embedding space.
+
+        Returns:
+            Tensor [B, num_patches, embed_dim], L2-normalized on the last dim.
+
+        This inference-only diagnostic mirrors the vanilla CLIP vision path used
+        by SugarCrepe evaluation when no B5 side inputs are available. Patch
+        tokens receive the same post-layernorm + visual projection as the CLS
+        pooler output before any optional project head is applied.
+        """
+        vision_out = self.clip.vision_model(pixel_values=images)
+        patch_tokens = vision_out.last_hidden_state[:, 1:, :].float()
+        patch_tokens = self.clip.vision_model.post_layernorm(patch_tokens)
+        B, P, H = patch_tokens.shape
+        patch_embeds = self.clip.visual_projection(patch_tokens.reshape(B * P, H))
+        if self.image_proj is not None:
+            patch_embeds = self.image_proj(patch_embeds)
+        patch_embeds = patch_embeds.reshape(B, P, -1)
+        return F.normalize(patch_embeds, p=2, dim=-1)
+
     def encode_image_with_cls(self, images):
         """
         Single vision forward pass returning both contrastive embeddings and
