@@ -14,8 +14,8 @@ from plan_missing_experiments import (
 )
 
 
-def job_dataset_label(dataset: str) -> str:
-    return "flickr" if dataset == "flickr30k" else dataset
+def mem_per_gpu(dataset: str) -> str:
+    return "50G" if dataset == "flickr30k" else "60G"
 
 
 def missing_groups(include_queued_lowuf_s42: bool) -> list[tuple[str, str, list[int]]]:
@@ -72,16 +72,16 @@ def main() -> None:
     print("run_id,dataset,seeds,dependency,job_id")
 
     for run_id, dataset, seeds in groups:
-        dataset_label = job_dataset_label(dataset)
         seed_label = "-".join(str(seed) for seed in seeds)
-        job_name = f"{run_id}_{dataset_label}_missing"
+        job_name = f"{run_id}_{dataset}_missing"
         cmd = [
             "sbatch",
             "--parsable",
             f"--job-name={job_name}",
             f"--dependency={dependency}",
+            f"--mem-per-gpu={mem_per_gpu(dataset)}",
             "scripts/train/train_seed_sequence.slurm",
-            dataset_label,
+            dataset,
             run_id,
             *[str(seed) for seed in seeds],
         ]

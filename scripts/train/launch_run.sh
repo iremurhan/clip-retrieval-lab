@@ -10,8 +10,8 @@
 # Arguments:
 #   --run      RUN_ID     Registry entry to use (required). Must exist in
 #                         configs/registry.yaml. E.g.: B0, B0plus, B1, B2, B4
-#   --datasets DATASETS   Space-separated list of datasets (default: "coco flickr")
-#                         Supported: coco, flickr
+#   --datasets DATASETS   Space-separated list of datasets (default: "coco flickr30k")
+#                         Supported: coco, flickr30k (alias: flickr)
 #   --seeds    SEEDS      Space-separated list of seeds (default: "42 123 456")
 #
 # Usage:
@@ -34,7 +34,7 @@ set -euo pipefail
 # Defaults
 # --------------------------------------------------------------------------
 RUN_ID=""
-DATASETS="coco flickr"
+DATASETS="coco flickr30k"
 SEEDS="42 123 456"
 
 # --------------------------------------------------------------------------
@@ -87,10 +87,18 @@ printf "  %-20s  %-10s  %-6s  %-14s\n" "--------------------" "----------" "----
 # Submit jobs
 # --------------------------------------------------------------------------
 for DATASET in $DATASETS; do
-    # Map dataset name to config file
+    # Map dataset name to config file and per-GPU memory request.
     case "$DATASET" in
-        coco)    CONFIG="configs/config_coco.yaml" ;;
-        flickr)  CONFIG="configs/config_flickr30k.yaml" ;;
+        coco)
+            CONFIG="configs/config_coco.yaml"
+            DATASET="coco"
+            MEM_PER_GPU="60G"
+            ;;
+        flickr|flickr30k)
+            CONFIG="configs/config_flickr30k.yaml"
+            DATASET="flickr30k"
+            MEM_PER_GPU="50G"
+            ;;
         *)
             echo "WARNING: Unknown dataset '${DATASET}'; skipping."
             continue
@@ -105,6 +113,7 @@ for DATASET in $DATASETS; do
 
     for SEED in $SEEDS; do
         RUN_NAME="${RUN_ID}_${DATASET}_s${SEED}"
+        SBATCH_RESOURCE_ARGS=(--mem-per-gpu="${MEM_PER_GPU}")
 
         # Submit training job
         # train.slurm positional args: <RUN_ID> <CONFIG_PATH> [extra args forwarded to run.py]
@@ -113,6 +122,7 @@ for DATASET in $DATASETS; do
         TRAIN_JOB_ID=$(sbatch \
             --parsable \
             --job-name="${RUN_NAME}" \
+            "${SBATCH_RESOURCE_ARGS[@]}" \
             "$TRAIN_SLURM" \
             "$RUN_ID" \
             "$CONFIG" \
