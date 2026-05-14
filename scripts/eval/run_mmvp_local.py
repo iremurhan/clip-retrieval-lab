@@ -14,6 +14,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EVAL_SCRIPT = Path(__file__).resolve().with_name("eval_mmvp_vlm.py")
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
 DATASET_ALIASES = {"coco": "coco", "flickr": "flickr30k", "flickr30k": "flickr30k"}
 
 
@@ -72,7 +75,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Batch-run MMVP-VLM evaluation")
     parser.add_argument("--manifest", type=str, default=str(PROJECT_ROOT / "sugarcrepe_manifest.csv"))
     parser.add_argument("--data-dir", type=str, default="/Volumes/T7/Research/experiments/datasets/mmvp_vlm")
-    parser.add_argument("--cache-dir", type=str, default=str(PROJECT_ROOT / "results" / "cache" / "mmvp_vlm"))
+    parser.add_argument("--cache-dir", type=str, default=str(ARTIFACT_ROOT / "cache" / "mmvp_vlm"))
     parser.add_argument("--device", type=str, default="auto", choices=["cuda", "mps", "cpu", "auto"])
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--limit", type=int, default=None)

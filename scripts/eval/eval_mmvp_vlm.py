@@ -19,6 +19,9 @@ from src.eval.mmvp_vlm import evaluate_mmvp_vlm
 
 
 logger = logging.getLogger(__name__)
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
 DATASET_ALIASES = {"coco": "coco", "flickr": "flickr30k", "flickr30k": "flickr30k"}
 
 
@@ -65,7 +68,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a checkpoint on MMVP-VLM")
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--data-dir", type=str, default="/Volumes/T7/Research/experiments/datasets/mmvp_vlm")
-    parser.add_argument("--cache-dir", type=str, default="results/cache/mmvp_vlm")
+    parser.add_argument("--cache-dir", type=str, default=str(ARTIFACT_ROOT / "cache" / "mmvp_vlm"))
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--wandb_run_name", type=str, default=None)
     parser.add_argument("--wandb_run_id", type=str, default=None)

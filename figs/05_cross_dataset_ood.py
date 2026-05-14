@@ -4,7 +4,10 @@ import json
 import os
 from pathlib import Path
 
-os.environ.setdefault("MPLCONFIGDIR", str(Path("results/cache/mplconfig")))
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
+os.environ.setdefault("MPLCONFIGDIR", str(ARTIFACT_ROOT / "cache" / "mplconfig"))
 
 import matplotlib
 
@@ -16,6 +19,7 @@ import pandas as pd
 import seaborn as sns
 
 from helpers import (
+    CACHE_DIR,
     DEFAULT_CSV_PATH,
     EXCLUDE,
     SAVE_DATA_DIR,
@@ -28,7 +32,7 @@ from helpers import (
 )
 
 
-OOD_CACHE_DIR = Path("results/cache/ood_eval")
+OOD_CACHE_DIR = CACHE_DIR / "ood_eval"
 OUTPUT_STEM = "05_cross_dataset_ood"
 DATASET_LABELS = {"flickr30k": "Flickr30K", "coco": "COCO 5K"}
 OPPOSITE = {"flickr30k": "coco", "coco": "flickr30k"}

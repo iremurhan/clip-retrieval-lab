@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EVAL_SCRIPT = Path(__file__).resolve().with_name("eval_cross_dataset.py")
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
 DATASET_ALIASES = {"coco": "coco", "flickr": "flickr30k", "flickr30k": "flickr30k"}
 OPPOSITE_DATASET = {"coco": "flickr30k", "flickr30k": "coco"}
 
@@ -105,7 +108,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Batch-run cross-dataset OOD retrieval evaluation")
     parser.add_argument("--manifest", type=str, default=str(PROJECT_ROOT / "sugarcrepe_manifest.csv"))
     parser.add_argument("--data-root", type=str, default="/Volumes/T7/Research/experiments/datasets")
-    parser.add_argument("--cache-dir", type=str, default=str(PROJECT_ROOT / "results" / "cache" / "ood_eval"))
+    parser.add_argument("--cache-dir", type=str, default=str(ARTIFACT_ROOT / "cache" / "ood_eval"))
     parser.add_argument("--device", type=str, default="auto", choices=["cuda", "mps", "cpu", "auto"])
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)

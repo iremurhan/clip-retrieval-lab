@@ -8,10 +8,16 @@ import numpy as np
 import pandas as pd
 
 
-SAVE_FIG_DIR = Path("results/figures")
-SAVE_TABLE_DIR = Path("results/tables")
-SAVE_DATA_DIR = Path("results/data")
-CACHE_DIR = Path("results/cache")
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
+FIG_ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_FIG_ARTIFACT_ROOT", ARTIFACT_ROOT / "figs")
+)
+SAVE_FIG_DIR = Path(os.environ.get("SAVE_FIG_DIR", FIG_ARTIFACT_ROOT / "figures"))
+SAVE_TABLE_DIR = Path(os.environ.get("SAVE_TABLE_DIR", FIG_ARTIFACT_ROOT / "tables"))
+SAVE_DATA_DIR = Path(os.environ.get("SAVE_DATA_DIR", FIG_ARTIFACT_ROOT / "data"))
+CACHE_DIR = Path(os.environ.get("CACHE_DIR", ARTIFACT_ROOT / "cache"))
 DEFAULT_CSV_PATH = Path("/Volumes/T7/Research/wandb/runs_summary.csv")
 EXCLUDE = ["B0v2", "B0plus_fixed", "B5_seg"]
 

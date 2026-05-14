@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-os.environ.setdefault("MPLCONFIGDIR", str(Path("results/cache/mplconfig")))
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
+os.environ.setdefault("MPLCONFIGDIR", str(ARTIFACT_ROOT / "cache" / "mplconfig"))
 
 import matplotlib
 

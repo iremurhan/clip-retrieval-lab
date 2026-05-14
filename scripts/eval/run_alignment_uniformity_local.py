@@ -1,8 +1,8 @@
 """
 Batch-run alignment/uniformity diagnostics from sugarcrepe_manifest.csv.
 
-Outputs per-checkpoint JSON files in results/cache/alignment_uniformity/ and an
-aggregate CSV at results/cache/alignment_uniformity_results.csv.
+Outputs per-checkpoint JSON files under the external artifact cache and an
+aggregate CSV alongside them.
 """
 
 from __future__ import annotations
@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EVAL_SCRIPT = Path(__file__).resolve().with_name("diagnostic_alignment_uniformity.py")
-DEFAULT_CACHE_DIR = PROJECT_ROOT / "results" / "cache" / "alignment_uniformity"
-DEFAULT_RESULTS_CSV = PROJECT_ROOT / "results" / "cache" / "alignment_uniformity_results.csv"
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
+DEFAULT_CACHE_DIR = ARTIFACT_ROOT / "cache" / "alignment_uniformity"
+DEFAULT_RESULTS_CSV = ARTIFACT_ROOT / "cache" / "alignment_uniformity_results.csv"
 EXCLUDE = {"B0v2", "B0plus_fixed"}
 
 

@@ -32,5 +32,5 @@ cd /workspace
 export PYTHONPATH="/workspace:${PYTHONPATH:-}"
 export WANDB_MODE=online
 
-python3 -u export_wandb.py --out-dir "$OUT_DIR"
+python3 -u scripts/util/export_wandb.py --out-dir "$OUT_DIR"
 echo "Export directory: $OUT_DIR"
