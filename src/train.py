@@ -1108,12 +1108,33 @@ class Trainer:
                 self.save_checkpoint(epoch + 1)
                 raise SystemExit(0)
 
-        # --- TEST EVALUATION ---
         logger.info("Training complete. Running final test evaluation...")
-        self._evaluate_test()
+        for eval_name, eval_fn in [
+            ("test", self._evaluate_test),
+            ("sugarcrepe", self._evaluate_sugarcrepe),
+            ("ood_retrieval", self._evaluate_ood_retrieval),
+            ("mmvp_vlm", self._evaluate_mmvp_vlm),
+        ]:
+            self._run_post_training_eval(eval_name, eval_fn)
 
-        # --- SUGARCREPE EVALUATION ---
-        self._evaluate_sugarcrepe()
+    def _run_post_training_eval(self, eval_name, eval_fn):
+        """
+        Run one post-training evaluation without letting it affect checkpoint
+        artifacts or the remaining evaluation hooks.
+        """
+        try:
+            eval_fn()
+        except Exception as e:
+            logger.error("Post-training %s evaluation failed: %s", eval_name, e, exc_info=True)
+            if self.use_wandb and wandb.run is not None:
+                try:
+                    wandb.alert(
+                        title=f"Post-training {eval_name} eval failed",
+                        text=str(e),
+                        level=wandb.AlertLevel.WARN,
+                    )
+                except Exception:
+                    pass
 
     def _evaluate_test(self):
         """
@@ -1235,8 +1256,8 @@ class Trainer:
     def _evaluate_sugarcrepe(self):
         """
         Runs SugarCrepe compositional understanding evaluation at end of training.
-        Non-critical: errors are logged and a WandB alert is sent, but never raised.
-        Results logged to WandB summary under 'sugarcrepe/<subcat>'.
+        Failures are caught by _run_post_training_eval. Results logged to WandB
+        summary under 'sugarcrepe/<subcat>'.
         """
         if self.sugarcrepe_data_dir is None:
             logger.info("SugarCrepe data_dir not configured, skipping evaluation.")
@@ -1244,47 +1265,147 @@ class Trainer:
         if self.sugarcrepe_images_dir is None:
             logger.info("SugarCrepe images_dir not configured, skipping evaluation.")
             return
+        best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
+        if not os.path.exists(best_path):
+            logger.warning("No best_model.pth found. Skipping SugarCrepe evaluation.")
+            return
 
         logger.info("Running SugarCrepe compositional evaluation...")
-        try:
-            from .eval.sugarcrepe import evaluate_sugarcrepe
-            from .data import build_eval_transform
+        from .eval.sugarcrepe import evaluate_sugarcrepe
+        from .data import build_eval_transform
 
-            images_dir = self.sugarcrepe_images_dir
-            max_length = self.config['data']['max_length']
-            transform = build_eval_transform(self.config['data']['image_size'])
+        checkpoint = torch.load(best_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        del checkpoint
+        gc.collect()
+        self.model.eval()
 
-            # model is already in eval mode + best weights from _evaluate_test()
-            self.model.eval()
+        images_dir = self.sugarcrepe_images_dir
+        max_length = self.config['data']['max_length']
+        transform = build_eval_transform(self.config['data']['image_size'])
 
-            results = evaluate_sugarcrepe(
-                model=self.model,
-                tokenizer=self.tokenizer,
-                transform=transform,
-                device=self.device,
-                data_dir=self.sugarcrepe_data_dir,
-                images_dir=images_dir,
-                max_length=max_length,
-                splits=("replace", "swap", "add"),
+        results = evaluate_sugarcrepe(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            transform=transform,
+            device=self.device,
+            data_dir=self.sugarcrepe_data_dir,
+            images_dir=images_dir,
+            max_length=max_length,
+            splits=("replace", "swap", "add"),
+        )
+
+        # Log to WandB as summary metrics (same pattern as _evaluate_test)
+        if self.use_wandb and wandb.run is not None:
+            for key, val in results.items():
+                wandb.run.summary[f"sugarcrepe/{key}"] = val
+
+        logger.info("SugarCrepe Results:")
+        for key, val in results.items():
+            logger.info(f"  sugarcrepe/{key}: {val:.4f}")
+
+    def _evaluate_ood_retrieval(self):
+        """
+        Runs cross-dataset retrieval at end of training using the best checkpoint.
+        COCO-trained models are evaluated on Flickr30K, and Flickr30K-trained
+        models are evaluated on COCO. Failures are caught by
+        _run_post_training_eval. Standalone eval scripts remain available for
+        older checkpoints.
+        """
+        best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
+        if not os.path.exists(best_path):
+            logger.warning("No best_model.pth found. Skipping OOD retrieval evaluation.")
+            return
+
+        train_dataset = self.config.get("data", {}).get("dataset")
+        opposite_dataset = {
+            "coco": "flickr30k",
+            "flickr": "coco",
+            "flickr30k": "coco",
+        }
+        eval_dataset = opposite_dataset.get(train_dataset)
+        if eval_dataset is None:
+            logger.info("Unknown train dataset %r, skipping OOD retrieval evaluation.", train_dataset)
+            return
+
+        logger.info("Running OOD retrieval evaluation: %s -> %s", train_dataset, eval_dataset)
+        from scripts.eval.eval_cross_dataset import build_eval_config, compute_metrics
+        from .data import create_image_text_dataloader
+
+        checkpoint = torch.load(best_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        del checkpoint
+        gc.collect()
+        self.model.eval()
+
+        eval_config = build_eval_config(
+            self.config,
+            eval_dataset=eval_dataset,
+            data_root="datasets",
+            batch_size=None,
+            num_workers=0,
+        )
+        ood_loader = create_image_text_dataloader(eval_config, self.tokenizer, split="test")
+        embeddings = self._extract_embeddings(ood_loader)
+        metrics = compute_metrics(*embeddings[:4], embeddings[4], embeddings[6], eval_dataset=eval_dataset)
+
+        prefix = f"ood/{train_dataset}_to_{eval_dataset}"
+        if self.use_wandb and wandb.run is not None:
+            for key, val in metrics.items():
+                wandb.run.summary[f"{prefix}/{key}"] = val
+
+        logger.info("OOD Retrieval Results:")
+        for key, val in metrics.items():
+            logger.info("  %s/%s: %.4f", prefix, key, val)
+
+        del embeddings
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    def _evaluate_mmvp_vlm(self):
+        """
+        Runs MMVP-VLM forced-choice evaluation at end of training. Failures are
+        caught by _run_post_training_eval. Standalone eval scripts remain
+        available for older checkpoints.
+        """
+        data_dir = "datasets/mmvp_vlm"
+        if not os.path.isdir(data_dir):
+            raise FileNotFoundError(
+                f"MMVP-VLM data dir not found: {data_dir}. "
+                "Mount /users/beyza.urhan/experiments/datasets/mmvp_vlm to "
+                "/workspace/datasets/mmvp_vlm in the training Slurm container."
             )
 
-            # Log to WandB as summary metrics (same pattern as _evaluate_test)
-            if self.use_wandb and wandb.run is not None:
-                for key, val in results.items():
-                    wandb.run.summary[f"sugarcrepe/{key}"] = val
+        best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
+        if not os.path.exists(best_path):
+            logger.warning("No best_model.pth found. Skipping MMVP-VLM evaluation.")
+            return
 
-            logger.info("SugarCrepe Results:")
-            for key, val in results.items():
-                logger.info(f"  sugarcrepe/{key}: {val:.4f}")
+        logger.info("Running MMVP-VLM evaluation...")
+        from .data import build_eval_transform
+        from .eval.mmvp_vlm import evaluate_mmvp_vlm
 
-        except Exception as e:
-            logger.error(f"SugarCrepe evaluation failed: {e}", exc_info=True)
-            if self.use_wandb and wandb.run is not None:
-                try:
-                    wandb.alert(
-                        title="SugarCrepe eval failed",
-                        text=str(e),
-                        level=wandb.AlertLevel.WARN,
-                    )
-                except Exception:
-                    pass
+        checkpoint = torch.load(best_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        del checkpoint
+        gc.collect()
+        self.model.eval()
+
+        transform = build_eval_transform(self.config["data"]["image_size"])
+        summary, _ = evaluate_mmvp_vlm(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            transform=transform,
+            device=self.device,
+            data_dir=data_dir,
+            max_length=self.config["data"].get("max_length", 77),
+        )
+
+        if self.use_wandb and wandb.run is not None:
+            for key, val in summary.items():
+                wandb.run.summary[f"mmvp_vlm/{key}"] = val
+
+        logger.info("MMVP-VLM Results:")
+        for key, val in summary.items():
+            logger.info("  mmvp_vlm/%s: %.4f", key, val)
