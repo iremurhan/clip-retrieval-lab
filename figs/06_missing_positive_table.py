@@ -5,10 +5,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from helpers import CACHE_DIR as BASE_CACHE_DIR
 from helpers import SAVE_DATA_DIR, SAVE_TABLE_DIR, latex_escape, retrieval_config_order
 
 
-CACHE_DIR = Path("results/cache/missing_positive_stats/stats")
+CACHE_DIR = BASE_CACHE_DIR / "missing_positive_stats" / "stats"
 OUTPUT_TEX = SAVE_TABLE_DIR / "06_missing_positive_stats.tex"
 OUTPUT_CSV = SAVE_DATA_DIR / "06_missing_positive_data.csv"
 METRICS = [

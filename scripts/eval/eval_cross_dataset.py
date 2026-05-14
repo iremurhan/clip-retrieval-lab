@@ -30,6 +30,9 @@ from src.utils import chunked_matmul
 
 
 logger = logging.getLogger(__name__)
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
 DATASET_ALIASES = {"coco": "coco", "flickr": "flickr30k", "flickr30k": "flickr30k"}
 OPPOSITE_DATASET = {"coco": "flickr30k", "flickr30k": "coco"}
 
@@ -271,7 +274,7 @@ def main() -> None:
     parser.add_argument("--wandb_run_id", type=str, default=None)
     parser.add_argument("--wandb_project", type=str, default=None)
     parser.add_argument("--data-root", type=str, default="/Volumes/T7/Research/experiments/datasets")
-    parser.add_argument("--cache-dir", type=str, default="results/cache/ood_eval")
+    parser.add_argument("--cache-dir", type=str, default=str(ARTIFACT_ROOT / "cache" / "ood_eval"))
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--device", type=str, default="auto", choices=["cuda", "mps", "cpu", "auto"])
     parser.add_argument("--batch-size", type=int, default=None)

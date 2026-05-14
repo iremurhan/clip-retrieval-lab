@@ -5,7 +5,10 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("MPLCONFIGDIR", str(Path("results/cache/mplconfig")))
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
+os.environ.setdefault("MPLCONFIGDIR", str(ARTIFACT_ROOT / "cache" / "mplconfig"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import matplotlib
@@ -17,11 +20,12 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+from helpers import CACHE_DIR as BASE_CACHE_DIR
 from helpers import DEFAULT_CSV_PATH, SAVE_DATA_DIR, SAVE_FIG_DIR, SAVE_TABLE_DIR, load_runs, split_by_baseline
 from src.eval.mmvp_vlm import PATTERN_ORDER
 
 
-CACHE_DIR = Path("results/cache/mmvp_vlm")
+CACHE_DIR = BASE_CACHE_DIR / "mmvp_vlm"
 PATTERN_LABELS = {
     "orientation": "Orientation",
     "presence": "Presence",

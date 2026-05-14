@@ -20,3 +20,13 @@ checkpoints
 wandb/
 
 *.npz
+
+# Local virtual environments
+.venv-eval/
+.venv-wandb-export/
+
+# Generated evaluation/figure artifacts
+figs/cache/
+figs/*.pdf
+figs/*.png
+results/cache/
