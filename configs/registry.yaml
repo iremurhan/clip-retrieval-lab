@@ -1,5 +1,5 @@
 runs:
-  B0:
+  B0_uf4:
     description: >-
       Minimal fine-tune baseline. Tests whether training only the CLIP
       projection layers with vanilla InfoNCE (no augmentation, no intra-modal
@@ -81,15 +81,6 @@ runs:
     parent: B0
     overrides:
       model.unfreeze_vision_layers: 7
-
-  B0plus_fixed:
-    description: >-
-      Full-featured baseline (default config). Adds bipartite crop
-      augmentation, LLM-paraphrased captions for text diversity, symmetric
-      intra-modal contrast (image-image + text-text), and 4-layer vision
-      backbone unfreezing on top of B0. All subsequent B-series ablations
-      branch from this configuration.
-    overrides: {}  # current config_base.yaml defaults
 
   B1:
     description: >-
