@@ -17,6 +17,7 @@ set -eu
 #   RUN_SUGARCREPE=1 RUN_MMVP=1 RUN_OOD_FLICKR_TO_COCO=1
 
 PYTHON="${PYTHON:-python}"
+EXPORT_WANDB_SCRIPT="scripts/util/export_wandb.py"
 WANDB_PROJECT="${WANDB_PROJECT:-clip-retrieval}"
 RESULTS_ROOT="${RESULTS_ROOT:-/Volumes/T7/Research/experiments/results}"
 DATA_ROOT="${DATA_ROOT:-/Volumes/T7/Research/experiments/datasets}"
@@ -33,26 +34,29 @@ BACKFILL_DIR="${BACKFILL_DIR:-${ARTIFACT_ROOT}/wandb_eval_backfill}"
 LOG_DIR="${LOG_DIR:-${BACKFILL_DIR}/logs}"
 MANIFEST_DIR="${MANIFEST_DIR:-${BACKFILL_DIR}/manifests}"
 CACHE_DIR="${CACHE_DIR:-${BACKFILL_DIR}/cache}"
+WANDB_DIR="${WANDB_DIR:-${BACKFILL_DIR}/wandb}"
 
 SUGARCREPE_MANIFEST="${SUGARCREPE_MANIFEST:-${MANIFEST_DIR}/sugarcrepe_manifest.csv}"
 MMVP_MANIFEST="${MMVP_MANIFEST:-${MANIFEST_DIR}/mmvp_manifest.csv}"
 OOD_FLICKR_TO_COCO_MANIFEST="${OOD_FLICKR_TO_COCO_MANIFEST:-${MANIFEST_DIR}/ood_flickr_to_coco_eccv_manifest.csv}"
 
-mkdir -p "$LOG_DIR" "$MANIFEST_DIR" "$CACHE_DIR"
+mkdir -p "$LOG_DIR" "$MANIFEST_DIR" "$CACHE_DIR" "$WANDB_DIR"
+export WANDB_DIR
 
 echo "Artifacts:"
 echo "  logs:      ${LOG_DIR}"
 echo "  manifests: ${MANIFEST_DIR}"
 echo "  cache:     ${CACHE_DIR}"
+echo "  wandb:     ${WANDB_DIR}"
 
 echo "Exporting WandB summaries..."
 if [ -n "${WANDB_ENTITY:-}" ]; then
-  "$PYTHON" scripts/util/export_wandb.py \
+  "$PYTHON" "$EXPORT_WANDB_SCRIPT" \
     --entity "$WANDB_ENTITY" \
     --project "$WANDB_PROJECT" \
     --out-dir "$WANDB_OUT_DIR"
 else
-  "$PYTHON" scripts/util/export_wandb.py \
+  "$PYTHON" "$EXPORT_WANDB_SCRIPT" \
     --project "$WANDB_PROJECT" \
     --out-dir "$WANDB_OUT_DIR"
 fi
@@ -146,6 +150,7 @@ if [ "$RUN_SUGARCREPE" = "1" ]; then
     --images-dir "${DATA_ROOT}/coco/val2017" \
     --device "$DEVICE" \
     --continue-on-error \
+    < /dev/null \
     > "${LOG_DIR}/sugarcrepe.log" 2>&1
 fi
 
@@ -160,6 +165,7 @@ if [ "$RUN_MMVP" = "1" ]; then
     --continue-on-error \
     --log-wandb \
     --wandb_project "$WANDB_PROJECT" \
+    < /dev/null \
     > "${LOG_DIR}/mmvp_vlm.log" 2>&1
 fi
 
@@ -174,8 +180,9 @@ if [ "$RUN_OOD_FLICKR_TO_COCO" = "1" ]; then
     --continue-on-error \
     --log-wandb \
     --wandb_project "$WANDB_PROJECT" \
+    < /dev/null \
     > "${LOG_DIR}/ood_flickr_to_coco_eccv.log" 2>&1
 fi
 
 echo "Done. Re-export WandB later to verify:"
-echo "  ${PYTHON} scripts/util/export_wandb.py --project ${WANDB_PROJECT} --out-dir ${WANDB_OUT_DIR}"
+echo "  ${PYTHON} ${EXPORT_WANDB_SCRIPT} --project ${WANDB_PROJECT} --out-dir ${WANDB_OUT_DIR}"
