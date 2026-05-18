@@ -21,6 +21,24 @@ CACHE_DIR = Path(os.environ.get("CACHE_DIR", ARTIFACT_ROOT / "cache"))
 DEFAULT_CSV_PATH = Path("/Volumes/T7/Research/wandb/runs_summary.csv")
 EXCLUDE = ["B0v2", "B0plus_fixed", "B5_seg"]
 
+
+def ensure_artifact_dirs() -> None:
+    """Create the external artifact directory tree used by figure scripts."""
+    for path in (
+        ARTIFACT_ROOT,
+        FIG_ARTIFACT_ROOT,
+        FIG_ARTIFACT_ROOT / "cache",
+        SAVE_FIG_DIR,
+        SAVE_TABLE_DIR,
+        SAVE_DATA_DIR,
+        CACHE_DIR,
+        CACHE_DIR / "mplconfig",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+ensure_artifact_dirs()
+
 SC_CATEGORIES = [
     ("add_att", "Add\nAttribute"),
     ("add_obj", "Add\nObject"),
