@@ -29,7 +29,16 @@ SUBCATEGORIES = [
 ]
 
 
-def evaluate_subcategory(model, tokenizer, transform, data, images_dir, max_length, device):
+def evaluate_subcategory(
+    model,
+    tokenizer,
+    transform,
+    data,
+    images_dir,
+    max_length,
+    device,
+    max_items=None,
+):
     """
     Evaluate a single SugarCrepe sub-category.
 
@@ -49,7 +58,11 @@ def evaluate_subcategory(model, tokenizer, transform, data, images_dir, max_leng
     correct = 0
     total = 0
 
-    for entry in data.values():
+    entries = list(data.values())
+    if max_items is not None:
+        entries = entries[:max_items]
+
+    for entry in entries:
         filename = entry["filename"]
         pos_caption = entry["caption"]
         neg_caption = entry["negative_caption"]
@@ -112,6 +125,7 @@ def evaluate_sugarcrepe(
     images_dir,
     max_length=77,
     splits=("replace", "swap", "add"),
+    max_items_per_category=None,
 ):
     """
     Evaluate SugarCrepe compositional understanding metrics on an in-memory model.
@@ -155,11 +169,20 @@ def evaluate_sugarcrepe(
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         acc = evaluate_subcategory(
-            model, tokenizer, transform, data, images_dir, max_length, device,
+            model,
+            tokenizer,
+            transform,
+            data,
+            images_dir,
+            max_length,
+            device,
+            max_items=max_items_per_category,
         )
         results[subcat] = acc
-        logger.info(f"  sugarcrepe/{subcat}: {acc:.4f} ({len(data)} samples)")
+        n_eval = min(len(data), max_items_per_category) if max_items_per_category is not None else len(data)
+        logger.info(f"  sugarcrepe/{subcat}: {acc:.4f} ({n_eval}/{len(data)} samples)")
 
     results["macro_avg"] = sum(results.values()) / len(results)
+    results["overall"] = results["macro_avg"]
     logger.info(f"  sugarcrepe/macro_avg: {results['macro_avg']:.4f}")
     return results

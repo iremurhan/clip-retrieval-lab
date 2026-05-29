@@ -197,12 +197,21 @@ class DualEncoderBLIPText(nn.Module):
         Uses the text encoder WITHOUT encoder_hidden_states, so the cross-attention
         layers are skipped. The [CLS] token output is projected to the CLIP joint space.
         """
-        outputs = self.blip_text(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        if not any(p.requires_grad for p in self.blip_text.parameters()):
+            with torch.no_grad():
+                outputs = self.blip_text(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                cls_output = outputs.last_hidden_state[:, 0, :]
+        else:
+            outputs = self.blip_text(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            cls_output = outputs.last_hidden_state[:, 0, :]
+
         # [CLS] token is at position 0
-        cls_output = outputs.last_hidden_state[:, 0, :]  # [B, 768]
         text_embeds = self.text_projection(cls_output.float())  # [B, 768]
         return text_embeds
 

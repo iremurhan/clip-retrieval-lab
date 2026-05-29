@@ -87,17 +87,15 @@ printf "  %-20s  %-10s  %-6s  %-14s\n" "--------------------" "----------" "----
 # Submit jobs
 # --------------------------------------------------------------------------
 for DATASET in $DATASETS; do
-    # Map dataset name to config file and per-GPU memory request.
+    # Map dataset name to config file.
     case "$DATASET" in
         coco)
             CONFIG="configs/config_coco.yaml"
             DATASET="coco"
-            MEM_PER_GPU="60G"
             ;;
         flickr|flickr30k)
             CONFIG="configs/config_flickr30k.yaml"
             DATASET="flickr30k"
-            MEM_PER_GPU="50G"
             ;;
         *)
             echo "WARNING: Unknown dataset '${DATASET}'; skipping."
@@ -113,7 +111,6 @@ for DATASET in $DATASETS; do
 
     for SEED in $SEEDS; do
         RUN_NAME="${RUN_ID}_${DATASET}_s${SEED}"
-        SBATCH_RESOURCE_ARGS=(--mem-per-gpu="${MEM_PER_GPU}")
 
         # Submit training job
         # train.slurm positional args: <RUN_ID> <CONFIG_PATH> [extra args forwarded to run.py]
@@ -122,7 +119,6 @@ for DATASET in $DATASETS; do
         TRAIN_JOB_ID=$(sbatch \
             --parsable \
             --job-name="${RUN_NAME}" \
-            "${SBATCH_RESOURCE_ARGS[@]}" \
             "$TRAIN_SLURM" \
             "$RUN_ID" \
             "$CONFIG" \

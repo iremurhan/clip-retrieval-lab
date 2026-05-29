@@ -11,7 +11,6 @@ import subprocess
 
 def submit(run_id: str, dataset: str, seed: int, dependency: str) -> str:
     config = "configs/config_flickr30k.yaml" if dataset == "flickr30k" else "configs/config_coco.yaml"
-    mem_per_gpu = "50G" if dataset == "flickr30k" else "60G"
     short = run_id.replace("B5d_multistream_", "B5d_").replace("B5", "B5")
     job_name = f"{short}_{dataset}_s{seed}_single"
     cmd = [
@@ -19,7 +18,7 @@ def submit(run_id: str, dataset: str, seed: int, dependency: str) -> str:
         "--parsable",
         f"--job-name={job_name}",
         f"--dependency={dependency}",
-        f"--mem-per-gpu={mem_per_gpu}",
+        "--mem-per-gpu=64G",
         "scripts/train/train.slurm",
         run_id,
         config,

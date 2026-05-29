@@ -172,50 +172,58 @@ class Trainer:
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        # SugarCrepe data-dir check at init (fail-fast on misconfig)
-        # Check both project-local and shared experiments paths
-        _sc_data_dirs = [
-            "datasets/sugarcrepe",  # Local project path
-            "/users/beyza.urhan/experiments/datasets/sugarcrepe",  # Shared experiments path
-        ]
+        sugar_cfg = config.get("eval", {}).get("sugarcrepe", {})
+        self.sugarcrepe_enabled = bool(sugar_cfg.get("enabled", True))
+        self.sugarcrepe_max_items_per_category = sugar_cfg.get("max_items_per_category")
+        if self.sugarcrepe_max_items_per_category is not None:
+            self.sugarcrepe_max_items_per_category = int(self.sugarcrepe_max_items_per_category)
+
         self.sugarcrepe_data_dir = None
-        for path in _sc_data_dirs:
-            if os.path.isfile(os.path.join(path, "replace_obj.json")):
-                self.sugarcrepe_data_dir = path
-                break
-        
-        if self.sugarcrepe_data_dir is None:
-            logger.warning(
-                f"SugarCrepe data_dir not found in any of: {_sc_data_dirs}. "
-                "End-of-training SugarCrepe eval will be skipped."
-            )
-        else:
+        self.sugarcrepe_images_dir = None
+        if self.sugarcrepe_enabled:
+            # SugarCrepe is default-on. Resolve paths at init so SLURM mount/env
+            # problems fail loudly instead of producing successful runs with
+            # empty W&B summary/sugarcrepe/* fields.
+            _sc_data_dirs = [
+                sugar_cfg.get("data_dir"),
+                "datasets/sugarcrepe",
+                "/users/beyza.urhan/experiments/datasets/sugarcrepe",
+            ]
+            _sc_data_dirs = [p for i, p in enumerate(_sc_data_dirs) if p and p not in _sc_data_dirs[:i]]
+            for path in _sc_data_dirs:
+                if os.path.isfile(os.path.join(path, "replace_obj.json")):
+                    self.sugarcrepe_data_dir = path
+                    break
+            if self.sugarcrepe_data_dir is None:
+                raise FileNotFoundError(
+                    "SugarCrepe eval is enabled, but data_dir is missing. "
+                    f"Checked: {_sc_data_dirs}. Set eval.sugarcrepe.data_dir or "
+                    "disable explicitly with eval.sugarcrepe.enabled=false."
+                )
             logger.info(f"SugarCrepe data_dir found at: {self.sugarcrepe_data_dir}")
 
-        # SugarCrepe uses COCO 2017 val images, independent of the training
-        # dataset. Check both container-relative and shared host paths.
-        configured_sc_images_dir = (
-            config.get("eval", {}).get("sugarcrepe_images_dir")
-        )
-        _sc_image_dirs = [
-            configured_sc_images_dir,
-            "datasets/coco/val2017",
-            "/users/beyza.urhan/experiments/datasets/coco/val2017",
-        ]
-        self.sugarcrepe_images_dir = None
-        for path in _sc_image_dirs:
-            if path and os.path.isfile(os.path.join(path, "000000000139.jpg")):
-                self.sugarcrepe_images_dir = path
-                break
-
-        if self.sugarcrepe_images_dir is None:
-            logger.warning(
-                f"SugarCrepe COCO val2017 images not found in any of: "
-                f"{[p for p in _sc_image_dirs if p]}. "
-                "End-of-training SugarCrepe eval will be skipped."
-            )
-        else:
+            # SugarCrepe uses COCO 2017 val images, independent of the training
+            # dataset, so this must be available for both COCO and Flickr30K runs.
+            _sc_image_dirs = [
+                sugar_cfg.get("images_dir"),
+                config.get("eval", {}).get("sugarcrepe_images_dir"),
+                "datasets/coco/val2017",
+                "/users/beyza.urhan/experiments/datasets/coco/val2017",
+            ]
+            _sc_image_dirs = [p for i, p in enumerate(_sc_image_dirs) if p and p not in _sc_image_dirs[:i]]
+            for path in _sc_image_dirs:
+                if os.path.isfile(os.path.join(path, "000000000139.jpg")):
+                    self.sugarcrepe_images_dir = path
+                    break
+            if self.sugarcrepe_images_dir is None:
+                raise FileNotFoundError(
+                    "SugarCrepe eval is enabled, but COCO val2017 images are missing. "
+                    f"Checked: {_sc_image_dirs}. Set eval.sugarcrepe.images_dir or "
+                    "disable explicitly with eval.sugarcrepe.enabled=false."
+                )
             logger.info(f"SugarCrepe images_dir found at: {self.sugarcrepe_images_dir}")
+        else:
+            logger.info("SugarCrepe end-of-training eval disabled by eval.sugarcrepe.enabled=false.")
         
         # Initialize WandB run reference and define summary metrics
         self.wandb_run = None
@@ -489,35 +497,43 @@ class Trainer:
                         txt_aug_b_embeds = None
                         neg_txt_embeds = None
 
-                        # Encode the two augmented image views for the image-image
-                        # intra-modal pair. Both views are produced independently by
-                        # transform_aug applied twice in __getitem__.
+                        # Encode augmented views with gradients so L_img_img
+                        # contributes to optimization.
                         if intra_img_weight > 0:
-                            with torch.no_grad():
-                                img_aug_a_embeds = self.model.encode_image(
-                                    batch['image_aug_a'].to(self.device, non_blocking=True),
-                                    sam_features=sam_features)
-                                img_aug_b_embeds = self.model.encode_image(
-                                    batch['image_aug_b'].to(self.device, non_blocking=True),
-                                    sam_features=sam_features)
+                            img_aug_a_embeds = self.model.encode_image(
+                                batch['image_aug_a'].to(self.device, non_blocking=True),
+                                sam_features=sam_features)
+                            img_aug_b_embeds = self.model.encode_image(
+                                batch['image_aug_b'].to(self.device, non_blocking=True),
+                                sam_features=sam_features)
 
-                        # Merge paraphrase pair + hard-neg text into a single no_grad
-                        # encode_text call to avoid redundant kernel launches.
-                        nograd_ids_parts = []
-                        nograd_mask_parts = []
+                        # Merge paraphrase pairs into one gradient-enabled
+                        # encode_text call so L_text_text trains the text path.
+                        para_ids_parts = []
+                        para_mask_parts = []
                         _para_n_a = 0
                         _para_n_b = 0
-                        _neg_n = 0
 
                         if intra_txt_weight > 0 and self.paraphraser is not None:
                             pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.sample_pair(
                                 batch['sentid'].tolist())
-                            nograd_ids_parts.append(pa_ids)
-                            nograd_mask_parts.append(pa_mask)
+                            para_ids_parts.append(pa_ids)
+                            para_mask_parts.append(pa_mask)
                             _para_n_a = pa_ids.shape[0]
-                            nograd_ids_parts.append(pb_ids)
-                            nograd_mask_parts.append(pb_mask)
+                            para_ids_parts.append(pb_ids)
+                            para_mask_parts.append(pb_mask)
                             _para_n_b = pb_ids.shape[0]
+
+                        if para_ids_parts:
+                            merged_ids = torch.cat(para_ids_parts, dim=0)
+                            merged_mask = torch.cat(para_mask_parts, dim=0)
+                            merged_embeds = self.model.encode_text(merged_ids, merged_mask)
+                            offset = 0
+                            if _para_n_a > 0:
+                                txt_aug_a_embeds = merged_embeds[offset:offset + _para_n_a]
+                                offset += _para_n_a
+                            if _para_n_b > 0:
+                                txt_aug_b_embeds = merged_embeds[offset:offset + _para_n_b]
 
                         if self.hard_neg_generator is not None:
                             captions = batch['caption']
@@ -531,25 +547,8 @@ class Trainer:
                             )
                             neg_ids = tokenized_neg['input_ids'].to(self.device)
                             neg_mask = tokenized_neg['attention_mask'].to(self.device)
-                            nograd_ids_parts.append(neg_ids)
-                            nograd_mask_parts.append(neg_mask)
-                            _neg_n = neg_ids.shape[0]
-
-                        # Single fused no_grad encode_text for all auxiliary texts
-                        if nograd_ids_parts:
-                            merged_ids = torch.cat(nograd_ids_parts, dim=0)
-                            merged_mask = torch.cat(nograd_mask_parts, dim=0)
                             with torch.no_grad():
-                                merged_embeds = self.model.encode_text(merged_ids, merged_mask)
-                            offset = 0
-                            if _para_n_a > 0:
-                                txt_aug_a_embeds = merged_embeds[offset:offset + _para_n_a]
-                                offset += _para_n_a
-                            if _para_n_b > 0:
-                                txt_aug_b_embeds = merged_embeds[offset:offset + _para_n_b]
-                                offset += _para_n_b
-                            if _neg_n > 0:
-                                neg_txt_embeds = merged_embeds[offset:offset + _neg_n]
+                                neg_txt_embeds = self.model.encode_text(neg_ids, neg_mask)
 
                         if step == 0 and epoch == 0:
                             loss_type = self.config['loss']['type']
@@ -658,34 +657,43 @@ class Trainer:
                     txt_aug_b_embeds = None
                     neg_txt_embeds = None
 
-                    # Encode the two augmented image views for the image-image
-                    # intra-modal pair.
+                    # Encode augmented views with gradients so L_img_img
+                    # contributes to optimization.
                     if intra_img_weight > 0:
-                        with torch.no_grad():
-                            img_aug_a_embeds = self.model.encode_image(
-                                batch['image_aug_a'].to(self.device, non_blocking=True),
-                                sam_features=sam_features)
-                            img_aug_b_embeds = self.model.encode_image(
-                                batch['image_aug_b'].to(self.device, non_blocking=True),
-                                sam_features=sam_features)
+                        img_aug_a_embeds = self.model.encode_image(
+                            batch['image_aug_a'].to(self.device, non_blocking=True),
+                            sam_features=sam_features)
+                        img_aug_b_embeds = self.model.encode_image(
+                            batch['image_aug_b'].to(self.device, non_blocking=True),
+                            sam_features=sam_features)
 
-                    # Merge paraphrase pair + hard-neg text into a single no_grad
-                    # encode_text call to avoid redundant kernel launches.
-                    nograd_ids_parts = []
-                    nograd_mask_parts = []
+                    # Merge paraphrase pairs into one gradient-enabled encode_text
+                    # call so L_text_text trains the text path.
+                    para_ids_parts = []
+                    para_mask_parts = []
                     _para_n_a = 0
                     _para_n_b = 0
-                    _neg_n = 0
 
                     if intra_txt_weight > 0 and self.paraphraser is not None:
                         pa_ids, pa_mask, pb_ids, pb_mask = self.paraphraser.sample_pair(
                             batch['sentid'].tolist())
-                        nograd_ids_parts.append(pa_ids)
-                        nograd_mask_parts.append(pa_mask)
+                        para_ids_parts.append(pa_ids)
+                        para_mask_parts.append(pa_mask)
                         _para_n_a = pa_ids.shape[0]
-                        nograd_ids_parts.append(pb_ids)
-                        nograd_mask_parts.append(pb_mask)
+                        para_ids_parts.append(pb_ids)
+                        para_mask_parts.append(pb_mask)
                         _para_n_b = pb_ids.shape[0]
+
+                    if para_ids_parts:
+                        merged_ids = torch.cat(para_ids_parts, dim=0)
+                        merged_mask = torch.cat(para_mask_parts, dim=0)
+                        merged_embeds = self.model.encode_text(merged_ids, merged_mask)
+                        offset = 0
+                        if _para_n_a > 0:
+                            txt_aug_a_embeds = merged_embeds[offset:offset + _para_n_a]
+                            offset += _para_n_a
+                        if _para_n_b > 0:
+                            txt_aug_b_embeds = merged_embeds[offset:offset + _para_n_b]
 
                     if self.hard_neg_generator is not None:
                         captions = batch['caption']
@@ -699,25 +707,8 @@ class Trainer:
                         )
                         neg_ids = tokenized_neg['input_ids'].to(self.device)
                         neg_mask = tokenized_neg['attention_mask'].to(self.device)
-                        nograd_ids_parts.append(neg_ids)
-                        nograd_mask_parts.append(neg_mask)
-                        _neg_n = neg_ids.shape[0]
-
-                    # Single fused no_grad encode_text for all auxiliary texts
-                    if nograd_ids_parts:
-                        merged_ids = torch.cat(nograd_ids_parts, dim=0)
-                        merged_mask = torch.cat(nograd_mask_parts, dim=0)
                         with torch.no_grad():
-                            merged_embeds = self.model.encode_text(merged_ids, merged_mask)
-                        offset = 0
-                        if _para_n_a > 0:
-                            txt_aug_a_embeds = merged_embeds[offset:offset + _para_n_a]
-                            offset += _para_n_a
-                        if _para_n_b > 0:
-                            txt_aug_b_embeds = merged_embeds[offset:offset + _para_n_b]
-                            offset += _para_n_b
-                        if _neg_n > 0:
-                            neg_txt_embeds = merged_embeds[offset:offset + _neg_n]
+                            neg_txt_embeds = self.model.encode_text(neg_ids, neg_mask)
 
                     if step == 0 and epoch == 0:
                         loss_type = self.config['loss']['type']
@@ -1259,12 +1250,11 @@ class Trainer:
         Failures are caught by _run_post_training_eval. Results logged to WandB
         summary under 'sugarcrepe/<subcat>'.
         """
-        if self.sugarcrepe_data_dir is None:
-            logger.info("SugarCrepe data_dir not configured, skipping evaluation.")
+        if not self.sugarcrepe_enabled:
+            logger.info("SugarCrepe evaluation disabled, skipping.")
             return
-        if self.sugarcrepe_images_dir is None:
-            logger.info("SugarCrepe images_dir not configured, skipping evaluation.")
-            return
+        if self.sugarcrepe_data_dir is None or self.sugarcrepe_images_dir is None:
+            raise RuntimeError("SugarCrepe eval is enabled but paths were not initialized.")
         best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
         if not os.path.exists(best_path):
             logger.warning("No best_model.pth found. Skipping SugarCrepe evaluation.")
@@ -1293,6 +1283,7 @@ class Trainer:
             images_dir=images_dir,
             max_length=max_length,
             splits=("replace", "swap", "add"),
+            max_items_per_category=self.sugarcrepe_max_items_per_category,
         )
 
         # Log to WandB as summary metrics (same pattern as _evaluate_test)

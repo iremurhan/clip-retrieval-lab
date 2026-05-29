@@ -80,6 +80,8 @@ def main():
                         help="Path to COCO val2017 images (default: auto-detected)")
     parser.add_argument("--wandb_project", type=str, default=None,
                         help="WandB project name (default: from checkpoint config)")
+    parser.add_argument("--max_items_per_category", type=int, default=None,
+                        help="Optional smoke-test cap per SugarCrepe subcategory")
     parser.add_argument(
         "--device", type=str, default="auto",
         choices=["cuda", "mps", "cpu", "auto"],
@@ -179,6 +181,7 @@ def main():
         images_dir=images_dir,
         max_length=max_length,
         splits=("replace", "swap", "add"),
+        max_items_per_category=args.max_items_per_category,
     )
 
     # Log to WandB summary

@@ -32,6 +32,7 @@ class DualEncoder(nn.Module):
         
         self.config = config  # Store for use in freezing strategy
         self.dropout_p = config['model'].get('dropout', 0.1)
+        self._gradient_checkpointing_enabled = False
         
         # 1. Load CLIP Model FIRST to get native dimension
         clip_model_name = config['model']['image_model_name']
@@ -179,14 +180,19 @@ class DualEncoder(nn.Module):
                         f"num_patches={self._seg_num_patches}"
                     )
 
-                # Activation memory: segment injection sits BEFORE the 24-layer ViT
-                # encoder, so autograd must retain every layer's activations to
-                # backprop into seg_embedding / seg_projection. Enable gradient
-                # checkpointing on the vision encoder to drop them. B5d multistream
-                # fuses after the encoder and intentionally does not use this.
-                self.clip.gradient_checkpointing_enable()
-                self.clip.config.use_cache = False
-                logger.info(f"B5[{seg_mode}]: enabled gradient checkpointing on CLIPModel")
+        # B0+/B5 runs can encode multiple ViT-L views with gradients in one step
+        # (clean + augmented image pair). Checkpoint the CLIP transformer stack
+        # whenever vision blocks are trainable to keep A40-sized jobs viable.
+        if config.get('model', {}).get('unfreeze_vision_layers', 0) > 0:
+            self._enable_gradient_checkpointing("trainable vision blocks")
+
+    def _enable_gradient_checkpointing(self, reason: str):
+        if self._gradient_checkpointing_enabled:
+            return
+        self.clip.gradient_checkpointing_enable()
+        self.clip.config.use_cache = False
+        self._gradient_checkpointing_enabled = True
+        logger.info(f"Enabled CLIP gradient checkpointing ({reason}).")
 
     def _apply_freezing_strategy(self):
         """
@@ -432,7 +438,23 @@ class DualEncoder(nn.Module):
         return image_features.float()
 
     def _get_text_features(self, input_ids, attention_mask):
-        """Extract text features and standardize embeddings to float32."""
+        """Extract text features and standardize embeddings to float32.
+
+        The CLIP text transformer is frozen for all current registry runs, while
+        CLIP's text_projection stays trainable. Run the frozen transformer without
+        autograd so B0+/B5 jobs do not retain large text activations for backward.
+        Gradients still flow through text_projection.
+        """
+        if not any(p.requires_grad for p in self.clip.text_model.parameters()):
+            with torch.no_grad():
+                text_outputs = self.clip.text_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                pooled_output = text_outputs.pooler_output
+            text_embeds = self.clip.text_projection(pooled_output)
+            return text_embeds.float()
+
         text_embeds = self.clip.get_text_features(
             input_ids=input_ids,
             attention_mask=attention_mask,
