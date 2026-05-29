@@ -81,6 +81,15 @@ debug:
   debug_mode: false
   debug_samples: 100
 
+eval:
+  sugarcrepe:
+    enabled: true
+    data_dir: "datasets/sugarcrepe"
+    images_dir: "datasets/coco/val2017"
+    # Full evaluation by default. Override in smoke tests to cap each
+    # subcategory without changing training-time behavior.
+    max_items_per_category: null
+
 augment:
   # Number of photometric transforms sampled from the pool per image.
   # Pool size depends on use_grayscale: 3 with grayscale, 2 without. k <= pool_size.

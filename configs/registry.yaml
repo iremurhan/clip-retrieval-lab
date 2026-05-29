@@ -1,4 +1,12 @@
 runs:
+  B0:
+    description: >-
+      Alias for B0_uf4. Kept so existing child entries (parent: B0) and
+      historical run names (B0_*_s{seed}) remain valid after the B0 -> B0_uf4
+      rename. Loads identically to B0_uf4.
+    parent: B0_uf4
+    overrides: {}
+
   B0_uf4:
     description: >-
       Minimal fine-tune baseline. Tests whether training only the CLIP
@@ -81,6 +89,15 @@ runs:
     parent: B0
     overrides:
       model.unfreeze_vision_layers: 7
+
+  B0plus_fixed:
+    description: >-
+      Full-featured baseline (default config). Adds bipartite crop
+      augmentation, LLM-paraphrased captions for text diversity, symmetric
+      intra-modal contrast (image-image + text-text), and 4-layer vision
+      backbone unfreezing on top of B0. All B5* ablations branch from this
+      configuration.
+    overrides: {}  # current config_base.yaml defaults
 
   B1:
     description: >-

@@ -201,6 +201,8 @@ def setup_tracker(config):
         f"run_id:{run_id}",
         f"dataset:{dataset_name}",
         f"seed:{seed}",
+        "intra_modal_grad:with_grad",
+        "with_grad",
     ]
     # Forward each logging.lineage entry as a filterable WandB tag so that
     # default-bumps (e.g. augmentation magnitudes v1 → v2) split cleanly in
@@ -239,7 +241,10 @@ def setup_tracker(config):
 
     slurm_job_id = os.environ.get('SLURM_JOB_ID', 'local')
     wandb.config.update(
-        {'slurm_job_id': slurm_job_id},
+        {
+            'slurm_job_id': slurm_job_id,
+            'intra_modal_grad': 'with_grad',
+        },
         allow_val_change=True
     )
     logger.info(f"WandB run: {run_name} | group: {group} | slurm_job_id: {slurm_job_id}")

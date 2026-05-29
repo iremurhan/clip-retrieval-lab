@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Submit missing experiment/dataset/seed groups as chained Slurm jobs."""
+"""Submit missing experiment/dataset/seed work as chained Slurm jobs.
+
+B5 runs are submitted one seed per allocation because the multi-stream and
+segmentation variants can exceed the 7-day wall time when seeds are grouped.
+"""
 
 from __future__ import annotations
 
 import argparse
 import subprocess
+from pathlib import Path
 
 from plan_missing_experiments import (
     DATASET_ORDER,
@@ -14,12 +19,22 @@ from plan_missing_experiments import (
 )
 
 
-def mem_per_gpu(dataset: str) -> str:
+def is_b5_run(run_id: str) -> bool:
+    return run_id.startswith("B5")
+
+
+def config_for_dataset(dataset: str) -> str:
+    return "configs/config_flickr30k.yaml" if dataset == "flickr30k" else "configs/config_coco.yaml"
+
+
+def mem_per_gpu(run_id: str, dataset: str) -> str:
+    if is_b5_run(run_id):
+        return "64G"
     return "50G" if dataset == "flickr30k" else "60G"
 
 
-def missing_groups(include_queued_lowuf_s42: bool) -> list[tuple[str, str, list[int]]]:
-    present = collect_present(args.results_root)
+def missing_groups(results_root: Path, include_queued_lowuf_s42: bool) -> list[tuple[str, str, list[int]]]:
+    present = collect_present(results_root)
     if include_queued_lowuf_s42:
         for dataset in DATASET_ORDER:
             for run_id in ("B0_projonly", "B0_uf1", "B0_uf2", "B0_uf3"):
@@ -66,12 +81,40 @@ def parse_args() -> argparse.Namespace:
 args = parse_args()
 
 
+def submit_or_dry_run(cmd: list[str], job_name: str) -> tuple[str, str]:
+    if args.submit:
+        job_id = subprocess.check_output(cmd, text=True).strip()
+        return job_id, job_id
+    return "DRY_RUN", job_name
+
+
 def main() -> None:
-    groups = missing_groups(args.include_queued_lowuf_s42)
+    groups = missing_groups(args.results_root, args.include_queued_lowuf_s42)
     dependency = args.initial_dependency
     print("run_id,dataset,seeds,dependency,job_id")
 
     for run_id, dataset, seeds in groups:
+        if is_b5_run(run_id):
+            for seed in seeds:
+                job_name = f"{run_id}_{dataset}_s{seed}_missing"
+                cmd = [
+                    "sbatch",
+                    "--parsable",
+                    f"--job-name={job_name}",
+                    f"--dependency={dependency}",
+                    f"--mem-per-gpu={mem_per_gpu(run_id, dataset)}",
+                    "scripts/train/train.slurm",
+                    run_id,
+                    config_for_dataset(dataset),
+                    "--seed",
+                    str(seed),
+                ]
+
+                job_id, dependency_id = submit_or_dry_run(cmd, job_name)
+                print(f"{run_id},{dataset},{seed},{dependency},{job_id}")
+                dependency = f"afterany:{dependency_id}"
+            continue
+
         seed_label = "-".join(str(seed) for seed in seeds)
         job_name = f"{run_id}_{dataset}_missing"
         cmd = [
@@ -79,20 +122,16 @@ def main() -> None:
             "--parsable",
             f"--job-name={job_name}",
             f"--dependency={dependency}",
-            f"--mem-per-gpu={mem_per_gpu(dataset)}",
+            f"--mem-per-gpu={mem_per_gpu(run_id, dataset)}",
             "scripts/train/train_seed_sequence.slurm",
             dataset,
             run_id,
             *[str(seed) for seed in seeds],
         ]
 
-        if args.submit:
-            job_id = subprocess.check_output(cmd, text=True).strip()
-        else:
-            job_id = "DRY_RUN"
-
+        job_id, dependency_id = submit_or_dry_run(cmd, job_name)
         print(f"{run_id},{dataset},{seed_label},{dependency},{job_id}")
-        dependency = f"afterany:{job_id}" if args.submit else f"afterany:{job_name}"
+        dependency = f"afterany:{dependency_id}"
 
 
 if __name__ == "__main__":
