@@ -506,6 +506,12 @@ class Trainer:
                             img_aug_b_embeds = self.model.encode_image(
                                 batch['image_aug_b'].to(self.device, non_blocking=True),
                                 sam_features=sam_features)
+                            img_aug_a_embeds = self.model.encode_image(
+                                batch['image_aug_a'].to(self.device, non_blocking=True),
+                                sam_features=sam_features)
+                            img_aug_b_embeds = self.model.encode_image(
+                                batch['image_aug_b'].to(self.device, non_blocking=True),
+                                sam_features=sam_features)
 
                         # Merge paraphrase pairs into one gradient-enabled
                         # encode_text call so L_text_text trains the text path.
@@ -660,6 +666,12 @@ class Trainer:
                     # Encode augmented views with gradients so L_img_img
                     # contributes to optimization.
                     if intra_img_weight > 0:
+                        img_aug_a_embeds = self.model.encode_image(
+                            batch['image_aug_a'].to(self.device, non_blocking=True),
+                            sam_features=sam_features)
+                        img_aug_b_embeds = self.model.encode_image(
+                            batch['image_aug_b'].to(self.device, non_blocking=True),
+                            sam_features=sam_features)
                         img_aug_a_embeds = self.model.encode_image(
                             batch['image_aug_a'].to(self.device, non_blocking=True),
                             sam_features=sam_features)
