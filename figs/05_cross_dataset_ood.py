@@ -26,6 +26,7 @@ from helpers import (
     SAVE_FIG_DIR,
     SAVE_TABLE_DIR,
     _to_percent,
+    label_cache_frame,
     latex_escape,
     load_runs,
     retrieval_config_order,
@@ -115,17 +116,31 @@ def read_ood_cache(cache_dir: Path = OOD_CACHE_DIR) -> pd.DataFrame:
                     "mean": metric_value(metrics, payload["eval_dataset"], metric),
                 }
             )
-    return pd.DataFrame(rows)
+    df = label_cache_frame(pd.DataFrame(rows), id_col="run_id", context="OOD cache")
+    df["raw_run_id"] = df["run_id"]
+    df["run_id"] = df["thesis_label"]
+    return df
 
 
 def build_id_rows(csv_path: str | Path, needed: pd.DataFrame) -> pd.DataFrame:
     runs = load_runs(csv_path, EXCLUDE).copy()
     runs["train_dataset"] = runs["config/dataset"].replace({"flickr": "flickr30k"})
     rows = []
-    wanted = needed[["run_id", "train_dataset", "seed"]].drop_duplicates()
+    wanted = needed[
+        [
+            "raw_run_id",
+            "run_id",
+            "display_label",
+            "latex_label",
+            "intervention_group",
+            "reference_label",
+            "train_dataset",
+            "seed",
+        ]
+    ].drop_duplicates()
     for _, item in wanted.iterrows():
         subset = runs[
-            runs["config/run_id"].eq(item["run_id"])
+            runs["internal_run_id"].eq(item["raw_run_id"])
             & runs["train_dataset"].eq(item["train_dataset"])
             & pd.to_numeric(runs["config/seed"], errors="coerce").eq(item["seed"])
         ]
@@ -137,6 +152,11 @@ def build_id_rows(csv_path: str | Path, needed: pd.DataFrame) -> pd.DataFrame:
             rows.append(
                 {
                     "run_id": item["run_id"],
+                    "display_label": item["display_label"],
+                    "latex_label": item["latex_label"],
+                    "intervention_group": item["intervention_group"],
+                    "reference_label": item["reference_label"],
+                    "raw_run_id": item["raw_run_id"],
                     "train_dataset": item["train_dataset"],
                     "eval_dataset": item["train_dataset"],
                     "seed": int(item["seed"]),
@@ -150,7 +170,21 @@ def build_id_rows(csv_path: str | Path, needed: pd.DataFrame) -> pd.DataFrame:
 
 
 def aggregate(data: pd.DataFrame) -> pd.DataFrame:
-    grouped = data.groupby(["run_id", "train_dataset", "eval_dataset", "condition", "metric", "metric_label"], sort=False)
+    grouped = data.groupby(
+        [
+            "run_id",
+            "display_label",
+            "latex_label",
+            "intervention_group",
+            "reference_label",
+            "train_dataset",
+            "eval_dataset",
+            "condition",
+            "metric",
+            "metric_label",
+        ],
+        sort=False,
+    )
     out = grouped["mean"].agg(["mean", "std", "count"]).reset_index()
     out = out.rename(columns={"count": "n_seeds"})
     return out
@@ -193,22 +227,14 @@ def write_table(data: pd.DataFrame) -> None:
                 if sub.empty:
                     continue
                 eval_label = DATASET_LABELS[train_dataset] if condition == "ID" else DATASET_LABELS[OPPOSITE[train_dataset]]
-                cells = [latex_escape(run_id), latex_escape(DATASET_LABELS[train_dataset]), latex_escape(f"{condition}: {eval_label}")]
+                label = sub["latex_label"].dropna().iloc[0] if "latex_label" in sub.columns else run_id
+                cells = [latex_escape(label), latex_escape(DATASET_LABELS[train_dataset]), latex_escape(f"{condition}: {eval_label}")]
                 for metric, _label in METRICS:
                     row = lookup.loc[(run_id, train_dataset, condition, metric)]
                     cells.append(fmt_cell(row["mean"], row["std"], int(row["n_seeds"])))
                 lines.append(" & ".join(cells) + r" \\")
     lines.extend([r"\bottomrule", r"\end{tabular}", ""])
     (SAVE_TABLE_DIR / f"{OUTPUT_STEM}.tex").write_text("\n".join(lines), encoding="utf-8")
-
-
-def display_run_id(run_id: str) -> str:
-    if run_id.startswith("B5d_multistream_"):
-        return "B5d_multistream\n" + run_id.removeprefix("B5d_multistream_")
-    if run_id.startswith("B5") and "_seg_" in run_id:
-        prefix, suffix = run_id.split("_seg_", maxsplit=1)
-        return f"{prefix}_seg\n{suffix}"
-    return run_id
 
 
 def matrix_for(data: pd.DataFrame, train_dataset: str, configs: list[str]) -> tuple[list[str], list[str], np.ndarray, np.ndarray, np.ndarray]:
@@ -251,7 +277,7 @@ def annotate(ax: plt.Axes, values: np.ndarray, stds: np.ndarray, n_seeds: np.nda
 
 def plot(data: pd.DataFrame) -> None:
     configure_matplotlib()
-    configs = data.attrs.get("config_order", RETRIEVAL_CONFIG_ORDER)
+    configs = data.attrs.get("config_order", list(data["run_id"].drop_duplicates()))
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 6.2))
     fig.subplots_adjust(left=0.11, right=0.93, top=0.91, bottom=0.14, wspace=0.28)
     fig.patch.set_facecolor("none")
@@ -270,7 +296,7 @@ def plot(data: pd.DataFrame) -> None:
         ax.set_xticks(np.arange(len(columns)))
         ax.set_xticklabels(columns, rotation=35, ha="right")
         ax.set_yticks(np.arange(len(rows)))
-        ax.set_yticklabels([display_run_id(run_id) for run_id in rows])
+        ax.set_yticklabels(rows)
         ax.axvline(len(METRICS) - 0.5, color="white", linewidth=2.0)
         ax.set_xticks(np.arange(-0.5, len(columns), 1), minor=True)
         ax.set_yticks(np.arange(-0.5, len(rows), 1), minor=True)

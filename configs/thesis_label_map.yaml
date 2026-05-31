@@ -1,0 +1,457 @@
+runs:
+  zero_shot:
+    thesis_label: Zero-shot CLIP
+    display_label: Zero-shot CLIP
+    latex_label: Zero-shot CLIP
+    intervention_group: reference
+    reference_label: ""
+    label_kind: reference
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  zeroshot:
+    alias_of: zero_shot
+
+  clip_zeroshot:
+    alias_of: zero_shot
+
+  CLIP_ZS:
+    alias_of: zero_shot
+
+  B0:
+    thesis_label: Base-min
+    display_label: Base-min
+    latex_label: Base-min
+    intervention_group: baseline
+    reference_label: Zero-shot CLIP
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-4 / Base-min
+    sweep_index: 4
+
+  base_min:
+    alias_of: B0
+
+  B0_uf4:
+    alias_of: B0
+    label_kind: alias_for_sweep
+    include_in_main_results: false
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-4 / Base-min
+    sweep_index: 4
+
+  B0plus_fixed:
+    thesis_label: Intra-Reg
+    display_label: Intra-Reg
+    latex_label: Intra-Reg
+    intervention_group: intra_regularization
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  b0plus_fixed:
+    alias_of: B0plus_fixed
+
+  boplus_fixed:
+    alias_of: B0plus_fixed
+
+  B0plus:
+    alias_of: B0plus_fixed
+    label_kind: superseded
+    always_superseded: true
+    superseded_by:
+      - B0plus_fixed
+      - b0plus_fixed
+      - boplus_fixed
+
+  b0plus:
+    alias_of: B0plus_fixed
+    label_kind: superseded
+    always_superseded: true
+    superseded_by:
+      - B0plus_fixed
+      - b0plus_fixed
+      - boplus_fixed
+
+  boplus:
+    alias_of: B0plus_fixed
+    label_kind: superseded
+    always_superseded: true
+    superseded_by:
+      - B0plus_fixed
+      - b0plus_fixed
+      - boplus_fixed
+
+  B0_projonly:
+    thesis_label: Proj-only
+    display_label: Proj-only
+    latex_label: Proj-only
+    intervention_group: unfreezing_depth
+    reference_label: Base-min
+    label_kind: sweep_only
+    include_in_main_results: false
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-0 / Proj-only
+    sweep_index: 0
+
+  projonly:
+    alias_of: B0_projonly
+
+  projection_only:
+    alias_of: B0_projonly
+
+  B0_uf1:
+    thesis_label: Unfreeze-1
+    display_label: Unfreeze-1
+    latex_label: Unfreeze-1
+    intervention_group: unfreezing_depth
+    reference_label: Base-min
+    label_kind: sweep_only
+    include_in_main_results: false
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-1
+    sweep_index: 1
+
+  uf1:
+    alias_of: B0_uf1
+
+  B0_uf2:
+    thesis_label: Unfreeze-2
+    display_label: Unfreeze-2
+    latex_label: Unfreeze-2
+    intervention_group: unfreezing_depth
+    reference_label: Base-min
+    label_kind: sweep_only
+    include_in_main_results: false
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-2
+    sweep_index: 2
+
+  uf2:
+    alias_of: B0_uf2
+
+  B0_uf3:
+    thesis_label: Unfreeze-3
+    display_label: Unfreeze-3
+    latex_label: Unfreeze-3
+    intervention_group: unfreezing_depth
+    reference_label: Base-min
+    label_kind: sweep_only
+    include_in_main_results: false
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-3
+    sweep_index: 3
+
+  uf3:
+    alias_of: B0_uf3
+
+  B0_uf5:
+    thesis_label: Unfreeze-5
+    display_label: Unfreeze-5
+    latex_label: Unfreeze-5
+    intervention_group: unfreezing_depth
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-5
+    sweep_index: 5
+
+  uf5:
+    alias_of: B0_uf5
+
+  B0_uf6:
+    thesis_label: Unfreeze-6
+    display_label: Unfreeze-6
+    latex_label: Unfreeze-6
+    intervention_group: unfreezing_depth
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-6
+    sweep_index: 6
+
+  uf6:
+    alias_of: B0_uf6
+
+  B0_uf7:
+    thesis_label: Unfreeze-7
+    display_label: Unfreeze-7
+    latex_label: Unfreeze-7
+    intervention_group: unfreezing_depth
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: true
+    sweep_display_label: Unfreeze-7
+    sweep_index: 7
+
+  uf7:
+    alias_of: B0_uf7
+
+  B0_proj1024:
+    thesis_label: Proj-1024
+    display_label: Proj-1024
+    latex_label: Proj-1024
+    intervention_group: projection_capacity
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  proj1024:
+    alias_of: B0_proj1024
+
+  B1:
+    thesis_label: Loss-SigLIP
+    display_label: Loss-SigLIP
+    latex_label: Loss-SigLIP
+    intervention_group: loss_function
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  siglip:
+    alias_of: B1
+
+  B2:
+    thesis_label: HN-Syntactic
+    display_label: HN-Syntactic
+    latex_label: HN-Syntactic
+    intervention_group: hard_negatives
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  hard_negative:
+    alias_of: B2
+
+  hn_syntactic:
+    alias_of: B2
+
+  B4:
+    thesis_label: Aux-ObjCls
+    display_label: Aux-ObjCls
+    latex_label: Aux-ObjCls
+    intervention_group: auxiliary_object_classification
+    reference_label: Base-min
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  aux_objcls:
+    alias_of: B4
+
+  object_cls:
+    alias_of: B4
+
+  B5a:
+    thesis_label: Seg-Spatial
+    display_label: Seg-Spatial
+    latex_label: Seg-Spatial
+    intervention_group: segment_enrichment
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  B5a_seg_spatial:
+    alias_of: B5a
+
+  seg_spatial:
+    alias_of: B5a
+
+  B5b:
+    thesis_label: Seg-Semantic
+    display_label: Seg-Semantic
+    latex_label: Seg-Semantic
+    intervention_group: segment_enrichment
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  B5b_seg_semantic:
+    alias_of: B5b
+
+  seg_semantic:
+    alias_of: B5b
+
+  B5c:
+    thesis_label: Seg-Geom
+    display_label: Seg-Geom
+    latex_label: Seg-Geom
+    intervention_group: segment_enrichment
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  B5c_seg_continuous:
+    alias_of: B5c
+
+  seg_geom:
+    alias_of: B5c
+
+  seg_geometry:
+    alias_of: B5c
+
+  B5d_gate:
+    thesis_label: Sam-Gate
+    display_label: Sam-Gate
+    latex_label: Sam-Gate
+    intervention_group: sam_fusion
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  B5d_multistream_gate:
+    alias_of: B5d_gate
+
+  sam_gate:
+    alias_of: B5d_gate
+
+  B5d_xattn:
+    thesis_label: Sam-XAttn
+    display_label: Sam-XAttn
+    latex_label: Sam-XAttn
+    intervention_group: sam_fusion
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  B5d_multistream_crossattn:
+    alias_of: B5d_xattn
+
+  sam_xattn:
+    alias_of: B5d_xattn
+
+  sam_cross_attention:
+    alias_of: B5d_xattn
+
+  B5d_concat:
+    thesis_label: Sam-Concat
+    display_label: Sam-Concat
+    latex_label: Sam-Concat
+    intervention_group: sam_fusion
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  B5d_multistream_concat:
+    alias_of: B5d_concat
+
+  sam_concat:
+    alias_of: B5d_concat
+
+  B5d_skip:
+    thesis_label: Sam-Skip
+    display_label: Sam-Skip
+    latex_label: Sam-Skip
+    intervention_group: sam_fusion
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  B5e_sam_skip:
+    alias_of: B5d_skip
+
+  sam_skip:
+    alias_of: B5d_skip
+
+  BLIP_TEXT:
+    thesis_label: Text-BLIP
+    display_label: Text-BLIP
+    latex_label: Text-BLIP
+    intervention_group: text_encoder
+    reference_label: Intra-Reg
+    label_kind: active_main
+    include_in_main_results: true
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+
+  text_blip:
+    alias_of: BLIP_TEXT
+
+  blip_text:
+    alias_of: BLIP_TEXT
+
+  B0v2:
+    alias_of: B0plus_fixed
+    label_kind: prose_only
+    include_in_main_results: false
+    include_in_sweep_figures: false
+    always_excluded: true
+    exclude_reason: prose_only_corrected_intra_regularized_alias
+
+  B5:
+    thesis_label: B5
+    display_label: B5
+    latex_label: B5
+    intervention_group: debug_umbrella
+    reference_label: Intra-Reg
+    label_kind: debug_only
+    include_in_main_results: false
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+    always_excluded: true
+    exclude_reason: debug_umbrella_use_specific_variants
+
+  B5_seg:
+    alias_of: B5
+    label_kind: debug_only
+    include_in_main_results: false
+    include_in_sweep_figures: false
+    always_excluded: true
+    exclude_reason: debug_umbrella_use_specific_variants
+
+  B5d:
+    thesis_label: B5d
+    display_label: B5d
+    latex_label: B5d
+    intervention_group: debug_umbrella
+    reference_label: Intra-Reg
+    label_kind: debug_only
+    include_in_main_results: false
+    include_in_sweep_figures: false
+    sweep_display_label: ""
+    sweep_index:
+    always_excluded: true
+    exclude_reason: debug_umbrella_use_specific_sam_variants
