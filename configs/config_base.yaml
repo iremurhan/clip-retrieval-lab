@@ -82,6 +82,11 @@ debug:
   debug_samples: 100
 
 eval:
+  # End-of-training evaluation suite. These are default-on for new trained
+  # jobs so W&B summaries contain the same retrieval, compositional, and
+  # forced-choice metrics without separate post-hoc submission.
+  ood_retrieval:
+    enabled: true
   sugarcrepe:
     enabled: true
     data_dir: "datasets/sugarcrepe"
@@ -89,6 +94,9 @@ eval:
     # Full evaluation by default. Override in smoke tests to cap each
     # subcategory without changing training-time behavior.
     max_items_per_category: null
+  mmvp_vlm:
+    enabled: true
+    data_dir: "datasets/mmvp_vlm"
 
 augment:
   # Number of photometric transforms sampled from the pool per image.

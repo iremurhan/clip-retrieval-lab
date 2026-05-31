@@ -172,7 +172,13 @@ class Trainer:
         # Create checkpoint directory
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
-        sugar_cfg = config.get("eval", {}).get("sugarcrepe", {})
+        eval_cfg = config.get("eval", {})
+        ood_cfg = eval_cfg.get("ood_retrieval", {})
+        self.ood_retrieval_enabled = bool(ood_cfg.get("enabled", True))
+        if not self.ood_retrieval_enabled:
+            logger.info("OOD retrieval end-of-training eval disabled by eval.ood_retrieval.enabled=false.")
+
+        sugar_cfg = eval_cfg.get("sugarcrepe", {})
         self.sugarcrepe_enabled = bool(sugar_cfg.get("enabled", True))
         self.sugarcrepe_max_items_per_category = sugar_cfg.get("max_items_per_category")
         if self.sugarcrepe_max_items_per_category is not None:
@@ -224,6 +230,30 @@ class Trainer:
             logger.info(f"SugarCrepe images_dir found at: {self.sugarcrepe_images_dir}")
         else:
             logger.info("SugarCrepe end-of-training eval disabled by eval.sugarcrepe.enabled=false.")
+
+        mmvp_cfg = eval_cfg.get("mmvp_vlm", {})
+        self.mmvp_vlm_enabled = bool(mmvp_cfg.get("enabled", True))
+        self.mmvp_vlm_data_dir = None
+        if self.mmvp_vlm_enabled:
+            _mmvp_data_dirs = [
+                mmvp_cfg.get("data_dir"),
+                "datasets/mmvp_vlm",
+                "/users/beyza.urhan/experiments/datasets/mmvp_vlm",
+            ]
+            _mmvp_data_dirs = [p for i, p in enumerate(_mmvp_data_dirs) if p and p not in _mmvp_data_dirs[:i]]
+            for path in _mmvp_data_dirs:
+                if os.path.isfile(os.path.join(path, "Questions.csv")):
+                    self.mmvp_vlm_data_dir = path
+                    break
+            if self.mmvp_vlm_data_dir is None:
+                raise FileNotFoundError(
+                    "MMVP-VLM eval is enabled, but data_dir is missing. "
+                    f"Checked: {_mmvp_data_dirs}. Set eval.mmvp_vlm.data_dir or "
+                    "disable explicitly with eval.mmvp_vlm.enabled=false."
+                )
+            logger.info(f"MMVP-VLM data_dir found at: {self.mmvp_vlm_data_dir}")
+        else:
+            logger.info("MMVP-VLM end-of-training eval disabled by eval.mmvp_vlm.enabled=false.")
         
         # Initialize WandB run reference and define summary metrics
         self.wandb_run = None
@@ -1315,6 +1345,10 @@ class Trainer:
         _run_post_training_eval. Standalone eval scripts remain available for
         older checkpoints.
         """
+        if not self.ood_retrieval_enabled:
+            logger.info("OOD retrieval evaluation disabled, skipping.")
+            return
+
         best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
         if not os.path.exists(best_path):
             logger.warning("No best_model.pth found. Skipping OOD retrieval evaluation.")
@@ -1372,13 +1406,11 @@ class Trainer:
         caught by _run_post_training_eval. Standalone eval scripts remain
         available for older checkpoints.
         """
-        data_dir = "datasets/mmvp_vlm"
-        if not os.path.isdir(data_dir):
-            raise FileNotFoundError(
-                f"MMVP-VLM data dir not found: {data_dir}. "
-                "Mount /users/beyza.urhan/experiments/datasets/mmvp_vlm to "
-                "/workspace/datasets/mmvp_vlm in the training Slurm container."
-            )
+        if not self.mmvp_vlm_enabled:
+            logger.info("MMVP-VLM evaluation disabled, skipping.")
+            return
+        if self.mmvp_vlm_data_dir is None:
+            raise RuntimeError("MMVP-VLM eval is enabled but data_dir was not initialized.")
 
         best_path = os.path.join(self.checkpoint_dir, "best_model.pth")
         if not os.path.exists(best_path):
@@ -1401,7 +1433,7 @@ class Trainer:
             tokenizer=self.tokenizer,
             transform=transform,
             device=self.device,
-            data_dir=data_dir,
+            data_dir=self.mmvp_vlm_data_dir,
             max_length=self.config["data"].get("max_length", 77),
         )
 
