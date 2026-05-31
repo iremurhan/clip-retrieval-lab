@@ -18,10 +18,10 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from helpers import CACHE_DIR, SAVE_FIG_DIR, SAVE_TABLE_DIR
+from helpers import CACHE_DIR, SAVE_FIG_DIR, SAVE_TABLE_DIR, label_cache_frame
 
 
-EXCLUDE = ["B0v2", "B0plus_fixed"]
+EXCLUDE = ["B0v2"]
 CACHE_CSV = CACHE_DIR / "patch_level_results.csv"
 CATEGORIES = [
     ("add_att", "Add\nAtt"),
@@ -71,8 +71,8 @@ def fmt_mean_std(mean: float, std: float) -> str:
     return rf"{mean:+.3f} $\pm$ {std:.3f}"
 
 
-def config_label(run_id: str, dataset: str) -> str:
-    return f"{run_id} ({dataset})"
+def config_label(display_label: str, dataset: str) -> str:
+    return f"{display_label} ({dataset})"
 
 
 def load_results(path: Path = CACHE_CSV) -> pd.DataFrame:
@@ -82,6 +82,9 @@ def load_results(path: Path = CACHE_CSV) -> pd.DataFrame:
     if df.empty:
         raise ValueError(f"Patch-level cache is empty: {path}")
     df = df[~df["run_id"].isin(EXCLUDE)].copy()
+    df = label_cache_frame(df, id_col="run_id", context="patch-level cache")
+    df["raw_run_id"] = df["run_id"]
+    df["run_id"] = df["thesis_label"]
     df["dataset"] = df["dataset"].replace({"flickr": "flickr30k"})
     for col in ["seed", "cls_accuracy", "patch_max_accuracy", "delta"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -92,12 +95,12 @@ def load_results(path: Path = CACHE_CSV) -> pd.DataFrame:
 
 
 def aggregate_results(df: pd.DataFrame) -> pd.DataFrame:
-    grouped = df.groupby(["run_id", "dataset", "subcategory"], dropna=False)
+    grouped = df.groupby(["run_id", "display_label", "latex_label", "dataset", "subcategory"], dropna=False)
     mean_df = grouped[["cls_accuracy", "patch_max_accuracy", "delta"]].mean().add_suffix("_mean")
     std_df = grouped[["cls_accuracy", "patch_max_accuracy", "delta"]].std(ddof=1).add_suffix("_std")
     n_df = grouped.size().rename("n_seeds")
     agg = pd.concat([mean_df, std_df, n_df], axis=1).reset_index()
-    agg["config"] = [config_label(r, d) for r, d in zip(agg["run_id"], agg["dataset"], strict=True)]
+    agg["config"] = [config_label(r, d) for r, d in zip(agg["display_label"], agg["dataset"], strict=True)]
     return agg
 
 
@@ -105,7 +108,7 @@ def ordered_configs(agg: pd.DataFrame) -> list[str]:
     order = (
         agg[["config", "run_id", "dataset"]]
         .drop_duplicates()
-        .sort_values(["dataset", "run_id"])
+        .sort_values(["dataset", "config"])
     )
     return order["config"].tolist()
 

@@ -18,19 +18,41 @@ import pandas as pd
 import seaborn as sns
 
 from helpers import (
+    CAPACITY_GROUPS,
     DEFAULT_CSV_PATH,
+    RETRIEVAL_CONFIG_ORDER,
     RETRIEVAL_DATASETS,
     RETRIEVAL_DIRECTIONS,
     RETRIEVAL_KS,
     SAVE_DATA_DIR,
     SAVE_FIG_DIR,
+    SINGLE_SEED_FOOTNOTE,
     build_retrieval_data,
+    mark_single_seed_bar,
     print_retrieval_report,
     write_retrieval_table,
 )
 
 
 OUTPUT_STEM = "04A_retrieval_grouped_bar"
+
+
+def drop_capacity_variants(data: pd.DataFrame) -> pd.DataFrame:
+    """Keep baseline references + main interventions; drop capacity variants."""
+    keep = ~data["intervention_group"].isin(CAPACITY_GROUPS)
+    dropped = sorted(set(data.loc[~keep, "display_label"].dropna().astype(str)))
+    filtered = data[keep].copy()
+    survivors = set(filtered["run_id"].dropna().astype(str))
+    config_order = [run_id for run_id in RETRIEVAL_CONFIG_ORDER if run_id in survivors]
+    extras = sorted(survivors - set(config_order))
+    config_order = config_order + extras
+    filtered.attrs.update(data.attrs)
+    filtered.attrs["config_order"] = config_order
+    if dropped:
+        filtered.attrs["warnings"] = sorted(
+            set(data.attrs.get("warnings", [])) | {"Capacity variants excluded: " + ", ".join(dropped)}
+        )
+    return filtered
 
 
 def configure_matplotlib() -> None:
@@ -68,7 +90,8 @@ def config_labels(data: pd.DataFrame, configs: list[str]) -> dict[str, str]:
     labels = {}
     for run_id in configs:
         sub = data[data["run_id"].eq(run_id)]
-        labels[run_id] = f"{run_id}{'*' if sub['n_seeds'].eq(1).any() else ''}"
+        display = sub["display_label"].dropna().iloc[0] if "display_label" in sub.columns and not sub.empty else run_id
+        labels[run_id] = f"{display}{'*' if sub['n_seeds'].eq(1).any() else ''}"
     return labels
 
 
@@ -100,8 +123,9 @@ def plot(data: pd.DataFrame) -> None:
                 valid = np.isfinite(means)
                 if not valid.any():
                     continue
+                single = (n_seeds[valid] == 1)
                 yerr = np.where((n_seeds >= 2) & np.isfinite(stds), stds, 0.0)
-                ax.bar(
+                bars = ax.bar(
                     x[valid] + offsets[idx],
                     means[valid],
                     width=width * 0.90,
@@ -112,6 +136,9 @@ def plot(data: pd.DataFrame) -> None:
                     error_kw={"ecolor": "0.18", "elinewidth": 0.55, "capsize": 1.2, "capthick": 0.55},
                     zorder=3,
                 )
+                for bar, is_single in zip(bars, single):
+                    if is_single:
+                        mark_single_seed_bar(bar)
 
             ax.set_title(f"{dataset_spec['label']} {RETRIEVAL_DIRECTIONS[direction]}", pad=5)
             ax.set_xticks(x)
@@ -139,7 +166,7 @@ def plot(data: pd.DataFrame) -> None:
         columnspacing=0.85,
         handletextpad=0.35,
     )
-    fig.text(0.5, 0.02, "* at least one dataset is single-seed", ha="center", va="bottom", fontsize=7, color="0.35")
+    fig.text(0.5, 0.02, SINGLE_SEED_FOOTNOTE, ha="center", va="bottom", fontsize=6.8, color="0.35")
 
     SAVE_FIG_DIR.mkdir(parents=True, exist_ok=True)
     fig.savefig(SAVE_FIG_DIR / f"{OUTPUT_STEM}.pdf")
@@ -150,6 +177,7 @@ def plot(data: pd.DataFrame) -> None:
 def main() -> None:
     SAVE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     data = build_retrieval_data(DEFAULT_CSV_PATH)
+    data = drop_capacity_variants(data)
     print_retrieval_report(data)
     data.to_csv(SAVE_DATA_DIR / f"{OUTPUT_STEM}_data.csv", index=False)
     write_retrieval_table(data)

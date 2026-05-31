@@ -68,7 +68,8 @@ def config_labels(data: pd.DataFrame, configs: list[str]) -> dict[str, str]:
     labels = {}
     for run_id in configs:
         sub = data[data["run_id"].eq(run_id)]
-        labels[run_id] = f"{run_id}{'*' if sub['n_seeds'].eq(1).any() else ''}"
+        display = sub["display_label"].dropna().iloc[0] if "display_label" in sub.columns and not sub.empty else run_id
+        labels[run_id] = f"{display}{'*' if sub['n_seeds'].eq(1).any() else ''}"
     return labels
 
 

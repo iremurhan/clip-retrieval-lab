@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from helpers import CACHE_DIR as BASE_CACHE_DIR
-from helpers import SAVE_DATA_DIR, SAVE_TABLE_DIR, latex_escape, retrieval_config_order
+from helpers import SAVE_DATA_DIR, SAVE_TABLE_DIR, label_cache_frame, latex_escape, retrieval_config_order
 
 
 CACHE_DIR = BASE_CACHE_DIR / "missing_positive_stats" / "stats"
@@ -34,7 +34,10 @@ def load_stats(cache_dir: Path = CACHE_DIR) -> pd.DataFrame:
         }
         row.update(payload.get("metrics", {}))
         rows.append(row)
-    return pd.DataFrame(rows)
+    df = label_cache_frame(pd.DataFrame(rows), id_col="run_id", context="missing-positive cache")
+    df["raw_run_id"] = df["run_id"]
+    df["run_id"] = df["thesis_label"]
+    return df
 
 
 def fmt(mean: float, std: float, n: int) -> str:
@@ -46,16 +49,18 @@ def fmt(mean: float, std: float, n: int) -> str:
 
 
 def build_table(data: pd.DataFrame) -> pd.DataFrame:
-    grouped = data.groupby("run_id", sort=False)[[m for m, _ in METRICS]].agg(["mean", "std", "count"])
+    grouped = data.groupby(["run_id", "latex_label"], sort=False)[[m for m, _ in METRICS]].agg(["mean", "std", "count"])
     rows = []
     for run_id in retrieval_config_order(data["run_id"].unique()):
-        if run_id not in grouped.index:
+        matches = [idx for idx in grouped.index if idx[0] == run_id]
+        if not matches:
             continue
-        row = {"run_id": run_id}
+        idx = matches[0]
+        row = {"run_id": run_id, "latex_label": idx[1]}
         for metric, _label in METRICS:
-            row[f"{metric}_mean"] = grouped.loc[run_id, (metric, "mean")]
-            row[f"{metric}_std"] = grouped.loc[run_id, (metric, "std")]
-            row[f"{metric}_n"] = int(grouped.loc[run_id, (metric, "count")])
+            row[f"{metric}_mean"] = grouped.loc[idx, (metric, "mean")]
+            row[f"{metric}_std"] = grouped.loc[idx, (metric, "std")]
+            row[f"{metric}_n"] = int(grouped.loc[idx, (metric, "count")])
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -69,7 +74,7 @@ def write_latex(table: pd.DataFrame) -> None:
         r"\midrule",
     ]
     for _, row in table.iterrows():
-        cells = [latex_escape(row["run_id"])]
+        cells = [latex_escape(row["latex_label"])]
         for metric, _label in METRICS:
             cells.append(fmt(row[f"{metric}_mean"], row[f"{metric}_std"], int(row[f"{metric}_n"])))
         lines.append(" & ".join(cells) + r" \\")
@@ -85,9 +90,9 @@ def print_headlines(table: pd.DataFrame) -> None:
         for _, row in ranked.iterrows():
             print(f"    {row['run_id']}: {row[f'{metric}_mean']:.1f}")
 
-    b4 = table[table["run_id"].eq("B4")]
+    b4 = table[table["run_id"].eq("Aux-ObjCls")]
     if b4.empty:
-        print("B4 check: no B4 rows found.")
+        print("Aux-ObjCls check: no rows found.")
     else:
         i2t = float(b4.iloc[0]["eccv_top5_neighborhood_i2t_mean"])
         t2i = float(b4.iloc[0]["eccv_top5_neighborhood_t2i_mean"])
