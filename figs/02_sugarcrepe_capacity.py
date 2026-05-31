@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import re
-
 import pandas as pd
 
 from helpers import (
@@ -16,6 +14,7 @@ from helpers import (
     setup_thesis_style,
     split_by_baseline,
     sugarcrepe_aggregate_to_long,
+    THESIS_LABEL_ORDER,
 )
 
 
@@ -24,28 +23,9 @@ OUTPUT_STEM = "02_sugarcrepe_capacity"
 
 
 def sort_configs(df: pd.DataFrame) -> list[str]:
-    unfreeze = (
-        df.groupby("config/run_id", sort=False)["config/unfreeze_layers"]
-        .first()
-        .pipe(pd.to_numeric, errors="coerce")
-        .to_dict()
-    )
-    run_ids = list(df["config/run_id"].dropna().unique())
-
-    def key(run_id: str):
-        if run_id == "B0":
-            return (0, 0, run_id)
-        match = re.fullmatch(r"B0_uf(\d+)", run_id)
-        if match:
-            depth = unfreeze.get(run_id)
-            if pd.isna(depth):
-                depth = int(match.group(1))
-            return (1, int(depth), run_id)
-        if run_id == "B0_proj1024":
-            return (3, 0, run_id)
-        return (2, 0, run_id)
-
-    return sorted(run_ids, key=key)
+    labels = set(df["thesis_label"].dropna().astype(str))
+    ordered = [label for label in THESIS_LABEL_ORDER if label in labels]
+    return ordered + sorted(labels - set(ordered))
 
 
 def main() -> None:

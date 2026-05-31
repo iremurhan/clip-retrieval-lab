@@ -19,7 +19,7 @@ import pandas as pd
 import seaborn as sns
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import FIG_ARTIFACT_ROOT, SAVE_DATA_DIR, SAVE_FIG_DIR, SAVE_TABLE_DIR, latex_escape  # noqa: E402
+from helpers import FIG_ARTIFACT_ROOT, SAVE_DATA_DIR, SAVE_FIG_DIR, SAVE_TABLE_DIR, label_cache_frame, latex_escape, retrieval_config_order  # noqa: E402
 
 
 CACHE_CSV = FIG_ARTIFACT_ROOT / "cache" / "retrieval_by_bucket.csv"
@@ -63,12 +63,7 @@ def configure_matplotlib() -> None:
 
 
 def config_order(run_ids: list[str]) -> list[str]:
-    detected = [str(run_id) for run_id in run_ids]
-    preferred = ["B0", "B0plus"]
-    ordered = [run_id for run_id in preferred if run_id in detected]
-    # Match Figure 01 after its two references: simple alphabetical order.
-    rest = sorted(run_id for run_id in set(detected) if run_id not in ordered)
-    return ordered + rest
+    return retrieval_config_order(run_ids)
 
 
 def load_data(path: Path = CACHE_CSV) -> pd.DataFrame:
@@ -79,11 +74,14 @@ def load_data(path: Path = CACHE_CSV) -> pd.DataFrame:
     missing = required - set(df.columns)
     if missing:
         raise KeyError(f"{path} missing columns: {sorted(missing)}")
+    df = label_cache_frame(df, id_col="run_id", context="retrieval-by-bucket cache")
+    df["raw_run_id"] = df["run_id"]
+    df["run_id"] = df["thesis_label"]
     return df
 
 
 def aggregate(df: pd.DataFrame) -> pd.DataFrame:
-    grouped = df.groupby(["run_id", "dataset", "direction", "bucket_dim", "bucket_value", "k"], dropna=False)
+    grouped = df.groupby(["run_id", "display_label", "latex_label", "dataset", "direction", "bucket_dim", "bucket_value", "k"], dropna=False)
     agg = grouped["recall"].agg(mean="mean", std=lambda s: s.std(ddof=1), n_seeds="count").reset_index()
     n_queries = grouped["n_queries"].min().rename("n_queries").reset_index()
     return agg.merge(n_queries, on=["run_id", "dataset", "direction", "bucket_dim", "bucket_value", "k"], how="left")
@@ -103,8 +101,10 @@ def y_limits(panel: pd.DataFrame) -> tuple[float, float]:
 def labels_for_configs(data: pd.DataFrame, configs: list[str]) -> dict[str, str]:
     labels = {}
     for run_id in configs:
-        n = int(data[data["run_id"].eq(run_id)]["n_seeds"].max())
-        labels[run_id] = f"{run_id}{'*' if n == 1 else ''}"
+        sub = data[data["run_id"].eq(run_id)]
+        n = int(sub["n_seeds"].max())
+        display = sub["display_label"].dropna().iloc[0] if "display_label" in sub.columns and not sub.empty else run_id
+        labels[run_id] = f"{display}{'*' if n == 1 else ''}"
     return labels
 
 
@@ -216,7 +216,7 @@ def write_table(agg: pd.DataFrame) -> None:
     ]
     for _, row in data.iterrows():
         cells = [
-            latex_escape(row["run_id"]),
+            latex_escape(row["latex_label"]),
             latex_escape(DATASET_LABELS.get(row["dataset"], row["dataset"])),
             latex_escape(row["bucket_dim_label"]),
             latex_escape(row["bucket_value"]),

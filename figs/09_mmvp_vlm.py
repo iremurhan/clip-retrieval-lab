@@ -21,7 +21,7 @@ import pandas as pd
 import seaborn as sns
 
 from helpers import CACHE_DIR as BASE_CACHE_DIR
-from helpers import DEFAULT_CSV_PATH, SAVE_DATA_DIR, SAVE_FIG_DIR, SAVE_TABLE_DIR, load_runs, split_by_baseline
+from helpers import DEFAULT_CSV_PATH, SAVE_DATA_DIR, SAVE_FIG_DIR, SAVE_TABLE_DIR, label_cache_frame, load_runs, split_by_baseline
 from src.eval.mmvp_vlm import PATTERN_ORDER
 
 
@@ -79,7 +79,10 @@ def load_mmvp_cache(cache_dir: Path = CACHE_DIR) -> pd.DataFrame:
                     "mean": float(metrics[pattern]) * 100.0,
                 }
             )
-    return pd.DataFrame(rows)
+    df = label_cache_frame(pd.DataFrame(rows), id_col="run_id", context="MMVP-VLM cache")
+    df["raw_run_id"] = df["run_id"]
+    df["run_id"] = df["thesis_label"]
+    return df
 
 
 def latex_escape(value: object) -> str:
@@ -96,8 +99,8 @@ def latex_escape(value: object) -> str:
 def config_groups(csv_path: str | Path = DEFAULT_CSV_PATH) -> tuple[list[str], list[str]]:
     runs = load_runs(csv_path)
     b0plus_df, b0_df = split_by_baseline(runs, include_b0_in_interventions=True)
-    interventions = list(dict.fromkeys(b0plus_df["config/run_id"].dropna().astype(str)))
-    capacity = list(dict.fromkeys(b0_df["config/run_id"].dropna().astype(str)))
+    interventions = list(dict.fromkeys(b0plus_df["thesis_label"].dropna().astype(str)))
+    capacity = list(dict.fromkeys(b0_df["thesis_label"].dropna().astype(str)))
     return interventions, capacity
 
 

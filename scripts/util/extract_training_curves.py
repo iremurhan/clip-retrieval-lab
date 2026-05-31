@@ -4,6 +4,7 @@ import argparse
 import math
 import os
 import re
+import sys
 import warnings
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -12,14 +13,22 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.thesis_labels import apply_thesis_labels
+
 
 DEFAULT_PROJECT = "iremurhan-bogazici-university/clip-retrieval"
-DEFAULT_SUMMARY_CSV = Path("/Volumes/T7/Research/wandb/runs_summary.csv")
+ARTIFACT_ROOT = Path(
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+)
+DEFAULT_CLEAN_LONG = ARTIFACT_ROOT / "clean" / "clean_results_long.parquet"
+DEFAULT_SUMMARY_CSV = ARTIFACT_ROOT / "clean" / "clean_results_wide.csv"
 CURVES_DIR = Path("figs/cache/training_curves")
 AGGREGATED_PATH = Path("figs/cache/training_curves_aggregated.csv")
 SUMMARY_PATH = Path("figs/cache/training_summary.csv")
 FIGURE_STEM = Path("figs/draft_training_curves")
-EXCLUDE = {"B0v2", "B0plus_fixed", "B5_seg", "B0_proj1024"}
+EXCLUDE = {"B0v2", "B5_seg"}
 
 REQUESTED_KEYS = [
     "train/loss",
@@ -60,8 +69,9 @@ PER_RUN_COLUMNS = [
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract fresh W&B training curves and draft convergence plot.")
-    parser.add_argument("--project", default=DEFAULT_PROJECT, help="W&B project path: entity/project")
+    parser = argparse.ArgumentParser(description="Extract training curves from clean_results_long.parquet.")
+    parser.add_argument("--project", default=DEFAULT_PROJECT, help="Deprecated; kept for CLI compatibility.")
+    parser.add_argument("--clean-long", type=Path, default=DEFAULT_CLEAN_LONG)
     parser.add_argument("--summary-csv", type=Path, default=DEFAULT_SUMMARY_CSV)
     parser.add_argument("--curves-dir", type=Path, default=CURVES_DIR)
     parser.add_argument("--aggregated-path", type=Path, default=AGGREGATED_PATH)
@@ -134,11 +144,10 @@ def curve_path(
 
 
 def read_full_history(run: Any) -> pd.DataFrame:
-    history = run.history(pandas=True, samples=100_000)
-    if isinstance(history, pd.DataFrame) and not history.empty:
-        return history
-    rows = list(run.scan_history(page_size=10_000))
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    raise RuntimeError(
+        "Raw W&B history reads are disabled. Run scripts/util/export_clean_results.py "
+        "and consume clean_results_long.parquet instead."
+    )
 
 
 def best_source(history: pd.DataFrame, sources: list[str]) -> str | None:
@@ -355,33 +364,120 @@ def expected_run_ids(summary_csv: Path) -> set[str]:
         print(f"WARNING: summary CSV not found for cross-check: {summary_csv}")
         return set()
     df = pd.read_csv(summary_csv)
-    if "config/run_id" not in df.columns:
-        print(f"WARNING: summary CSV lacks config/run_id: {summary_csv}")
+    if "thesis_label" not in df.columns:
+        id_col = "internal_run_id" if "internal_run_id" in df.columns else "config/run_id"
+        if id_col not in df.columns:
+            print(f"WARNING: summary CSV lacks thesis_label/internal_run_id: {summary_csv}")
+            return set()
+        df = apply_thesis_labels(
+            df,
+            id_col=id_col,
+            context=f"training-curve summary cross-check {summary_csv}",
+            fail_on_unmapped=True,
+            drop_superseded=True,
+        )
+    if "validity_status" in df.columns:
+        df = df[~df["validity_status"].isin({"invalid", "excluded", "superseded"})]
+    if "is_superseded" in df.columns:
+        df = df[~df["is_superseded"].astype(bool)]
+    if "is_excluded" in df.columns:
+        df = df[~df["is_excluded"].astype(bool)]
+    if "thesis_label" not in df.columns:
         return set()
-    return set(df.loc[df["config/run_id"].notna(), "config/run_id"].astype(str)) - EXCLUDE
+    return set(df.loc[df["thesis_label"].notna(), "thesis_label"].astype(str)) - EXCLUDE
+
+
+def source_for_clean_metric(metrics: pd.Index, suffix: str) -> str | None:
+    exact = [metric for metric in metrics if metric.endswith(suffix)]
+    val_exact = [metric for metric in exact if metric.startswith("val/")]
+    if val_exact:
+        return sorted(val_exact)[0]
+    return sorted(exact)[0] if exact else None
+
+
+def clean_group_to_curve(group: pd.DataFrame) -> pd.DataFrame:
+    metric_map = {
+        "train_loss": "train/loss_total",
+        "train_loss_clip": "train/loss_clip",
+        "train_loss_intra_img": "train/loss_intra_img",
+        "train_loss_intra_txt": "train/loss_intra_txt",
+    }
+    working = group[["epoch", "step", "metric", "value"]].copy()
+    working["epoch"] = pd.to_numeric(working["epoch"], errors="coerce")
+    working["step"] = pd.to_numeric(working["step"], errors="coerce")
+    working["value"] = pd.to_numeric(working["value"], errors="coerce")
+    working = working[working["value"].notna()].copy()
+    if working.empty:
+        return pd.DataFrame(columns=PER_RUN_COLUMNS)
+
+    pivot = (
+        working.pivot_table(index=["epoch", "step"], columns="metric", values="value", aggfunc="last")
+        .reset_index()
+        .sort_values(["epoch", "step"], na_position="last", kind="mergesort")
+    )
+    out = pd.DataFrame(index=pivot.index)
+    out["epoch"] = pivot["epoch"]
+    out["step"] = pivot["step"]
+    for out_col, metric_name in metric_map.items():
+        out[out_col] = pd.to_numeric(pivot[metric_name], errors="coerce") if metric_name in pivot else np.nan
+    for out_col, suffix in {
+        "val_r1_i2t": "/r1_i2t",
+        "val_r1_t2i": "/r1_t2i",
+        "val_r5_i2t": "/r5_i2t",
+        "val_r5_t2i": "/r5_t2i",
+    }.items():
+        source = source_for_clean_metric(pivot.columns, suffix)
+        out[out_col] = pd.to_numeric(pivot[source], errors="coerce") if source is not None else np.nan
+    return out[PER_RUN_COLUMNS].dropna(
+        how="all",
+        subset=[col for col in PER_RUN_COLUMNS if col not in {"epoch", "step"}],
+    ).reset_index(drop=True)
 
 
 def main() -> None:
     args = parse_args()
-    import wandb
-
     args.curves_dir.mkdir(parents=True, exist_ok=True)
     args.aggregated_path.parent.mkdir(parents=True, exist_ok=True)
     args.summary_path.parent.mkdir(parents=True, exist_ok=True)
 
-    api = wandb.Api()
-    runs = list(api.runs(args.project))
-    identities = {run.id: run_identity(run) for run in runs}
-    key_counts = Counter(
-        (run_id, seed)
-        for run_id, _dataset, seed in identities.values()
-        if run_id is not None and seed is not None and run_id not in EXCLUDE
-    )
-    full_key_counts = Counter(
-        (run_id, dataset, seed)
-        for run_id, dataset, seed in identities.values()
-        if run_id is not None and seed is not None and run_id not in EXCLUDE
-    )
+    if not args.clean_long.exists():
+        raise FileNotFoundError(
+            f"Clean long table not found: {args.clean_long}. "
+            "Run scripts/util/export_clean_results.py first."
+        )
+
+    clean = pd.read_parquet(args.clean_long)
+    required = {"registry_id", "dataset", "seed", "wandb_run_id", "source", "metric", "value"}
+    missing_cols = required - set(clean.columns)
+    if missing_cols:
+        raise KeyError(f"{args.clean_long} is missing columns: {sorted(missing_cols)}")
+    if "internal_run_id" not in clean.columns:
+        clean["internal_run_id"] = clean["registry_id"]
+    if "thesis_label" not in clean.columns:
+        clean = apply_thesis_labels(
+            clean,
+            id_col="internal_run_id",
+            context=f"training-curve clean long {args.clean_long}",
+            fail_on_unmapped=True,
+            drop_superseded=True,
+        )
+    clean = clean[clean["source"].eq("history")].copy()
+    clean = clean[clean["internal_run_id"].notna() & clean["thesis_label"].notna() & clean["seed"].notna()]
+    clean = clean[~clean["internal_run_id"].isin(EXCLUDE)]
+    clean = clean[~clean["thesis_label"].isin(EXCLUDE)]
+    if "validity_status" in clean.columns:
+        clean = clean[~clean["validity_status"].isin({"invalid", "excluded", "superseded"})]
+    if "is_superseded" in clean.columns:
+        clean = clean[~clean["is_superseded"].astype(bool)]
+    if "is_excluded" in clean.columns:
+        clean = clean[~clean["is_excluded"].astype(bool)]
+    clean["internal_run_id"] = clean["internal_run_id"].astype(str)
+    clean["thesis_label"] = clean["thesis_label"].astype(str)
+    if "display_label" not in clean.columns:
+        clean["display_label"] = clean["thesis_label"]
+    clean["dataset"] = clean["dataset"].astype(str)
+    clean["seed"] = pd.to_numeric(clean["seed"], errors="coerce").astype("Int64")
+    clean = clean[clean["seed"].notna()].copy()
 
     curves: list[tuple[str, int, pd.DataFrame]] = []
     long_frames: list[pd.DataFrame] = []
@@ -389,49 +485,38 @@ def main() -> None:
     missing_key_warnings: list[str] = []
     skipped: list[str] = []
 
-    for run in sorted(runs, key=lambda item: (getattr(item, "name", "") or "", item.id)):
-        run_id, dataset, seed = identities[run.id]
-        if run_id is None or seed is None:
-            skipped.append(f"{run.name} ({run.id}): missing run_id or seed")
+    group_cols = ["internal_run_id", "thesis_label", "display_label", "dataset", "seed", "wandb_run_id"]
+    identities = clean[group_cols].drop_duplicates()
+    key_counts = identities.groupby(["thesis_label", "seed"]).size()
+    full_key_counts = identities.groupby(["thesis_label", "dataset", "seed"]).size()
+    for (internal_run_id, thesis_label, display_label, dataset, seed, wandb_id), group in clean.groupby(group_cols, sort=True, dropna=False):
+        if thesis_label is None or seed is None:
+            skipped.append(f"{wandb_id}: missing run_id or seed")
             continue
-        if run_id in EXCLUDE:
+        run_id = str(thesis_label)
+        display_label = str(display_label)
+        dataset = str(dataset)
+        if str(internal_run_id) in EXCLUDE or run_id in EXCLUDE:
             continue
 
-        history = read_full_history(run)
-        curve, used = normalize_history(history)
+        seed = int(seed)
+        curve = clean_group_to_curve(group)
         if not has_one_full_epoch(curve):
-            skipped.append(f"{run.name} ({run.id}): no complete epoch in history")
+            skipped.append(f"{display_label} {dataset} seed={seed} ({wandb_id}): no complete epoch in clean history")
             continue
 
-        missing_requested = []
-        for key in REQUESTED_KEYS:
-            if key == "train/loss" and "train_loss" in used:
-                if "train/loss" not in used["train_loss"]:
-                    missing_requested.append(f"{key} (using {used['train_loss'][0]})")
-                continue
-            if key == "train/loss_clip" and "train_loss_clip" in used:
-                if "train/loss_clip" not in used["train_loss_clip"]:
-                    missing_requested.append(f"{key} (using {used['train_loss_clip'][0]})")
-                continue
-            if key == "_step" and "step" in used:
-                if "_step" not in used["step"]:
-                    missing_requested.append(f"{key} (using {used['step'][0]})")
-                continue
-            if key == "epoch" and "epoch" in used:
-                continue
-            if key not in history.columns or not history[key].notna().any():
-                missing_requested.append(key)
+        missing_requested = [col for col in PER_RUN_COLUMNS if col not in {"epoch", "step"} and curve[col].notna().sum() == 0]
         if missing_requested:
-            missing_key_warnings.append(f"{run.name} ({run.id}): " + ", ".join(missing_requested))
+            missing_key_warnings.append(f"{display_label} {dataset} seed={seed} ({wandb_id}): " + ", ".join(missing_requested))
 
-        needs_dataset = key_counts[(run_id, seed)] > 1
-        needs_wandb_id = full_key_counts[(run_id, dataset, seed)] > 1
-        path = curve_path(args.curves_dir, run_id, seed, dataset, run.id, needs_dataset, needs_wandb_id)
+        needs_dataset = key_counts.get((run_id, seed), 0) > 1
+        needs_wandb_id = full_key_counts.get((run_id, dataset, seed), 0) > 1
+        path = curve_path(args.curves_dir, display_label, seed, dataset, str(wandb_id), needs_dataset, needs_wandb_id)
         curve.to_csv(path, index=False)
 
-        curves.append((run_id, seed, curve))
-        long_frames.append(to_long(curve, run_id, seed))
-        summary_rows.append(summarize_curve(run_id, seed, curve))
+        curves.append((display_label, seed, curve))
+        long_frames.append(to_long(curve, display_label, seed))
+        summary_rows.append(summarize_curve(display_label, seed, curve))
 
     aggregated = (
         pd.concat(long_frames, ignore_index=True)
@@ -465,7 +550,7 @@ def main() -> None:
     extra_vs_summary = sorted(extracted_run_ids - expected_ids)
     not_converged = summary.loc[~summary["converged"], ["run_id", "seed"]] if not summary.empty else pd.DataFrame()
 
-    print(f"Total W&B runs seen: {len(runs)}")
+    print(f"Total clean history runs seen: {clean[group_cols].drop_duplicates().shape[0]}")
     print(f"Total runs extracted: {len(summary)}")
     print("Runs per config:")
     for run_id, count in summary["run_id"].value_counts().sort_index().items():
@@ -478,15 +563,15 @@ def main() -> None:
         for row in not_converged.itertuples(index=False):
             print(f"  {row.run_id} seed={row.seed}")
 
-    print("\nCross-check against /Volumes/T7/Research/wandb/runs_summary.csv:")
+    print(f"\nCross-check against {args.summary_csv}:")
     if missing_vs_summary:
         print("  Missing run_ids: " + ", ".join(missing_vs_summary))
     else:
         print("  Missing run_ids: (none)")
     if extra_vs_summary:
-        print("  Extra run_ids from fresh W&B: " + ", ".join(extra_vs_summary))
+        print("  Extra run_ids from clean history: " + ", ".join(extra_vs_summary))
     else:
-        print("  Extra run_ids from fresh W&B: (none)")
+        print("  Extra run_ids from clean history: (none)")
 
     if skipped:
         print("\nSkipped runs:")
