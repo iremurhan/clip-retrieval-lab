@@ -1,0 +1,49 @@
+panel,reference,thesis_label,dataset_group,metric,source_col,reference_dataset,mean,std,delta,n_seeds
+intrareg,Intra-Reg,Seg-Spatial,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,99.46666666666665,0.07637626158259299,0.0,3
+intrareg,Intra-Reg,Seg-Spatial,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,95.76333333333332,0.06658328118479243,-0.45000000000000284,3
+intrareg,Intra-Reg,Seg-Spatial,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,87.32,0.25059928172283286,-0.2400000000000091,3
+intrareg,Intra-Reg,Seg-Spatial,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,78.384,0.14896979559628273,-0.3639999999999901,3
+intrareg,Intra-Reg,Seg-Spatial,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,88.94,0.21071307505705536,-0.14000000000000057,3
+intrareg,Intra-Reg,Seg-Spatial,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,80.3046078274334,0.1362309874758181,-0.3977788456404454,3
+intrareg,Intra-Reg,Seg-Semantic,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,99.5,0.0,0.03333333333334565,3
+intrareg,Intra-Reg,Seg-Semantic,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,96.07666666666667,0.12055427546683925,-0.13666666666665606,3
+intrareg,Intra-Reg,Seg-Semantic,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,87.97,0.04242640687119446,0.4099999999999966,2
+intrareg,Intra-Reg,Seg-Semantic,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,78.618,0.07071067811866079,-0.12999999999999545,2
+intrareg,Intra-Reg,Seg-Semantic,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,89.41,0.09899494936611705,0.3299999999999983,2
+intrareg,Intra-Reg,Seg-Semantic,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,80.4821399967964,0.09627434951282424,-0.22024667627744066,2
+intrareg,Intra-Reg,Seg-Geom,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,99.58333333333333,0.02886751345947144,0.11666666666667425,3
+intrareg,Intra-Reg,Seg-Geom,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,96.06666666666668,0.1474222959166401,-0.14666666666664696,3
+intrareg,Intra-Reg,Seg-Geom,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,88.13,0.26870057685088483,0.5699999999999932,2
+intrareg,Intra-Reg,Seg-Geom,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,78.78,0.01131370849898854,0.03200000000001069,2
+intrareg,Intra-Reg,Seg-Geom,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,89.65,0.2687005768508949,0.5700000000000074,2
+intrareg,Intra-Reg,Seg-Geom,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,80.63631267019062,0.01982118960558412,-0.06607400288322651,2
+intrareg,Intra-Reg,Sam-Gate,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,98.89999999999999,0.43588989435407194,-0.5666666666666629,3
+intrareg,Intra-Reg,Sam-Gate,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,94.52,1.0603772913449243,-1.693333333333328,3
+intrareg,Intra-Reg,Sam-Gate,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,85.17,4.115361466505702,-2.3900000000000006,2
+intrareg,Intra-Reg,Sam-Gate,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,75.678,4.149302592002667,-3.069999999999993,2
+intrareg,Intra-Reg,Sam-Gate,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,86.9,3.59210244842766,-2.1799999999999926,2
+intrareg,Intra-Reg,Sam-Gate,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,77.77510812109563,3.9982171032973173,-2.927278551978219,2
+intrareg,Intra-Reg,Sam-XAttn,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,98.89999999999999,0.6000000000000014,-0.5666666666666629,3
+intrareg,Intra-Reg,Sam-XAttn,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,94.42,1.3399999999999974,-1.7933333333333223,3
+intrareg,Intra-Reg,Sam-XAttn,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,85.63,3.2668333290818428,-1.9300000000000068,2
+intrareg,Intra-Reg,Sam-XAttn,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,76.328,3.4506810921903486,-2.4199999999999875,2
+intrareg,Intra-Reg,Sam-XAttn,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,87.38,2.8849956672411126,-1.7000000000000028,2
+intrareg,Intra-Reg,Sam-XAttn,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,78.35175396444018,3.194043125013718,-2.3506327086336682,2
+intrareg,Intra-Reg,Sam-Concat,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,98.33333333333333,0.6110100926607795,-1.1333333333333258,3
+intrareg,Intra-Reg,Sam-Concat,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,94.02666666666669,0.7746827307571339,-2.186666666666639,3
+intrareg,Intra-Reg,Sam-Concat,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,83.84,1.8101933598375533,-3.719999999999999,2
+intrareg,Intra-Reg,Sam-Concat,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,74.80199999999999,2.4635600256539276,-3.945999999999998,2
+intrareg,Intra-Reg,Sam-Concat,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,85.75999999999999,1.4990663761154739,-3.3200000000000074,2
+intrareg,Intra-Reg,Sam-Concat,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,76.97621335896204,2.27377360761172,-3.7261733141118043,2
+intrareg,Intra-Reg,Sam-Skip,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,99.0,0.7071067811865476,-0.46666666666665435,2
+intrareg,Intra-Reg,Sam-Skip,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,95.14,1.0182337649086268,-1.0733333333333235,2
+intrareg,Intra-Reg,Sam-Skip,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,85.82000000000001,3.2526911934581144,-1.7399999999999949,2
+intrareg,Intra-Reg,Sam-Skip,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,76.52,3.1225835457197917,-2.2279999999999944,2
+intrareg,Intra-Reg,Sam-Skip,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,87.53,2.899137802864841,-1.5499999999999972,2
+intrareg,Intra-Reg,Sam-Skip,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,78.51593785039245,2.91654647053558,-2.186448822681399,2
+intrareg,Intra-Reg,Text-BLIP,Flickr30K,I2T R@5,summary/test/r5_i2t,flickr30k,99.4,,-0.06666666666664867,1
+intrareg,Intra-Reg,Text-BLIP,Flickr30K,T2I R@5,summary/test/r5_t2i,flickr30k,96.16,,-0.05333333333332746,1
+intrareg,Intra-Reg,Text-BLIP,COCO 5K,I2T R@5,summary/test/coco_5k_r5_i2t,coco,,,,0
+intrareg,Intra-Reg,Text-BLIP,COCO 5K,T2I R@5,summary/test/coco_5k_r5_t2i,coco,,,,0
+intrareg,Intra-Reg,Text-BLIP,CxC,I2T R@5,summary/test/cxc_r5_i2t,coco,,,,0
+intrareg,Intra-Reg,Text-BLIP,CxC,T2I R@5,summary/test/cxc_r5_t2i,coco,,,,0

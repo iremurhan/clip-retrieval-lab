@@ -1,0 +1,19 @@
+panel,reference,thesis_label,dataset_group,metric,source_col,reference_dataset,mean,std,delta,n_seeds
+basemin,Base-min,Loss-SigLIP,Flickr30K,I2T R@1,summary/test/r1_i2t,flickr30k,90.33333333333333,0.20816659994661738,-1.2333333333333485,3
+basemin,Base-min,Loss-SigLIP,Flickr30K,T2I R@1,summary/test/r1_t2i,flickr30k,79.86,0.7453858061433688,-1.4000000000000057,3
+basemin,Base-min,Loss-SigLIP,COCO 5K,I2T R@1,summary/test/coco_5k_r1_i2t,coco,63.95999999999999,0.11135528725660317,-2.0533333333333488,3
+basemin,Base-min,Loss-SigLIP,COCO 5K,T2I R@1,summary/test/coco_5k_r1_t2i,coco,51.94133333333334,0.012220201853216553,-1.1599999999999966,3
+basemin,Base-min,Loss-SigLIP,CxC,I2T R@1,summary/test/cxc_r1_i2t,coco,65.60666666666667,0.1331665623695859,-1.8133333333333326,3
+basemin,Base-min,Loss-SigLIP,CxC,T2I R@1,summary/test/cxc_r1_t2i,coco,53.700144161460834,0.028876752166134508,-1.1626354850766205,3
+basemin,Base-min,HN-Syntactic,Flickr30K,I2T R@1,summary/test/r1_i2t,flickr30k,91.53333333333335,0.2516611478423581,-0.03333333333333144,3
+basemin,Base-min,HN-Syntactic,Flickr30K,T2I R@1,summary/test/r1_t2i,flickr30k,81.02,0.3218695387886247,-0.2400000000000091,3
+basemin,Base-min,HN-Syntactic,COCO 5K,I2T R@1,summary/test/coco_5k_r1_i2t,coco,65.10000000000001,,-0.9133333333333269,1
+basemin,Base-min,HN-Syntactic,COCO 5K,T2I R@1,summary/test/coco_5k_r1_t2i,coco,52.215999999999994,,-0.8853333333333424,1
+basemin,Base-min,HN-Syntactic,CxC,I2T R@1,summary/test/cxc_r1_i2t,coco,66.78,,-0.6400000000000006,1
+basemin,Base-min,HN-Syntactic,CxC,T2I R@1,summary/test/cxc_r1_t2i,coco,53.984462598109886,,-0.8783170484275686,1
+basemin,Base-min,Aux-ObjCls,Flickr30K,I2T R@1,summary/test/r1_i2t,flickr30k,,,,0
+basemin,Base-min,Aux-ObjCls,Flickr30K,T2I R@1,summary/test/r1_t2i,flickr30k,,,,0
+basemin,Base-min,Aux-ObjCls,COCO 5K,I2T R@1,summary/test/coco_5k_r1_i2t,coco,65.25999999999999,,-0.7533333333333445,1
+basemin,Base-min,Aux-ObjCls,COCO 5K,T2I R@1,summary/test/coco_5k_r1_t2i,coco,53.244,,0.1426666666666634,1
+basemin,Base-min,Aux-ObjCls,CxC,I2T R@1,summary/test/cxc_r1_i2t,coco,66.88,,-0.5400000000000063,1
+basemin,Base-min,Aux-ObjCls,CxC,T2I R@1,summary/test/cxc_r1_t2i,coco,54.897485183405415,,0.03470553686796052,1

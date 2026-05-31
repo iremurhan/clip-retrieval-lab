@@ -49,10 +49,10 @@ K_VALUES = (1, 5, 10)
 DEFAULT_RESULTS_ROOT = Path("/Volumes/T7/Research/experiments/results")
 DEFAULT_DATA_ROOT = Path("/Volumes/T7/Research/experiments/datasets")
 ARTIFACT_ROOT = Path(
-    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/figures")
 )
 FIG_ARTIFACT_ROOT = Path(
-    os.environ.get("CLIP_RETRIEVAL_FIG_ARTIFACT_ROOT", ARTIFACT_ROOT / "figs")
+    os.environ.get("CLIP_RETRIEVAL_FIG_ARTIFACT_ROOT", ARTIFACT_ROOT)
 )
 DEFAULT_BUCKET_DIR = Path(os.environ.get("BUCKET_DIR", FIG_ARTIFACT_ROOT / "cache"))
 DEFAULT_OUTPUT = Path(

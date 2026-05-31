@@ -9,6 +9,10 @@
 #   $4  INTERVENTION_LABEL  Display label for the intervention (e.g. HN-Syntactic)
 #   $5  CONFIG_PATH         Dataset config (default: configs/config_coco.yaml)
 #
+# Optional env:
+#   TOP_K                   Retrieved items shown per model (default: 10)
+#   MAX_CASES               Max cases per direction/kind (default: 40)
+#
 # Usage:
 #   sbatch scripts/eval/compare_retrieval_pairs.slurm \
 #       /output/results/coco/B0_coco_s42/best_model.pth \
@@ -46,6 +50,8 @@ INTERVENTION_CKPT="${2:?ERROR: intervention checkpoint required as \$2}"
 BASELINE_LABEL="${3:-Baseline}"
 INTERVENTION_LABEL="${4:-Intervention}"
 CONFIG_FILE="${5:-configs/config_coco.yaml}"
+TOP_K="${TOP_K:-10}"
+MAX_CASES="${MAX_CASES:-40}"
 
 for ckpt in "$BASELINE_CKPT" "$INTERVENTION_CKPT"; do
     if [ ! -f "$ckpt" ]; then
@@ -65,6 +71,8 @@ echo "Baseline:      ${BASELINE_LABEL}  (${BASELINE_CKPT})"
 echo "Intervention:  ${INTERVENTION_LABEL}  (${INTERVENTION_CKPT})"
 echo "Config:        ${CONFIG_FILE}"
 echo "Output dir:    ${JOB_DIR}"
+echo "Top-k:         ${TOP_K}"
+echo "Max cases:     ${MAX_CASES}"
 echo "=========================================="
 
 cd /workspace
@@ -78,7 +86,7 @@ python3 -u scripts/eval/compare_retrieval_pairs.py \
     --intervention-label "$INTERVENTION_LABEL" \
     --config "$CONFIG_FILE" \
     --output-dir "$JOB_DIR" \
-    --top-k 6 --max-cases 40 \
+    --top-k "$TOP_K" --max-cases "$MAX_CASES" \
     > "$JOB_DIR/eval.log" 2>&1
 
 EXIT_CODE=$?

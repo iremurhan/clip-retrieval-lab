@@ -1,0 +1,97 @@
+depth,sweep_label,direction,cutoff,metric,source_col,metric_source,seed,run_ids,value
+0,Unfreeze-0 / Proj-only,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,42.0,B0_projonly,61.12
+0,Unfreeze-0 / Proj-only,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,456.0,B0_projonly,60.919999999999995
+1,Unfreeze-1,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,456.0,B0_uf1,60.940000000000005
+2,Unfreeze-2,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,123.0,B0_uf2,61.12
+2,Unfreeze-2,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,456.0,B0_uf2,60.84
+3,Unfreeze-3,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,42.0,B0_uf3,61.1
+3,Unfreeze-3,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,123.0,B0_uf3,60.88
+3,Unfreeze-3,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,456.0,B0_uf3,60.940000000000005
+4,Unfreeze-4 / Base-min,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,42.0,B0,66.02
+4,Unfreeze-4 / Base-min,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,123.0,B0,65.94
+4,Unfreeze-4 / Base-min,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,456.0,B0,66.08000000000001
+5,Unfreeze-5,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,42.0,B0_uf5,66.32000000000001
+5,Unfreeze-5,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,123.0,B0_uf5,65.9
+5,Unfreeze-5,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,456.0,B0_uf5,66.18
+6,Unfreeze-6,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,42.0,B0_uf6,66.25999999999999
+7,Unfreeze-7,i2t,1,R@1,summary/test/coco_5k_r1_i2t,summary_test,42.0,B0_uf7,66.75999999999999
+0,Unfreeze-0 / Proj-only,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,42.0,B0_projonly,84.94
+0,Unfreeze-0 / Proj-only,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,456.0,B0_projonly,85.1
+1,Unfreeze-1,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,456.0,B0_uf1,85.06
+2,Unfreeze-2,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,123.0,B0_uf2,85.26
+2,Unfreeze-2,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,456.0,B0_uf2,84.82
+3,Unfreeze-3,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,42.0,B0_uf3,85.04
+3,Unfreeze-3,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,123.0,B0_uf3,85.16
+3,Unfreeze-3,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,456.0,B0_uf3,85.06
+4,Unfreeze-4 / Base-min,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,42.0,B0,88.06
+4,Unfreeze-4 / Base-min,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,123.0,B0,88.24
+4,Unfreeze-4 / Base-min,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,456.0,B0,88.16000000000001
+5,Unfreeze-5,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,42.0,B0_uf5,88.12
+5,Unfreeze-5,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,123.0,B0_uf5,88.48
+5,Unfreeze-5,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,456.0,B0_uf5,88.24
+6,Unfreeze-6,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,42.0,B0_uf6,88.18
+7,Unfreeze-7,i2t,5,R@5,summary/test/coco_5k_r5_i2t,summary_test,42.0,B0_uf7,88.5
+0,Unfreeze-0 / Proj-only,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,42.0,B0_projonly,91.60000000000001
+0,Unfreeze-0 / Proj-only,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,456.0,B0_projonly,91.75999999999999
+1,Unfreeze-1,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,456.0,B0_uf1,91.7
+2,Unfreeze-2,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,123.0,B0_uf2,91.28
+2,Unfreeze-2,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,456.0,B0_uf2,91.28
+3,Unfreeze-3,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,42.0,B0_uf3,91.62
+3,Unfreeze-3,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,123.0,B0_uf3,91.53999999999999
+3,Unfreeze-3,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,456.0,B0_uf3,91.74
+4,Unfreeze-4 / Base-min,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,42.0,B0,93.47999999999999
+4,Unfreeze-4 / Base-min,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,123.0,B0,93.58
+4,Unfreeze-4 / Base-min,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,456.0,B0,93.46
+5,Unfreeze-5,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,42.0,B0_uf5,93.64
+5,Unfreeze-5,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,123.0,B0_uf5,93.46
+5,Unfreeze-5,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,456.0,B0_uf5,93.64
+6,Unfreeze-6,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,42.0,B0_uf6,93.52000000000001
+7,Unfreeze-7,i2t,10,R@10,summary/test/coco_5k_r10_i2t,summary_test,42.0,B0_uf7,93.5
+0,Unfreeze-0 / Proj-only,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,42.0,B0_projonly,47.044000000000004
+0,Unfreeze-0 / Proj-only,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,456.0,B0_projonly,47.028
+1,Unfreeze-1,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,456.0,B0_uf1,47.04
+2,Unfreeze-2,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,123.0,B0_uf2,46.992
+2,Unfreeze-2,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,456.0,B0_uf2,46.896
+3,Unfreeze-3,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,42.0,B0_uf3,47.04
+3,Unfreeze-3,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,123.0,B0_uf3,46.711999999999996
+3,Unfreeze-3,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,456.0,B0_uf3,47.036
+4,Unfreeze-4 / Base-min,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,42.0,B0,53.14
+4,Unfreeze-4 / Base-min,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,123.0,B0,53.164
+4,Unfreeze-4 / Base-min,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,456.0,B0,53.0
+5,Unfreeze-5,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,42.0,B0_uf5,53.568000000000005
+5,Unfreeze-5,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,123.0,B0_uf5,53.52400000000001
+5,Unfreeze-5,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,456.0,B0_uf5,53.564
+6,Unfreeze-6,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,42.0,B0_uf6,53.644000000000005
+7,Unfreeze-7,t2i,1,R@1,summary/test/coco_5k_r1_t2i,summary_test,42.0,B0_uf7,53.784
+0,Unfreeze-0 / Proj-only,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,42.0,B0_projonly,74.06
+0,Unfreeze-0 / Proj-only,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,456.0,B0_projonly,74.004
+1,Unfreeze-1,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,456.0,B0_uf1,74.028
+2,Unfreeze-2,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,123.0,B0_uf2,74.09599999999999
+2,Unfreeze-2,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,456.0,B0_uf2,73.83999999999999
+3,Unfreeze-3,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,42.0,B0_uf3,74.064
+3,Unfreeze-3,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,123.0,B0_uf3,73.98
+3,Unfreeze-3,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,456.0,B0_uf3,74.016
+4,Unfreeze-4 / Base-min,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,42.0,B0,78.752
+4,Unfreeze-4 / Base-min,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,123.0,B0,78.7
+4,Unfreeze-4 / Base-min,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,456.0,B0,78.84
+5,Unfreeze-5,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,42.0,B0_uf5,78.944
+5,Unfreeze-5,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,123.0,B0_uf5,78.912
+5,Unfreeze-5,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,456.0,B0_uf5,79.092
+6,Unfreeze-6,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,42.0,B0_uf6,79.172
+7,Unfreeze-7,t2i,5,R@5,summary/test/coco_5k_r5_t2i,summary_test,42.0,B0_uf7,79.208
+0,Unfreeze-0 / Proj-only,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,42.0,B0_projonly,83.212
+0,Unfreeze-0 / Proj-only,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,456.0,B0_projonly,83.32000000000001
+1,Unfreeze-1,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,456.0,B0_uf1,83.296
+2,Unfreeze-2,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,123.0,B0_uf2,83.356
+2,Unfreeze-2,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,456.0,B0_uf2,83.104
+3,Unfreeze-3,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,42.0,B0_uf3,83.232
+3,Unfreeze-3,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,123.0,B0_uf3,83.06
+3,Unfreeze-3,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,456.0,B0_uf3,83.32000000000001
+4,Unfreeze-4 / Base-min,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,42.0,B0,86.74
+4,Unfreeze-4 / Base-min,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,123.0,B0,86.79599999999999
+4,Unfreeze-4 / Base-min,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,456.0,B0,86.724
+5,Unfreeze-5,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,42.0,B0_uf5,86.9
+5,Unfreeze-5,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,123.0,B0_uf5,87.016
+5,Unfreeze-5,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,456.0,B0_uf5,87.032
+6,Unfreeze-6,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,42.0,B0_uf6,86.988
+7,Unfreeze-7,t2i,10,R@10,summary/test/coco_5k_r10_t2i,summary_test,42.0,B0_uf7,87.116

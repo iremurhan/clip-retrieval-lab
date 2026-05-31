@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 EVAL_SCRIPT = Path(__file__).resolve().with_name("diagnostic_patch_level.py")
 ARTIFACT_ROOT = Path(
-    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/figures")
 )
 DEFAULT_CACHE_DIR = ARTIFACT_ROOT / "cache" / "patch_level"
 DEFAULT_RESULTS_CSV = ARTIFACT_ROOT / "cache" / "patch_level_results.csv"

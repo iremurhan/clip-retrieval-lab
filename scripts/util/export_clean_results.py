@@ -8,8 +8,11 @@ import os
 import re
 import sys
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -19,12 +22,14 @@ from src.thesis_labels import LABEL_COLUMNS, load_thesis_label_map
 DEFAULT_ENTITY = "iremurhan-bogazici-university"
 DEFAULT_PROJECT = "clip-retrieval"
 ARTIFACT_ROOT = Path(
-    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/figures")
 )
 DEFAULT_OUTPUT_DIR = ARTIFACT_ROOT / "clean"
 DEFAULT_RESULTS_ROOT = Path(
     os.environ.get("RESULTS_ROOT", "/Volumes/T7/Research/experiments/results")
 )
+CONFIG_BASE_PATH = Path(__file__).resolve().parents[2] / "configs" / "config_base.yaml"
+REGISTRY_PATH = Path(__file__).resolve().parents[2] / "configs" / "registry.yaml"
 
 DATASET_ALIASES = {"coco": "coco", "flickr": "flickr30k", "flickr30k": "flickr30k"}
 IDENTITY_RE = re.compile(r"(?P<run>.+?)_(?P<dataset>coco|flickr30k|flickr)_s?(?P<seed>\d+)(?:_\d+)?$")
@@ -144,6 +149,43 @@ def config_value(config: dict[str, Any], key: str) -> Any:
     if key in config:
         return config[key]
     return nested_get(config, *key.split("/"))
+
+
+def first_config_value(config: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = config_value(config, key)
+        if not is_missing(value):
+            return value
+    return None
+
+
+@lru_cache(maxsize=1)
+def registry_unfreeze_layers() -> dict[str, Any]:
+    with CONFIG_BASE_PATH.open("r", encoding="utf-8") as f:
+        base_config = yaml.safe_load(f) or {}
+    with REGISTRY_PATH.open("r", encoding="utf-8") as f:
+        registry = (yaml.safe_load(f) or {}).get("runs", {})
+
+    base_unfreeze = nested_get(base_config, "model", "unfreeze_vision_layers")
+    resolved: dict[str, Any] = {}
+
+    def resolve(run_id: str) -> Any:
+        if run_id in resolved:
+            return resolved[run_id]
+        entry = registry.get(run_id) or {}
+        parent = entry.get("parent")
+        value = resolve(str(parent)) if parent else base_unfreeze
+        overrides = entry.get("overrides") or {}
+        if "model.unfreeze_vision_layers" in overrides:
+            value = overrides["model.unfreeze_vision_layers"]
+        elif isinstance(overrides.get("model"), dict) and "unfreeze_vision_layers" in overrides["model"]:
+            value = overrides["model"]["unfreeze_vision_layers"]
+        resolved[run_id] = value
+        return value
+
+    for run_id in registry:
+        resolve(str(run_id))
+    return resolved
 
 
 def run_identity(run: Any) -> dict[str, Any]:
@@ -542,6 +584,41 @@ def build_wide_rows(base_rows: list[dict[str, Any]], summary_rows: list[dict[str
     return list(wide.values())
 
 
+def preserve_existing_nonempty_cells(wide_df: Any, wide_path: Path) -> Any:
+    """Fill blanks in a fresh wide export from the previous CSV for the same W&B run.
+
+    W&B summaries can occasionally omit a field that was present in an earlier export.
+    This keeps existing non-empty cells instead of replacing them with blanks while still
+    allowing new non-empty values to update the table.
+    """
+    if not wide_path.exists() or wide_df.empty or "wandb_run_id" not in wide_df.columns:
+        return wide_df
+
+    import pandas as pd
+
+    old_df = pd.read_csv(wide_path, dtype=object, keep_default_na=False)
+    if old_df.empty or "wandb_run_id" not in old_df.columns:
+        return wide_df
+
+    merged = wide_df.copy()
+    for col in old_df.columns:
+        if col not in merged.columns:
+            merged[col] = ""
+
+    old_by_run = old_df.set_index("wandb_run_id", drop=False)
+    for idx, row in merged.iterrows():
+        run_id = row.get("wandb_run_id")
+        if is_missing(run_id) or run_id not in old_by_run.index:
+            continue
+        old_row = old_by_run.loc[run_id]
+        if hasattr(old_row, "iloc") and getattr(old_row, "ndim", 1) > 1:
+            old_row = old_row.iloc[-1]
+        for col in old_df.columns:
+            if is_missing(merged.at[idx, col]) and not is_missing(old_row.get(col)):
+                merged.at[idx, col] = old_row.get(col)
+    return merged
+
+
 def main() -> None:
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -652,6 +729,17 @@ def main() -> None:
             base_row["config/dataset"] = identity["dataset"]
         if "config/seed" not in base_row and identity["seed"] is not None:
             base_row["config/seed"] = identity["seed"]
+        if "config/unfreeze_layers" not in base_row:
+            unfreeze_layers = first_config_value(
+                config,
+                "unfreeze_layers",
+                "model/unfreeze_vision_layers",
+                "model.unfreeze_vision_layers",
+            )
+            if unfreeze_layers is None and identity["registry_id"] is not None:
+                unfreeze_layers = registry_unfreeze_layers().get(str(identity["registry_id"]))
+            if unfreeze_layers is not None:
+                base_row["config/unfreeze_layers"] = unfreeze_layers
         base_rows.append(base_row)
 
         summary_rows = metric_rows_for_mapping(summary, source="summary", run_meta=run_meta)
@@ -686,6 +774,8 @@ def main() -> None:
     long_path = args.out_dir / "clean_results_long.parquet"
     wide_path = args.out_dir / "clean_results_wide.csv"
     missing_path = args.out_dir / "missing_evaluations.csv"
+
+    wide_df = preserve_existing_nonempty_cells(wide_df, wide_path)
 
     write_jsonl(manifest_path, manifest_rows)
     if long_df.empty:

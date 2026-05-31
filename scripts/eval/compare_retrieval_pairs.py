@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import io
 import json
 import logging
@@ -44,16 +45,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from src.data import create_image_text_dataloader  # noqa: E402
+from src.model import DualEncoder  # noqa: E402
+from src.model_blip import DualEncoderBLIPText  # noqa: E402
 from src.setup import setup_config, setup_seed  # noqa: E402
 from src.utils import chunked_matmul  # noqa: E402
 
 # Reuse the exact ranking machinery from the failure-analysis tool.
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "eval"))
-from extract_failures import (  # noqa: E402
-    compute_gt_ranks,
-    extract_embeddings,
-    load_model,
-)
+from extract_failures import compute_gt_ranks  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +98,105 @@ def _apply_data_overrides(config: dict, data_root: str | None) -> dict:
     return config
 
 
-def _ranks_for_checkpoint(ckpt_path, config, tokenizer, device):
-    model = load_model(ckpt_path, config, device)
+def _build_tokenizer(config: dict):
+    if config.get("model", {}).get("text_encoder") == "blip":
+        from transformers import BertTokenizer
+
+        return BertTokenizer.from_pretrained(config["model"]["text_model_name"])
+    return CLIPTokenizer.from_pretrained(config["model"]["image_model_name"])
+
+
+def _patch_legacy_b5_config(config: dict, state_dict: dict[str, torch.Tensor]) -> dict:
+    """Fill modern B5 config fields for older checkpoints.
+
+    Early B5 checkpoints stored ``seg_embedding.weight`` but predate
+    ``model.seg_mode`` / ``model.seg_vocab_size``. The state dict shape is enough
+    to reconstruct the spatial-segmentation branch used by those runs.
+    """
+    config = copy.deepcopy(config)
+    model_cfg = config.setdefault("model", {})
+    if model_cfg.get("seg_mode") is None and "seg_embedding.weight" in state_dict:
+        model_cfg["seg_mode"] = "spatial"
+        model_cfg["seg_vocab_size"] = int(state_dict["seg_embedding.weight"].shape[0])
+        config.setdefault("data", {}).setdefault("seg_map_dir", "datasets/coco/sam_masks")
+        logger.info(
+            "Patched legacy B5 config: seg_mode=spatial, seg_vocab_size=%s",
+            model_cfg["seg_vocab_size"],
+        )
+    return config
+
+
+def _load_model_and_config(ckpt_path, device):
+    logger.info(f"Loading checkpoint: {ckpt_path}")
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+    if "config" not in checkpoint:
+        raise ValueError(f"Checkpoint {ckpt_path} does not contain a saved config.")
+    config = _patch_legacy_b5_config(checkpoint["config"], checkpoint["model_state_dict"])
+    if config.get("model", {}).get("text_encoder") == "blip":
+        model = DualEncoderBLIPText(config).to(device)
+    else:
+        model = DualEncoder(config).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    logger.info(f"Model loaded (epoch {checkpoint.get('epoch', '?')})")
+    return model, config
+
+
+@torch.no_grad()
+def _extract_embeddings(model, loader, device):
+    model.eval()
+    use_amp = device.type == "cuda"
+    img_list, txt_list, imgid_list, sentid_list = [], [], [], []
+    use_seg_ids = loader.dataset.seg_loader is not None
+    use_sam_features = loader.dataset.sam_feature_loader is not None
+
+    for batch in loader:
+        images = batch["image"].to(device, non_blocking=True)
+        input_ids = batch["input_ids"].to(device, non_blocking=True)
+        attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+        seg_ids = batch["seg_ids"].to(device, non_blocking=True) if use_seg_ids else None
+        sam_features = batch["sam_features"].to(device, non_blocking=True) if use_sam_features else None
+
+        with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+            img_emb, txt_emb = model(
+                images,
+                input_ids,
+                attention_mask,
+                seg_ids=seg_ids,
+                sam_features=sam_features,
+            )
+
+        img_list.append(img_emb.float().cpu())
+        txt_list.append(txt_emb.float().cpu())
+        imgid_list.append(batch["image_id"].cpu())
+        sentid_list.append(batch["sentid"].cpu())
+
+    img_embeds = torch.cat(img_list, dim=0)
+    txt_embeds = torch.cat(txt_list, dim=0)
+    image_ids = torch.cat(imgid_list, dim=0)
+
+    seen = set()
+    first_occurrence_indices = []
+    unique_image_ids_list = []
+    for idx in range(len(image_ids)):
+        iid = image_ids[idx].item()
+        if iid not in seen:
+            seen.add(iid)
+            first_occurrence_indices.append(idx)
+            unique_image_ids_list.append(iid)
+
+    unique_image_ids = torch.tensor(unique_image_ids_list, dtype=image_ids.dtype)
+    img_embeds_unique = img_embeds[first_occurrence_indices]
+    return img_embeds_unique, txt_embeds, image_ids, unique_image_ids, first_occurrence_indices
+
+
+def _ranks_for_checkpoint(ckpt_path, data_root, device):
+    model, config = _load_model_and_config(ckpt_path, device)
+    config = _apply_data_overrides(config, data_root)
+    tokenizer = _build_tokenizer(config)
     loader = create_image_text_dataloader(config, tokenizer, split="test")
     dataset = loader.dataset
-    img_e, txt_e, image_ids, unique_image_ids, first_occ = extract_embeddings(model, loader, device)
+    img_e, txt_e, image_ids, unique_image_ids, first_occ = _extract_embeddings(model, loader, device)
     sims = chunked_matmul(img_e, txt_e)  # [N_imgs, N_txts]
     i2t_ranks, t2i_ranks = compute_gt_ranks(sims, image_ids, unique_image_ids)
     del model
@@ -271,16 +364,14 @@ def main():
     logger.info(f"Device: {device}")
 
     config = setup_config(config_path=args.config, overrides=[])
-    config = _apply_data_overrides(config, args.data_root)
     setup_seed(config["training"]["seed"])
-    tokenizer = CLIPTokenizer.from_pretrained(config["model"]["image_model_name"])
 
     logger.info(f"Encoding baseline: {args.baseline_label}")
-    base = _ranks_for_checkpoint(args.baseline_ckpt, config, tokenizer, device)
+    base = _ranks_for_checkpoint(args.baseline_ckpt, args.data_root, device)
     logger.info(f"Encoding intervention: {args.intervention_label}")
-    interv = _ranks_for_checkpoint(args.intervention_ckpt, config, tokenizer, device)
+    interv = _ranks_for_checkpoint(args.intervention_ckpt, args.data_root, device)
 
-    images_root = config["data"]["images_path"]
+    images_root = _apply_data_overrides(config, args.data_root)["data"]["images_path"]
     records = build_case_records(base, interv, images_root, args.top_k, args.broken_threshold, args.max_cases)
 
     for d in ("i2t", "t2i"):

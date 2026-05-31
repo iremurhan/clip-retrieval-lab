@@ -282,6 +282,7 @@ def apply_thesis_labels(
     context: str,
     fail_on_unmapped: bool = True,
     drop_superseded: bool = False,
+    warn_superseded: bool = True,
 ) -> pd.DataFrame:
     return load_thesis_label_map().apply_to_frame(
         df,
@@ -289,4 +290,5 @@ def apply_thesis_labels(
         context=context,
         fail_on_unmapped=fail_on_unmapped,
         drop_superseded=drop_superseded,
+        warn_superseded=warn_superseded,
     )
