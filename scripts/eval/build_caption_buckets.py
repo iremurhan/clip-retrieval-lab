@@ -21,10 +21,10 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = Path("/Volumes/T7/Research/experiments/datasets")
 ARTIFACT_ROOT = Path(
-    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/figures")
 )
 FIG_ARTIFACT_ROOT = Path(
-    os.environ.get("CLIP_RETRIEVAL_FIG_ARTIFACT_ROOT", ARTIFACT_ROOT / "figs")
+    os.environ.get("CLIP_RETRIEVAL_FIG_ARTIFACT_ROOT", ARTIFACT_ROOT)
 )
 DEFAULT_OUTPUT_DIR = Path(os.environ.get("CAPTION_BUCKET_OUTPUT_DIR", FIG_ARTIFACT_ROOT / "cache"))
 DATASETS = ("coco", "flickr30k")

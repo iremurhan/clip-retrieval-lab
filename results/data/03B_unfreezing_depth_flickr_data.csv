@@ -1,0 +1,115 @@
+depth,sweep_label,direction,cutoff,metric,source_col,metric_source,seed,run_ids,value
+0,Unfreeze-0 / Proj-only,i2t,1,R@1,summary/test/r1_i2t,summary_test,42.0,B0_projonly,89.4
+0,Unfreeze-0 / Proj-only,i2t,1,R@1,summary/test/r1_i2t,summary_test,123.0,B0_projonly,89.2
+0,Unfreeze-0 / Proj-only,i2t,1,R@1,summary/test/r1_i2t,summary_test,456.0,B0_projonly,88.5
+1,Unfreeze-1,i2t,1,R@1,summary/test/r1_i2t,val_log_max,42.0,B0_uf1,90.63
+1,Unfreeze-1,i2t,1,R@1,summary/test/r1_i2t,val_log_max,123.0,B0_uf1,90.73
+1,Unfreeze-1,i2t,1,R@1,summary/test/r1_i2t,val_log_max,456.0,B0_uf1,90.63
+2,Unfreeze-2,i2t,1,R@1,summary/test/r1_i2t,val_log_max,42.0,B0_uf2,90.63
+2,Unfreeze-2,i2t,1,R@1,summary/test/r1_i2t,val_log_max,123.0,B0_uf2,90.73
+2,Unfreeze-2,i2t,1,R@1,summary/test/r1_i2t,val_log_max,456.0,B0_uf2,90.63
+3,Unfreeze-3,i2t,1,R@1,summary/test/r1_i2t,val_log_max,42.0,B0_uf3,90.63
+4,Unfreeze-4 / Base-min,i2t,1,R@1,summary/test/r1_i2t,summary_test,42.0,B0,91.7
+4,Unfreeze-4 / Base-min,i2t,1,R@1,summary/test/r1_i2t,summary_test,123.0,B0,91.4
+4,Unfreeze-4 / Base-min,i2t,1,R@1,summary/test/r1_i2t,summary_test,456.0,B0,91.6
+5,Unfreeze-5,i2t,1,R@1,summary/test/r1_i2t,summary_test,42.0,B0_uf5,91.9
+5,Unfreeze-5,i2t,1,R@1,summary/test/r1_i2t,summary_test,123.0,B0_uf5,92.0
+5,Unfreeze-5,i2t,1,R@1,summary/test/r1_i2t,summary_test,456.0,B0_uf5,92.1
+6,Unfreeze-6,i2t,1,R@1,summary/test/r1_i2t,summary_test,42.0,B0_uf6,92.1
+6,Unfreeze-6,i2t,1,R@1,summary/test/r1_i2t,summary_test,123.0,B0_uf6,92.6
+7,Unfreeze-7,i2t,1,R@1,summary/test/r1_i2t,summary_test,42.0,B0_uf7,91.3
+0,Unfreeze-0 / Proj-only,i2t,5,R@5,summary/test/r5_i2t,summary_test,42.0,B0_projonly,99.1
+0,Unfreeze-0 / Proj-only,i2t,5,R@5,summary/test/r5_i2t,summary_test,123.0,B0_projonly,99.1
+0,Unfreeze-0 / Proj-only,i2t,5,R@5,summary/test/r5_i2t,summary_test,456.0,B0_projonly,98.3
+1,Unfreeze-1,i2t,5,R@5,summary/test/r5_i2t,val_log_max,42.0,B0_uf1,99.51
+1,Unfreeze-1,i2t,5,R@5,summary/test/r5_i2t,val_log_max,123.0,B0_uf1,99.61
+1,Unfreeze-1,i2t,5,R@5,summary/test/r5_i2t,val_log_max,456.0,B0_uf1,99.51
+2,Unfreeze-2,i2t,5,R@5,summary/test/r5_i2t,val_log_max,42.0,B0_uf2,99.51
+2,Unfreeze-2,i2t,5,R@5,summary/test/r5_i2t,val_log_max,123.0,B0_uf2,99.61
+2,Unfreeze-2,i2t,5,R@5,summary/test/r5_i2t,val_log_max,456.0,B0_uf2,99.51
+3,Unfreeze-3,i2t,5,R@5,summary/test/r5_i2t,val_log_max,42.0,B0_uf3,99.51
+4,Unfreeze-4 / Base-min,i2t,5,R@5,summary/test/r5_i2t,summary_test,42.0,B0,99.7
+4,Unfreeze-4 / Base-min,i2t,5,R@5,summary/test/r5_i2t,summary_test,123.0,B0,99.7
+4,Unfreeze-4 / Base-min,i2t,5,R@5,summary/test/r5_i2t,summary_test,456.0,B0,99.7
+5,Unfreeze-5,i2t,5,R@5,summary/test/r5_i2t,summary_test,42.0,B0_uf5,99.7
+5,Unfreeze-5,i2t,5,R@5,summary/test/r5_i2t,summary_test,123.0,B0_uf5,99.5
+5,Unfreeze-5,i2t,5,R@5,summary/test/r5_i2t,summary_test,456.0,B0_uf5,99.6
+6,Unfreeze-6,i2t,5,R@5,summary/test/r5_i2t,summary_test,42.0,B0_uf6,99.7
+6,Unfreeze-6,i2t,5,R@5,summary/test/r5_i2t,summary_test,123.0,B0_uf6,99.6
+7,Unfreeze-7,i2t,5,R@5,summary/test/r5_i2t,summary_test,42.0,B0_uf7,99.5
+0,Unfreeze-0 / Proj-only,i2t,10,R@10,summary/test/r10_i2t,summary_test,42.0,B0_projonly,99.5
+0,Unfreeze-0 / Proj-only,i2t,10,R@10,summary/test/r10_i2t,summary_test,123.0,B0_projonly,99.5
+0,Unfreeze-0 / Proj-only,i2t,10,R@10,summary/test/r10_i2t,summary_test,456.0,B0_projonly,99.6
+1,Unfreeze-1,i2t,10,R@10,summary/test/r10_i2t,val_log_max,42.0,B0_uf1,99.8
+1,Unfreeze-1,i2t,10,R@10,summary/test/r10_i2t,val_log_max,123.0,B0_uf1,99.8
+1,Unfreeze-1,i2t,10,R@10,summary/test/r10_i2t,val_log_max,456.0,B0_uf1,99.8
+2,Unfreeze-2,i2t,10,R@10,summary/test/r10_i2t,val_log_max,42.0,B0_uf2,99.8
+2,Unfreeze-2,i2t,10,R@10,summary/test/r10_i2t,val_log_max,123.0,B0_uf2,99.8
+2,Unfreeze-2,i2t,10,R@10,summary/test/r10_i2t,val_log_max,456.0,B0_uf2,99.8
+3,Unfreeze-3,i2t,10,R@10,summary/test/r10_i2t,val_log_max,42.0,B0_uf3,99.8
+4,Unfreeze-4 / Base-min,i2t,10,R@10,summary/test/r10_i2t,summary_test,42.0,B0,99.8
+4,Unfreeze-4 / Base-min,i2t,10,R@10,summary/test/r10_i2t,summary_test,123.0,B0,99.8
+4,Unfreeze-4 / Base-min,i2t,10,R@10,summary/test/r10_i2t,summary_test,456.0,B0,99.8
+5,Unfreeze-5,i2t,10,R@10,summary/test/r10_i2t,summary_test,42.0,B0_uf5,99.9
+5,Unfreeze-5,i2t,10,R@10,summary/test/r10_i2t,summary_test,123.0,B0_uf5,99.7
+5,Unfreeze-5,i2t,10,R@10,summary/test/r10_i2t,summary_test,456.0,B0_uf5,99.7
+6,Unfreeze-6,i2t,10,R@10,summary/test/r10_i2t,summary_test,42.0,B0_uf6,99.9
+6,Unfreeze-6,i2t,10,R@10,summary/test/r10_i2t,summary_test,123.0,B0_uf6,99.7
+7,Unfreeze-7,i2t,10,R@10,summary/test/r10_i2t,summary_test,42.0,B0_uf7,99.8
+0,Unfreeze-0 / Proj-only,t2i,1,R@1,summary/test/r1_t2i,summary_test,42.0,B0_projonly,77.2
+0,Unfreeze-0 / Proj-only,t2i,1,R@1,summary/test/r1_t2i,summary_test,123.0,B0_projonly,77.38000000000001
+0,Unfreeze-0 / Proj-only,t2i,1,R@1,summary/test/r1_t2i,summary_test,456.0,B0_projonly,76.46
+1,Unfreeze-1,t2i,1,R@1,summary/test/r1_t2i,val_log_max,42.0,B0_uf1,78.6
+1,Unfreeze-1,t2i,1,R@1,summary/test/r1_t2i,val_log_max,123.0,B0_uf1,78.48
+1,Unfreeze-1,t2i,1,R@1,summary/test/r1_t2i,val_log_max,456.0,B0_uf1,78.54
+2,Unfreeze-2,t2i,1,R@1,summary/test/r1_t2i,val_log_max,42.0,B0_uf2,78.6
+2,Unfreeze-2,t2i,1,R@1,summary/test/r1_t2i,val_log_max,123.0,B0_uf2,78.48
+2,Unfreeze-2,t2i,1,R@1,summary/test/r1_t2i,val_log_max,456.0,B0_uf2,78.54
+3,Unfreeze-3,t2i,1,R@1,summary/test/r1_t2i,val_log_max,42.0,B0_uf3,78.58
+4,Unfreeze-4 / Base-min,t2i,1,R@1,summary/test/r1_t2i,summary_test,42.0,B0,81.16
+4,Unfreeze-4 / Base-min,t2i,1,R@1,summary/test/r1_t2i,summary_test,123.0,B0,81.26
+4,Unfreeze-4 / Base-min,t2i,1,R@1,summary/test/r1_t2i,summary_test,456.0,B0,81.36
+5,Unfreeze-5,t2i,1,R@1,summary/test/r1_t2i,summary_test,42.0,B0_uf5,81.26
+5,Unfreeze-5,t2i,1,R@1,summary/test/r1_t2i,summary_test,123.0,B0_uf5,81.44
+5,Unfreeze-5,t2i,1,R@1,summary/test/r1_t2i,summary_test,456.0,B0_uf5,81.46
+6,Unfreeze-6,t2i,1,R@1,summary/test/r1_t2i,summary_test,42.0,B0_uf6,81.67999999999999
+6,Unfreeze-6,t2i,1,R@1,summary/test/r1_t2i,summary_test,123.0,B0_uf6,81.44
+7,Unfreeze-7,t2i,1,R@1,summary/test/r1_t2i,summary_test,42.0,B0_uf7,81.47999999999999
+0,Unfreeze-0 / Proj-only,t2i,5,R@5,summary/test/r5_t2i,summary_test,42.0,B0_projonly,94.42
+0,Unfreeze-0 / Proj-only,t2i,5,R@5,summary/test/r5_t2i,summary_test,123.0,B0_projonly,94.48
+0,Unfreeze-0 / Proj-only,t2i,5,R@5,summary/test/r5_t2i,summary_test,456.0,B0_projonly,94.04
+1,Unfreeze-1,t2i,5,R@5,summary/test/r5_t2i,val_log_max,42.0,B0_uf1,94.65
+1,Unfreeze-1,t2i,5,R@5,summary/test/r5_t2i,val_log_max,123.0,B0_uf1,94.5
+1,Unfreeze-1,t2i,5,R@5,summary/test/r5_t2i,val_log_max,456.0,B0_uf1,94.67
+2,Unfreeze-2,t2i,5,R@5,summary/test/r5_t2i,val_log_max,42.0,B0_uf2,94.65
+2,Unfreeze-2,t2i,5,R@5,summary/test/r5_t2i,val_log_max,123.0,B0_uf2,94.5
+2,Unfreeze-2,t2i,5,R@5,summary/test/r5_t2i,val_log_max,456.0,B0_uf2,94.67
+3,Unfreeze-3,t2i,5,R@5,summary/test/r5_t2i,val_log_max,42.0,B0_uf3,94.65
+4,Unfreeze-4 / Base-min,t2i,5,R@5,summary/test/r5_t2i,summary_test,42.0,B0,95.98
+4,Unfreeze-4 / Base-min,t2i,5,R@5,summary/test/r5_t2i,summary_test,123.0,B0,96.02
+4,Unfreeze-4 / Base-min,t2i,5,R@5,summary/test/r5_t2i,summary_test,456.0,B0,95.9
+5,Unfreeze-5,t2i,5,R@5,summary/test/r5_t2i,summary_test,42.0,B0_uf5,96.1
+5,Unfreeze-5,t2i,5,R@5,summary/test/r5_t2i,summary_test,123.0,B0_uf5,96.02
+5,Unfreeze-5,t2i,5,R@5,summary/test/r5_t2i,summary_test,456.0,B0_uf5,95.98
+6,Unfreeze-6,t2i,5,R@5,summary/test/r5_t2i,summary_test,42.0,B0_uf6,96.1
+6,Unfreeze-6,t2i,5,R@5,summary/test/r5_t2i,summary_test,123.0,B0_uf6,96.04
+7,Unfreeze-7,t2i,5,R@5,summary/test/r5_t2i,summary_test,42.0,B0_uf7,95.94
+0,Unfreeze-0 / Proj-only,t2i,10,R@10,summary/test/r10_t2i,summary_test,42.0,B0_projonly,97.44
+0,Unfreeze-0 / Proj-only,t2i,10,R@10,summary/test/r10_t2i,summary_test,123.0,B0_projonly,97.48
+0,Unfreeze-0 / Proj-only,t2i,10,R@10,summary/test/r10_t2i,summary_test,456.0,B0_projonly,97.22
+1,Unfreeze-1,t2i,10,R@10,summary/test/r10_t2i,val_log_max,42.0,B0_uf1,97.22
+1,Unfreeze-1,t2i,10,R@10,summary/test/r10_t2i,val_log_max,123.0,B0_uf1,97.18
+1,Unfreeze-1,t2i,10,R@10,summary/test/r10_t2i,val_log_max,456.0,B0_uf1,97.12
+2,Unfreeze-2,t2i,10,R@10,summary/test/r10_t2i,val_log_max,42.0,B0_uf2,97.22
+2,Unfreeze-2,t2i,10,R@10,summary/test/r10_t2i,val_log_max,123.0,B0_uf2,97.18
+2,Unfreeze-2,t2i,10,R@10,summary/test/r10_t2i,val_log_max,456.0,B0_uf2,97.12
+3,Unfreeze-3,t2i,10,R@10,summary/test/r10_t2i,val_log_max,42.0,B0_uf3,97.22
+4,Unfreeze-4 / Base-min,t2i,10,R@10,summary/test/r10_t2i,summary_test,42.0,B0,97.98
+4,Unfreeze-4 / Base-min,t2i,10,R@10,summary/test/r10_t2i,summary_test,123.0,B0,97.96
+4,Unfreeze-4 / Base-min,t2i,10,R@10,summary/test/r10_t2i,summary_test,456.0,B0,97.94
+5,Unfreeze-5,t2i,10,R@10,summary/test/r10_t2i,summary_test,42.0,B0_uf5,97.98
+5,Unfreeze-5,t2i,10,R@10,summary/test/r10_t2i,summary_test,123.0,B0_uf5,98.18
+5,Unfreeze-5,t2i,10,R@10,summary/test/r10_t2i,summary_test,456.0,B0_uf5,98.12
+6,Unfreeze-6,t2i,10,R@10,summary/test/r10_t2i,summary_test,42.0,B0_uf6,98.0
+6,Unfreeze-6,t2i,10,R@10,summary/test/r10_t2i,summary_test,123.0,B0_uf6,98.1
+7,Unfreeze-7,t2i,10,R@10,summary/test/r10_t2i,summary_test,42.0,B0_uf7,98.0

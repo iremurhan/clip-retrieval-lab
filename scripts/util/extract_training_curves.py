@@ -20,7 +20,7 @@ from src.thesis_labels import apply_thesis_labels
 
 DEFAULT_PROJECT = "iremurhan-bogazici-university/clip-retrieval"
 ARTIFACT_ROOT = Path(
-    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/artifacts/clip-retrieval-lab")
+    os.environ.get("CLIP_RETRIEVAL_ARTIFACT_ROOT", "/Volumes/T7/Research/figures")
 )
 DEFAULT_CLEAN_LONG = ARTIFACT_ROOT / "clean" / "clean_results_long.parquet"
 DEFAULT_SUMMARY_CSV = ARTIFACT_ROOT / "clean" / "clean_results_wide.csv"

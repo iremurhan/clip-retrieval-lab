@@ -12,7 +12,7 @@ set -eu
 #   RESULTS_ROOT=/Volumes/T7/Research/experiments/results
 #   DATA_ROOT=/Volumes/T7/Research/experiments/datasets
 #   WANDB_OUT_DIR=/Volumes/T7/Research/wandb
-#   ARTIFACT_ROOT=/Volumes/T7/Research/artifacts/clip-retrieval-lab
+#   ARTIFACT_ROOT=/Volumes/T7/Research/figures
 #   DEVICE=auto
 #   RUN_SUGARCREPE=1 RUN_MMVP=1 RUN_OOD_FLICKR_TO_COCO=1
 
@@ -22,7 +22,7 @@ WANDB_PROJECT="${WANDB_PROJECT:-clip-retrieval}"
 RESULTS_ROOT="${RESULTS_ROOT:-/Volumes/T7/Research/experiments/results}"
 DATA_ROOT="${DATA_ROOT:-/Volumes/T7/Research/experiments/datasets}"
 WANDB_OUT_DIR="${WANDB_OUT_DIR:-/Volumes/T7/Research/wandb}"
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-/Volumes/T7/Research/artifacts/clip-retrieval-lab}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-/Volumes/T7/Research/figures}"
 DEVICE="${DEVICE:-auto}"
 
 RUN_SUGARCREPE="${RUN_SUGARCREPE:-1}"
