@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from helpers import CACHE_DIR, DEFAULT_CSV_PATH, SAVE_FIG_DIR, SAVE_TABLE_DIR, load_runs
+from helpers import CACHE_DIR, DEFAULT_CSV_PATH, SAVE_FIG_DIR, SAVE_TABLE_DIR, label_cache_frame, load_runs
 
 try:
     from scipy import stats
@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
     adjust_text = None
 
 
-EXCLUDE = ["B0v2", "B0plus_fixed"]
+EXCLUDE = ["B0v2"]
 CACHE_CSV = CACHE_DIR / "alignment_uniformity_results.csv"
 VALUE_COLS = ["alignment", "uniformity_img", "uniformity_txt", "uniformity_mean"]
 GEOMETRY_COLS = {
@@ -113,6 +113,9 @@ def load_alignment(path: Path = CACHE_CSV) -> pd.DataFrame:
             "Run scripts/eval/run_alignment_uniformity_local.py without --dry-run first."
         )
     df = df[~df["run_id"].isin(EXCLUDE)].copy()
+    df = label_cache_frame(df, id_col="run_id", context="alignment/uniformity cache")
+    df["raw_run_id"] = df["run_id"]
+    df["run_id"] = df["thesis_label"]
     df["dataset"] = df["dataset"].replace({"flickr": "flickr30k"})
     for col in ["seed", *VALUE_COLS]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -123,7 +126,7 @@ def load_alignment(path: Path = CACHE_CSV) -> pd.DataFrame:
 
 
 def aggregate_alignment(df: pd.DataFrame) -> pd.DataFrame:
-    grouped = df.groupby(["run_id", "dataset"], dropna=False)
+    grouped = df.groupby(["run_id", "display_label", "latex_label", "intervention_group", "dataset"], dropna=False)
     mean_df = grouped[VALUE_COLS].mean().add_suffix("_mean")
     std_df = grouped[VALUE_COLS].std(ddof=1).add_suffix("_std")
     n_df = grouped.size().rename("n_seeds")
@@ -139,7 +142,7 @@ def write_alignment_table(agg: pd.DataFrame) -> None:
     ]
     for _, row in agg.iterrows():
         cells = [
-            latex_escape(row["run_id"]),
+            latex_escape(row["latex_label"]),
             latex_escape(row["dataset"]),
             fmt_mean_std(row["alignment_mean"], row["alignment_std"]),
             fmt_mean_std(row["uniformity_img_mean"], row["uniformity_img_std"]),
@@ -155,7 +158,8 @@ def write_alignment_table(agg: pd.DataFrame) -> None:
 def build_correlation_data(alignment: pd.DataFrame, runs_csv: str | Path = DEFAULT_CSV_PATH) -> pd.DataFrame:
     runs = load_runs(runs_csv, EXCLUDE).copy()
     runs["dataset"] = runs["config/dataset"].replace({"flickr": "flickr30k"})
-    runs["run_id"] = runs["config/run_id"]
+    runs["raw_run_id"] = runs["internal_run_id"]
+    runs["run_id"] = runs["thesis_label"]
     runs["seed"] = pd.to_numeric(runs["config/seed"], errors="coerce")
     for col in ["summary/sugarcrepe/macro_avg", "summary/sugarcrepe/overall"]:
         if col not in runs:
@@ -167,6 +171,7 @@ def build_correlation_data(alignment: pd.DataFrame, runs_csv: str | Path = DEFAU
 
     needed_cols = {
         "run_id",
+        "raw_run_id",
         "dataset",
         "seed",
         "sugarcrepe_combined",
@@ -179,12 +184,12 @@ def build_correlation_data(alignment: pd.DataFrame, runs_csv: str | Path = DEFAU
 
     merged = alignment.merge(
         runs[list(needed_cols)],
-        on=["run_id", "dataset", "seed"],
+        on=["raw_run_id", "dataset", "seed"],
         how="inner",
         validate="one_to_one",
     )
     if merged.empty:
-        raise ValueError("No rows matched between alignment cache and runs_summary.csv.")
+        raise ValueError("No rows matched between alignment cache and clean_results_wide.csv.")
     return merged
 
 
@@ -269,16 +274,20 @@ def axis_limits(values: pd.Series, pad_frac: float = 0.14) -> tuple[float, float
 def plot_scatter(agg: pd.DataFrame) -> None:
     configure_matplotlib()
     data = agg.copy()
-    data["family"] = data["run_id"].map(family_for_run)
+    data["family"] = data["intervention_group"]
 
     dataset_palette = dict(zip(["coco", "flickr30k"], sns.color_palette("colorblind", 2), strict=True))
     markers = {
-        "baseline/capacity": "o",
-        "loss": "s",
-        "hard-neg": "D",
-        "aux-cls": "^",
-        "segment-aware": "P",
-        "text-encoder": "X",
+        "baseline": "o",
+        "intra_regularization": "o",
+        "unfreezing_depth": "o",
+        "projection_capacity": "o",
+        "loss_function": "s",
+        "hard_negatives": "D",
+        "auxiliary_object_classification": "^",
+        "segment_enrichment": "P",
+        "sam_fusion": "P",
+        "text_encoder": "X",
         "other": "v",
     }
 
@@ -327,7 +336,7 @@ def plot_scatter(agg: pd.DataFrame) -> None:
     offsets = [(4, 4), (6, -7), (-8, 4), (-10, -7), (7, 10), (-12, 10), (10, -12), (-14, -12)]
     for idx, row in data.reset_index(drop=True).iterrows():
         dx, dy = offsets[idx % len(offsets)]
-        label = f"{row['run_id']}{'*' if int(row['n_seeds']) == 1 else ''}"
+        label = f"{row['display_label']}{'*' if int(row['n_seeds']) == 1 else ''}"
         texts.append(
             ax.annotate(
                 label,
