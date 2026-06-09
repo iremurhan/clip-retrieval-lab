@@ -11,6 +11,9 @@ os.environ.setdefault("MPLCONFIGDIR", str(ARTIFACT_ROOT / "cache" / "mplconfig")
 RESULTS_ROOT = Path(
     os.environ.get("CLIP_RETRIEVAL_RESULTS_ROOT", "/Volumes/T7/Research/experiments/results")
 )
+RUNS_SUMMARY_PATH = Path(
+    os.environ.get("RUNS_SUMMARY_PATH", ARTIFACT_ROOT / "runs_summary.csv")
+)
 
 import matplotlib
 
@@ -37,16 +40,20 @@ PRESETS = {
         "title": "Unfreezing depth on COCO 5K",
         "output_stem": "03_unfreezing_depth_coco",
         "column_template": "summary/test/coco_5k_r{k}_{direction}",
+        "zero_shot_column_template": "summary/zero_shot/coco/rgb/coco_5k_r{k}_{direction}",
     },
     "flickr30k": {
         "dataset": "flickr30k",
         "title": "Unfreezing depth on Flickr30K",
         "output_stem": "03B_unfreezing_depth_flickr",
         "column_template": "summary/test/r{k}_{direction}",
+        "zero_shot_column_template": "summary/zero_shot/flickr30k/rgb/r{k}_{direction}",
     },
 }
 
+ZERO_SHOT_DEPTH = -1
 SWEEP_DEPTHS = [0, 1, 2, 3, 4, 5, 6, 7]
+PLOT_DEPTHS = [ZERO_SHOT_DEPTH, *SWEEP_DEPTHS]
 RETRIEVAL_DIRECTIONS = [("i2t", "Image-to-text"), ("t2i", "Text-to-image")]
 RECALL_SERIES = [
     (1, "R@1", "o", "-"),
@@ -211,6 +218,84 @@ def _supplemental_rows_from_logs(preset: dict, existing_keys: set[tuple[int, str
     return rows
 
 
+def _candidate_zero_shot_paths(csv_path: str | Path) -> list[Path]:
+    csv_path = Path(csv_path)
+    candidates = [RUNS_SUMMARY_PATH]
+    if csv_path.name == "runs_summary.csv":
+        candidates.append(csv_path)
+    candidates.append(csv_path.parent.parent / "runs_summary.csv")
+    candidates.append(ARTIFACT_ROOT / "runs_summary.csv")
+    deduped = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def _zero_shot_rows_from_summary(preset: dict, csv_path: str | Path) -> list[dict]:
+    """Read zero-shot CLIP metrics directly from the raw W&B summary export."""
+    summary_path = next((path for path in _candidate_zero_shot_paths(csv_path) if path.exists()), None)
+    if summary_path is None:
+        return []
+
+    df = pd.read_csv(summary_path)
+    dataset_col = "config/dataset" if "config/dataset" in df.columns else "dataset"
+    run_id_col = "config/run_id" if "config/run_id" in df.columns else "internal_run_id"
+    if dataset_col not in df.columns or run_id_col not in df.columns:
+        return []
+
+    dataset = preset["dataset"]
+    matches = df[
+        df[dataset_col].replace({"flickr": "flickr30k"}).astype(str).eq(dataset)
+        & df[run_id_col].astype(str).eq("zero_shot_clip")
+    ].copy()
+    if matches.empty:
+        name_col = "name" if "name" in df.columns else "wandb_run_name"
+        if name_col in df.columns:
+            matches = df[
+                df[name_col].astype(str).str.contains("zero_shot_clip", case=False, na=False)
+                & df[name_col].astype(str).str.contains(dataset.replace("flickr30k", "flickr"), case=False, na=False)
+            ].copy()
+    if matches.empty:
+        return []
+
+    row = matches.iloc[0]
+    seed = pd.to_numeric(row.get("config/seed", 42), errors="coerce")
+    if pd.isna(seed):
+        seed = 42
+    run_name = str(row.get("name", row.get("wandb_run_name", "zero_shot_clip")))
+    rows = []
+    for direction, _direction_label in RETRIEVAL_DIRECTIONS:
+        for cutoff, metric, _marker, _ls in RECALL_SERIES:
+            source_col = preset["zero_shot_column_template"].format(k=cutoff, direction=direction)
+            value = row.get(source_col, np.nan)
+            if pd.isna(value):
+                metric_col = source_col.replace("summary/", "metric/", 1)
+                value = row.get(metric_col, np.nan)
+                if pd.notna(value):
+                    source_col = metric_col
+            value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            if pd.isna(value):
+                continue
+            if abs(float(value)) <= 1.5:
+                value = float(value) * 100.0
+            rows.append(
+                {
+                    "depth": ZERO_SHOT_DEPTH,
+                    "sweep_label": "Zero-shot",
+                    "direction": direction,
+                    "cutoff": cutoff,
+                    "metric": metric,
+                    "source_col": source_col,
+                    "metric_source": f"zero_shot_summary:{summary_path.name}",
+                    "seed": int(seed),
+                    "run_ids": run_name,
+                    "value": float(value),
+                }
+            )
+    return rows
+
+
 def _contiguous_depth_frames(frame: pd.DataFrame) -> list[pd.DataFrame]:
     if frame.empty:
         return []
@@ -278,6 +363,7 @@ def build_data(preset: dict, csv_path=DEFAULT_CSV_PATH) -> pd.DataFrame:
         for row in rows
     }
     rows.extend(_supplemental_rows_from_logs(preset, existing))
+    rows.extend(_zero_shot_rows_from_summary(preset, csv_path))
 
     if not rows:
         raise ValueError(f"No {preset['dataset']} unfreezing-sweep rows found for k={SWEEP_DEPTHS}.")
@@ -289,8 +375,8 @@ def plot(data: pd.DataFrame, preset: dict) -> None:
     palette = sns.color_palette("colorblind", n_colors=len(RECALL_SERIES))
     color_by_metric = {metric: palette[i] for i, (_cutoff, metric, *_rest) in enumerate(RECALL_SERIES)}
 
-    fig, axes = plt.subplots(1, 2, figsize=(8.0, 4.15), sharey=True)
-    fig.subplots_adjust(left=0.08, right=0.985, top=0.80, bottom=0.43, wspace=0.14)
+    fig, axes = plt.subplots(1, 2, figsize=(8.65, 4.2), sharey=True)
+    fig.subplots_adjust(left=0.075, right=0.985, top=0.80, bottom=0.44, wspace=0.14)
     fig.patch.set_facecolor("none")
     for ax in axes:
         ax.set_facecolor("none")
@@ -305,7 +391,7 @@ def plot(data: pd.DataFrame, preset: dict) -> None:
     ymin = float(finite_low.min())
     ymax = float(finite_high.max())
     pad = max((ymax - ymin) * 0.08, 0.25)
-    depths = SWEEP_DEPTHS
+    depths = PLOT_DEPTHS
 
     legend_handles = []
     for ax, (direction, direction_label) in zip(axes, RETRIEVAL_DIRECTIONS):
@@ -363,7 +449,7 @@ def plot(data: pd.DataFrame, preset: dict) -> None:
 
         ax.set_title(direction_label)
         ax.set_xticks(depths)
-        ax.set_xticklabels(["proj\nonly", "1", "2", "3", "4\n(Base-min)", "5", "6", "7"])
+        ax.set_xticklabels(["zero\nshot", "proj\nonly", "1", "2", "3", "4\n(Base-min)", "5", "6", "7"])
         ax.set_ylim(ymin - pad, ymax + pad)
         ax.set_xlim(min(depths) - 0.4, max(depths) + 0.4)
         ax.grid(axis="y", color="0.9", linewidth=0.5, zorder=0)
@@ -372,7 +458,7 @@ def plot(data: pd.DataFrame, preset: dict) -> None:
         ax.spines["top"].set_visible(False)
     axes[0].set_ylabel("Recall (%)")
     fig.suptitle(preset["title"], y=0.96, fontsize=10)
-    fig.supxlabel("Trainable ViT block depth $k$", y=0.235, fontsize=8.5)
+    fig.supxlabel("Configuration / trainable ViT block depth $k$", y=0.235, fontsize=8.5)
     fig.legend(
         handles=legend_handles,
         labels=[handle.get_label() for handle in legend_handles],
@@ -414,8 +500,9 @@ def print_report(data: pd.DataFrame, preset: dict) -> None:
     for _, row in coverage.iterrows():
         depth = row["depth"]
         label = "Base-min" if int(depth) == 4 else str(row["sweep_label"])
+        depth_label = "zero-shot" if int(depth) == ZERO_SHOT_DEPTH else f"k={int(depth)}"
         print(
-            f"  k={int(depth)} {label}: runs={row['run_ids']} "
+            f"  {depth_label} {label}: runs={row['run_ids']} "
             f"dataset={preset['dataset']} seeds={row['seeds']} n={int(row['n_seeds'])}"
         )
     source_counts = data.groupby("metric_source").size().to_dict() if "metric_source" in data.columns else {}
@@ -437,7 +524,15 @@ def print_report(data: pd.DataFrame, preset: dict) -> None:
     }
     missing = sorted(expected - available)
     print("Missing metric columns:", ", ".join(missing) if missing else "(none)")
-    print("Depths plotted: proj-only, k=1, k=2, k=3, k=4, k=5, k=6, k=7.")
+    zero_expected = {
+        preset["zero_shot_column_template"].format(k=cutoff, direction=direction)
+        for direction, _direction_label in RETRIEVAL_DIRECTIONS
+        for cutoff, _metric, _marker, _ls in RECALL_SERIES
+    }
+    zero_available = {col for col in available if "zero_shot" in str(col)}
+    zero_missing = sorted(zero_expected - zero_available)
+    print("Missing zero-shot metric columns:", ", ".join(zero_missing) if zero_missing else "(none)")
+    print("Depths plotted: zero-shot, proj-only, k=1, k=2, k=3, k=4, k=5, k=6, k=7.")
 
 
 def run_preset(name: str) -> None:
