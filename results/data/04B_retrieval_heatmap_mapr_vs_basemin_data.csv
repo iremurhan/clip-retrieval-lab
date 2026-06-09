@@ -1,7 +1,0 @@
-panel,reference,thesis_label,dataset_group,metric,source_col,reference_dataset,mean,std,delta,n_seeds
-basemin,Base-min,Loss-SigLIP,ECCV,I2T mAP@R,summary/test/eccv_map_at_r_i2t,coco,32.074591107705736,0.03014294668653704,-0.8198491876012213,3
-basemin,Base-min,Loss-SigLIP,ECCV,T2I mAP@R,summary/test/eccv_map_at_r_t2i,coco,46.12945723614191,0.08476574901425563,-0.6048905907488233,3
-basemin,Base-min,HN-Syntactic,ECCV,I2T mAP@R,summary/test/eccv_map_at_r_i2t,coco,32.2254509375487,,-0.6689893577582566,1
-basemin,Base-min,HN-Syntactic,ECCV,T2I mAP@R,summary/test/eccv_map_at_r_t2i,coco,46.44501817680174,,-0.2893296500889946,1
-basemin,Base-min,Aux-ObjCls,ECCV,I2T mAP@R,summary/test/eccv_map_at_r_i2t,coco,32.578059279657786,,-0.31638101564917065,1
-basemin,Base-min,Aux-ObjCls,ECCV,T2I mAP@R,summary/test/eccv_map_at_r_t2i,coco,47.02580901573809,,0.2914611888473573,1
