@@ -1,0 +1,8 @@
+timestamp=2026-06-16T09-21-07Z
+stage2_spatial=28383
+stage2_continuous=28384 dependency=afterok:28383
+stage2_semantic=28385 dependency=afterok:28384
+B5a_seg_spatial=28386 dependency=afterok:28385
+B5b_seg_semantic=28387 dependency=afterok:28385
+B5c_seg_continuous=28388 dependency=afterok:28385
+seg_map_dir=datasets/coco/sam_masks_clipb16_r336

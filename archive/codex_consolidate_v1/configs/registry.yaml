@@ -1,0 +1,263 @@
+runs:
+  B0:
+    description: >-
+      Alias for B0_uf4. Kept so existing child entries (parent: B0) and
+      historical run names (B0_*_s{seed}) remain valid after the B0 -> B0_uf4
+      rename. Loads identically to B0_uf4.
+    parent: B0_uf4
+    overrides: {}
+
+  B0_uf4:
+    description: >-
+      Minimal fine-tune baseline. Tests whether training only the CLIP
+      projection layers with vanilla InfoNCE (no augmentation, no intra-modal
+      contrast) is sufficient for competitive retrieval. Establishes the
+      performance floor for all ablations.
+    overrides:
+      logging.eval_epoch_zero: true
+      loss.intra_img_weight: 0
+      loss.intra_txt_weight: 0
+      augment.k_photometric_augs: 0
+
+  B0_proj1024:
+    description: >-
+      B0 with an additional learned projection from CLIP's native 768-d joint
+      space into 1024 dimensions for both image and text embeddings. Tests
+      whether a wider retrieval embedding improves the minimal fine-tune
+      baseline.
+    parent: B0
+    overrides:
+      model.embed_dim: 1024
+
+  B0_projonly:
+    description: >-
+      B0 projection-only variant. Keeps the minimal InfoNCE/no-augmentation
+      regime but freezes the vision transformer blocks entirely, training only
+      CLIP projection layers and logit_scale. Complements the lower-depth
+      unfreezing sweep where B0 itself is the 4-layer point.
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 0
+
+  B0_uf1:
+    description: >-
+      B0 + unfreeze last 1 vision block. Lower-depth unfreezing sweep point
+      between projection-only and the default B0 4-layer setting.
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 1
+
+  B0_uf2:
+    description: >-
+      B0 + unfreeze last 2 vision blocks. Lower-depth unfreezing sweep point
+      between projection-only and the default B0 4-layer setting.
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 2
+
+  B0_uf3:
+    description: >-
+      B0 + unfreeze last 3 vision blocks. Lower-depth unfreezing sweep point
+      immediately below the default B0 4-layer setting.
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 3
+
+  B0_uf5:
+    description: >-
+      B0 + unfreeze last 5 vision blocks. Tests whether deeper backbone
+      fine-tuning improves retrieval when augmentation and intra-modal
+      contrast are disabled.
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 5
+
+  B0_uf6:
+    description: >-
+      B0 + unfreeze last 6 vision blocks. Part of the unfreezing depth
+      sweep (B0_uf5/6/7) to find the optimal number of trainable vision
+      blocks under the minimal-augmentation regime.
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 6
+
+  B0_uf7:
+    description: >-
+      B0 + unfreeze last 7 vision blocks. Upper end of the unfreezing
+      depth sweep. Tests whether unfreezing more than half the vision
+      encoder causes overfitting when augmentation is disabled.
+    parent: B0
+    overrides:
+      model.unfreeze_vision_layers: 7
+
+  B0plus_fixed:
+    description: >-
+      Full-featured baseline (default config). Adds bipartite crop
+      augmentation, LLM-paraphrased captions for text diversity, symmetric
+      intra-modal contrast (image-image + text-text), and 4-layer vision
+      backbone unfreezing on top of B0. All B5* ablations branch from this
+      configuration.
+    overrides: {}  # current config_base.yaml defaults
+
+  B1:
+    description: >-
+      Loss function ablation: SigLIP vs InfoNCE. Tests whether the
+      pairwise sigmoid formulation (SigLIP) improves over the softmax-based
+      contrastive objective (InfoNCE). SigLIP removes the implicit
+      cross-sample coupling in the softmax denominator, which may improve
+      robustness with hard negatives.
+    parent: B0
+    overrides:
+      loss.type: siglip
+
+  B2:
+    description: >-
+      Hard negative mining via syntactic perturbation. Tests whether
+      NegCLIP-style POS-tag swapping (nouns, verbs, adjectives shuffled
+      from the batch pool) forces the model to attend to compositional
+      semantics rather than bag-of-words shortcuts. Loss is asymmetric:
+      I2T sees both original + negative captions (Nx2N), T2I stays NxN
+      because there are no negative images by construction.
+    parent: B0
+    overrides:
+      loss.hard_negatives: true
+
+  B4:
+    description: >-
+      Multi-task learning with object recognition. Tests whether a BCE
+      auxiliary loss over 80 COCO category labels grounds the visual
+      encoder to recognize individual objects, improving fine-grained
+      retrieval. COCO-only (Flickr30k lacks exhaustive category
+      annotations). Mutually exclusive with B5.
+    parent: B0
+    overrides:
+      loss.cls_weight: 1.0
+      loss.cls_num_classes: 80
+
+  B5a_seg_spatial:
+    description: >-
+      Segment-aware patch enrichment: spatial layout encoding. Each patch
+      receives a discrete token encoding the spatial position (3x3 grid)
+      and relative size (small/medium/large) of its dominant SAM segment.
+      Tests whether explicit spatial structure information improves over
+      CLIP's implicit positional encoding. 27 foreground bins + 1 bg = 28.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: spatial
+      model.seg_vocab_size: 28
+
+  # B5b semantic uses 81-element vocab: 0 = background, 1..80 = COCO categories.
+  # Label sources differ by dataset (see scripts/preprocess/precompute_sam.py):
+  #   - COCO:      IoU-match SAM masks against instances_{train,val}2014 (threshold = 0.3).
+  #   - Flickr30k: zero-shot CLIP top-1 over the 80 COCO category prompts (prob >= 0.3 else bg);
+  #                SAM segments with bbox <4 px on either side are dropped to background.
+  B5b_seg_semantic:
+    description: >-
+      Segment-aware patch enrichment: semantic category encoding. Each
+      patch receives a learnable embedding for its dominant segment's
+      COCO-80 category (IoU-matched on COCO, CLIP zero-shot on Flickr30k).
+      Tests whether injecting object-level semantic identity into the
+      vision encoder improves compositional understanding.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: semantic
+      model.seg_vocab_size: 81
+
+  B5c_seg_continuous:
+    description: >-
+      Segment-aware patch enrichment: continuous geometric features. Each
+      patch receives a 5-d vector (centroid x/y, area fraction, log aspect
+      ratio, patch coverage) projected through a 2-layer MLP. Tests a
+      soft, geometric alternative to the discrete B5a/B5b approaches —
+      the MLP can learn nonlinear spatial relationships without a fixed
+      vocabulary.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: continuous
+      model.seg_feature_dim: 5
+      model.seg_proj_hidden: 128
+
+  B5d_multistream_gate:
+    description: >-
+      Multi-stream fusion: frozen SAM ViT-B encoder features fused with CLIP
+      CLS token via learned gate. Tests whether dense spatial features from a
+      complementary vision model improve retrieval when combined post-encoder.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: gate
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      training.fusion_lr: 0.001
+
+  B5d_multistream_crossattn:
+    description: >-
+      Multi-stream fusion: frozen SAM ViT-B encoder features fused via
+      cross-attention (CLIP CLS attends to SAM spatial tokens). Tests whether
+      attention-based feature selection outperforms gated mixing.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: cross_attn
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      model.fusion_num_heads: 8
+      training.fusion_lr: 0.001
+
+  B5d_multistream_concat:
+    description: >-
+      Multi-stream fusion: frozen SAM ViT-B encoder features fused via
+      concatenation + 2-layer MLP. Baseline fusion with no attention mechanism.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: concat_proj
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      training.fusion_lr: 0.001
+
+  B5e_sam_skip:
+    description: >-
+      SAM residual skip connection: CLIP CLS remains the main retrieval
+      representation while attending to frozen SAM ViT-B spatial tokens to
+      produce a gated residual update. The gate is initialized near zero, so
+      training starts close to vanilla CLIP and learns whether SAM should
+      contribute region-aware corrections.
+    parent: B0plus_fixed
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: sam_skip
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      model.fusion_num_heads: 8
+      model.sam_skip_gate_init_bias: -4.0
+      training.fusion_lr: 0.001
+
+  BLIP_TEXT:
+    description: >-
+      Diagnostic encoder ablation: bidirectional text encoder. Replaces CLIP's
+      causal-masked text transformer with BLIP's BERT-base encoder
+      (Salesforce/blip-itm-base-coco, unimodal mode — cross-attention layers
+      skipped) to test whether bidirectional context improves compositional
+      understanding. Image encoder (CLIP ViT-L/14@336) unchanged. BLIP text
+      encoder is fully frozen; only the text_projection head (Linear 768→768)
+      is trainable. max_length raised to 512 (BERT native) to give bidirectional
+      context its best shot. Not part of the B0–B5 ladder.
+    parent: B0plus_fixed
+    overrides:
+      model.text_encoder: blip
+      model.text_model_name: "Salesforce/blip-itm-base-coco"
+      data.max_length: 512
+
+  BERT_TEXT:
+    description: >-
+      Non-COCO-tuned text-side control for reviewer P0/A2. Replaces CLIP's
+      causal-masked text transformer with a frozen bert-base-uncased text tower,
+      uses the [CLS] token, and trains the same Linear 768->768 projection bridge
+      used by BLIP_TEXT. This tests whether the BLIP_TEXT COCO gain is driven by
+      COCO retrieval tuning rather than bidirectional text context alone.
+    parent: B0plus_fixed
+    overrides:
+      model.text_encoder: bert
+      model.text_model_name: "bert-base-uncased"
+      data.max_length: 512

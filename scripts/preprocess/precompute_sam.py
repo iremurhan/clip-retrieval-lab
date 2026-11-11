@@ -585,7 +585,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--image_dir", type=str, default=None,
                    help="Root image directory (e.g. datasets/coco or datasets/flickr30k).")
     p.add_argument("--output_dir", type=str, required=True,
-                   help="Directory containing per-image .npz files (stage 1 output / stage 2 input).")
+                   help="Stage 1 output directory, or Stage 2 output directory when "
+                        "--stage2_input_dir is provided.")
+    p.add_argument("--stage2_input_dir", type=str, default=None,
+                   help="Stage 2 only: directory containing per-image .npz files. "
+                        "Defaults to --output_dir for backwards compatibility.")
     p.add_argument("--sam_checkpoint", type=str, default=None,
                    help="Path to the sam_vit_b checkpoint (.pth). Required for stage 1.")
     p.add_argument("--sam_model_type", type=str, default="vit_b",
@@ -624,11 +628,13 @@ def parse_args() -> argparse.Namespace:
 
 def _run_stage2(args: argparse.Namespace) -> None:
     """Post-process existing .npz files into a single per-mode .pt dict."""
-    if not os.path.isdir(args.output_dir):
+    input_dir = args.stage2_input_dir or args.output_dir
+    if not os.path.isdir(input_dir):
         raise FileNotFoundError(
-            f"Stage 2 requires stage 1 output at {args.output_dir!r}. "
+            f"Stage 2 requires stage 1 output at {input_dir!r}. "
             "Run SAM first (omit --seg_mode)."
         )
+    os.makedirs(args.output_dir, exist_ok=True)
 
     out_filename = {
         "spatial":    "spatial_bins.pt",
@@ -636,16 +642,18 @@ def _run_stage2(args: argparse.Namespace) -> None:
         "continuous": "continuous_features.pt",
     }[args.seg_mode]
     out_path = os.path.join(args.output_dir, out_filename)
-    logger.info(f"Stage 2: seg_mode={args.seg_mode} -> {out_path}")
+    logger.info(
+        f"Stage 2: seg_mode={args.seg_mode}, input_dir={input_dir} -> {out_path}"
+    )
 
     npz_files = sorted(
-        os.path.join(args.output_dir, f)
-        for f in os.listdir(args.output_dir)
+        os.path.join(input_dir, f)
+        for f in os.listdir(input_dir)
         if f.endswith(".npz")
     )
     if not npz_files:
-        raise RuntimeError(f"No .npz files found under {args.output_dir}.")
-    logger.info(f"Found {len(npz_files)} .npz files under {args.output_dir}")
+        raise RuntimeError(f"No .npz files found under {input_dir}.")
+    logger.info(f"Found {len(npz_files)} .npz files under {input_dir}")
 
     # Per-mode heavyweight setup.
     coco_per_image = None

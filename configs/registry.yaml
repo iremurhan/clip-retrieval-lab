@@ -248,3 +248,16 @@ runs:
       model.text_encoder: blip
       model.text_model_name: "Salesforce/blip-itm-base-coco"
       data.max_length: 512
+
+  BERT_TEXT:
+    description: >-
+      Non-COCO-tuned text-side control for reviewer P0/A2. Replaces CLIP's
+      causal-masked text transformer with a frozen bert-base-uncased text tower,
+      uses the [CLS] token, and trains the same Linear 768->768 projection bridge
+      used by BLIP_TEXT. This tests whether the BLIP_TEXT COCO gain is driven by
+      COCO retrieval tuning rather than bidirectional text context alone.
+    parent: B0plus_fixed
+    overrides:
+      model.text_encoder: bert
+      model.text_model_name: "bert-base-uncased"
+      data.max_length: 512

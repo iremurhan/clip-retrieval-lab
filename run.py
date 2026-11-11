@@ -12,11 +12,12 @@ import signal
 import sys
 import logging
 import warnings
+import subprocess
 import torch
 import wandb
-from transformers import CLIPTokenizer
+from transformers import AutoTokenizer, CLIPTokenizer
 
-from src.setup import setup_config, setup_seed, setup_tracker, load_registry_overrides
+from src.setup import setup_config, setup_seed, setup_tracker, load_registry_overrides, backbone_slug
 from src.data import create_image_text_dataloader
 from src.model import DualEncoder
 from src.loss import build_loss
@@ -160,12 +161,24 @@ def create_lr_scheduler(optimizer, config, num_training_steps):
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambdas)
 
 
+def _git_commit():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train Cross-Modal Retrieval model")
     parser.add_argument("--config", type=str, required=True, help="Path to dataset config (e.g. configs/config_coco.yaml)")
     parser.add_argument("--override", nargs="*", default=[], help="Overrides as key=value (e.g. logging.checkpoint_dir=/path)")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
     parser.add_argument("--run", type=str, default=None, help="Run ID from configs/registry.yaml (e.g. B0, FULL)")
+    parser.add_argument("--registry", type=str, default="configs/registry.yaml", help="Registry file for --run.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed override (sets training.seed)")
     args = parser.parse_args()
 
@@ -173,17 +186,25 @@ def main():
     # Order: base < dataset config < registry overrides < --override (highest priority)
     registry_overrides = []
     if args.run:
-        registry_overrides = load_registry_overrides(args.run)
+        registry_overrides = load_registry_overrides(args.run, registry_path=args.registry)
     all_overrides = registry_overrides + (args.override or [])
     config = setup_config(config_path=args.config, overrides=all_overrides)
 
     # Set logging.run_id from --run if provided
     if args.run:
         config.setdefault("logging", {})["run_id"] = args.run
+        config.setdefault("logging", {})["registry_id"] = args.run
+        config.setdefault("logging", {})["registry_file"] = args.registry
+    config.setdefault("logging", {})["git_commit"] = _git_commit()
 
     # Apply --seed override (after registry so it takes highest priority)
     if args.seed is not None:
         config.setdefault("training", {})["seed"] = args.seed
+    config.setdefault("training", {})["num_seeds"] = 1
+
+    if config.get("logging", {}).get("wandb_run_name") is None and config.get("logging", {}).get("run_name_suffix"):
+        slug = backbone_slug(config.get("model", {}).get("image_model_name"))
+        config["logging"]["wandb_run_name"] = f"{slug}_{config['logging']['run_name_suffix']}"
 
     # Build checkpoint dir: checkpoints/{SLURM_JOB_ID}_{run_id}_{dataset}_s{seed}/
     # Only when checkpoint_dir has not already been set via --override
@@ -192,7 +213,15 @@ def main():
         run_id = config.get("logging", {}).get("run_id", "unnamed")
         dataset = config["data"]["dataset"]
         seed = config["training"]["seed"]
-        config["logging"]["checkpoint_dir"] = f"checkpoints/{job_id}_{run_id}_{dataset}_s{seed}"
+        output_root = config.get("logging", {}).get("output_root")
+        if output_root:
+            slug = backbone_slug(config.get("model", {}).get("image_model_name"))
+            resolution = config["data"]["image_size"]
+            config["logging"]["checkpoint_dir"] = (
+                f"{output_root}/{slug}/{run_id}/r{resolution}/{dataset}/s{seed}/{job_id}"
+            )
+        else:
+            config["logging"]["checkpoint_dir"] = f"checkpoints/{job_id}_{run_id}_{dataset}_s{seed}"
 
     # 2. Logging and seed
     setup_logging()
@@ -212,6 +241,9 @@ def main():
         from transformers import BertTokenizer
         tokenizer = BertTokenizer.from_pretrained(config["model"]["text_model_name"])
         log.info(f"Using BertTokenizer for BLIP text encoder: {config['model']['text_model_name']}")
+    elif text_encoder_type in {"bert", "hf_text"}:
+        tokenizer = AutoTokenizer.from_pretrained(config["model"]["text_model_name"])
+        log.info(f"Using AutoTokenizer for frozen text encoder: {config['model']['text_model_name']}")
     else:
         model_name = config["model"]["image_model_name"]
         tokenizer = CLIPTokenizer.from_pretrained(model_name)
@@ -222,6 +254,9 @@ def main():
     if text_encoder_type == "blip":
         from src.model_blip import DualEncoderBLIPText
         model = DualEncoderBLIPText(config).to(device)
+    elif text_encoder_type in {"bert", "hf_text"}:
+        from src.model_text import DualEncoderTransformerText
+        model = DualEncoderTransformerText(config).to(device)
     else:
         model = DualEncoder(config).to(device)
     criterion = build_loss(config)

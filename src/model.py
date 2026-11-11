@@ -16,12 +16,10 @@ logger = logging.getLogger(__name__)
 
 class DualEncoder(nn.Module):
     """
-    Dual Encoder using OpenAI CLIP (clip-vit-large-patch14-336).
+    Dual Encoder using a HuggingFace CLIP backbone.
     
     CLIP is pre-trained on 400M image-text pairs from the internet,
     providing extremely strong visual-semantic representations.
-    Uses 336x336 input resolution for higher quality features.
-    
     Strategy:
     - Freeze CLIP backbone (vision + text encoders)
     - Train only projection layers for domain adaptation
@@ -45,6 +43,48 @@ class DualEncoder(nn.Module):
         # autocast(bfloat16) will then downcast cleanly from fp32 during the forward pass,
         # avoiding the at::Half overflow caused by fp16 causal mask fill values (-3.4e38).
         self.clip = self.clip.float()
+        self.vision_config = self.clip.config.vision_config
+        self.native_image_resolution = int(self.vision_config.image_size)
+        self.patch_size = int(self.vision_config.patch_size)
+        self.vision_depth = len(self.clip.vision_model.encoder.layers)
+        self.vision_hidden_size = int(self.vision_config.hidden_size)
+        self.text_hidden_size = int(self.clip.config.text_config.hidden_size)
+        self.image_resolution = int(config.get('data', {}).get('image_size', self.native_image_resolution))
+        self.positional_interpolation = bool(config.get('model', {}).get('positional_interpolation', False))
+
+        declared_native = config.get('model', {}).get('native_image_resolution')
+        if declared_native is not None and int(declared_native) != self.native_image_resolution:
+            raise ValueError(
+                f"model.native_image_resolution={declared_native} does not match "
+                f"loaded backbone native image_size={self.native_image_resolution}."
+            )
+        if self.image_resolution % self.patch_size != 0:
+            raise ValueError(
+                f"data.image_size={self.image_resolution} must be divisible by "
+                f"patch_size={self.patch_size} for {clip_model_name}."
+            )
+        if self.image_resolution != self.native_image_resolution and not self.positional_interpolation:
+            raise ValueError(
+                f"Requested non-native image_size={self.image_resolution} for "
+                f"{clip_model_name} whose native image_size={self.native_image_resolution}. "
+                "Set model.positional_interpolation=true only for explicit resolution-control runs."
+            )
+        self.patch_grid_height = self.image_resolution // self.patch_size
+        self.patch_grid_width = self.patch_grid_height
+        logger.info(
+            "CLIP vision config: native_image_size=%s, requested_image_size=%s, "
+            "patch_size=%s, patch_grid=%sx%s, vision_depth=%s, vision_hidden=%s, "
+            "text_hidden=%s, positional_interpolation=%s",
+            self.native_image_resolution,
+            self.image_resolution,
+            self.patch_size,
+            self.patch_grid_height,
+            self.patch_grid_width,
+            self.vision_depth,
+            self.vision_hidden_size,
+            self.text_hidden_size,
+            self.positional_interpolation,
+        )
         
         # Get CLIP's native projection dimension
         self.clip_embed_dim = self.clip.config.projection_dim
@@ -83,7 +123,7 @@ class DualEncoder(nn.Module):
         # 3. Classification head (branches off pre-projection hidden state)
         num_cls = config['loss'].get('cls_num_classes', 0)
         if num_cls > 0:
-            vision_hidden = self.clip.config.vision_config.hidden_size  # 1024 for ViT-L/14
+            vision_hidden = self.vision_hidden_size
             self.cls_head = nn.Linear(vision_hidden, num_cls)
             nn.init.xavier_uniform_(self.cls_head.weight)
             nn.init.constant_(self.cls_head.bias, 0)
@@ -119,7 +159,7 @@ class DualEncoder(nn.Module):
                     "model.seg_mode must be one of "
                     f"'spatial','semantic','continuous','multistream'; got {seg_mode!r}"
                 )
-            d_model = self.clip.vision_model.config.hidden_size  # 1024 for ViT-L
+            d_model = self.vision_hidden_size
             if seg_mode == "multistream":
                 fusion_type = config['model'].get('fusion_type') or 'gate'
                 self.fusion_module = build_fusion_module(fusion_type, config, d_model=d_model)
@@ -129,8 +169,8 @@ class DualEncoder(nn.Module):
                     f"pool_size={config['model'].get('sam_feature_pool_size', 8)}"
                 )
             else:
-                patch_size = self.clip.vision_model.config.patch_size
-                image_size = self.clip.vision_model.config.image_size
+                patch_size = self.patch_size
+                image_size = self.image_resolution
                 self._seg_grid_size = image_size // patch_size
                 self._seg_num_patches = self._seg_grid_size * self._seg_grid_size
 
@@ -194,16 +234,57 @@ class DualEncoder(nn.Module):
         self._gradient_checkpointing_enabled = True
         logger.info(f"Enabled CLIP gradient checkpointing ({reason}).")
 
+    def _validate_image_tensor(self, images):
+        if images.dim() != 4:
+            raise ValueError(f"Expected image tensor [B,C,H,W], got shape {tuple(images.shape)}.")
+        height, width = int(images.shape[-2]), int(images.shape[-1])
+        if height != self.image_resolution or width != self.image_resolution:
+            raise ValueError(
+                f"Image tensor shape is {height}x{width}, but config data.image_size="
+                f"{self.image_resolution}."
+            )
+        if height % self.patch_size != 0 or width % self.patch_size != 0:
+            raise ValueError(
+                f"Image tensor shape {height}x{width} is incompatible with patch_size={self.patch_size}."
+            )
+
+    def _call_with_optional_interpolation(self, fn, *args, **kwargs):
+        if self.positional_interpolation:
+            try:
+                return fn(*args, interpolate_pos_encoding=True, **kwargs)
+            except TypeError as exc:
+                raise RuntimeError(
+                    "The installed transformers CLIP implementation does not support "
+                    "positional interpolation through this forward path. Cannot run a "
+                    f"non-native {self.image_resolution}px CLIP evaluation safely."
+                ) from exc
+        return fn(*args, **kwargs)
+
+    def _get_clip_image_features(self, images):
+        self._validate_image_tensor(images)
+        return self._call_with_optional_interpolation(
+            self.clip.get_image_features,
+            pixel_values=images,
+        )
+
+    def _run_vision_model(self, images):
+        self._validate_image_tensor(images)
+        return self._call_with_optional_interpolation(
+            self.clip.vision_model,
+            pixel_values=images,
+        )
+
+    def _run_vision_embeddings(self, images):
+        self._validate_image_tensor(images)
+        return self._call_with_optional_interpolation(
+            self.clip.vision_model.embeddings,
+            images,
+        )
+
     def _apply_freezing_strategy(self):
         """
         Freeze CLIP backbone, selectively unfreeze layers for fine-tuning.
-        
-        CLIP ViT-L/14 architecture:
-        - vision_model.encoder.layers.0-23  (24 transformer blocks)
-        - text_model.encoder.layers.0-23    (24 transformer blocks)
-        - visual_projection: Linear layer
-        - text_projection: Linear layer
-        
+
         Strategy: Unfreeze projections + last N vision transformer blocks
         """
         # First, freeze everything
@@ -216,16 +297,21 @@ class DualEncoder(nn.Module):
         for param in self.clip.text_projection.parameters():
             param.requires_grad = True
         
-        # 2. Unfreeze last N transformer blocks of Vision Encoder
-        # ViT-L/14 has 24 blocks (0-23)
-        # Config: unfreeze_vision_layers = 2 means unfreeze blocks [22, 23]
+        # 2. Unfreeze last N transformer blocks of the vision encoder.
         num_vision_layers = self.config.get('model', {}).get('unfreeze_vision_layers', 0)
         unfreeze_strategy = self.config.get('model', {}).get('unfreeze_strategy', 'full')
         
+        total_blocks = len(self.clip.vision_model.encoder.layers)
+        if num_vision_layers < 0:
+            raise ValueError(f"model.unfreeze_vision_layers must be >= 0, got {num_vision_layers}.")
+        if num_vision_layers > total_blocks:
+            raise ValueError(
+                f"model.unfreeze_vision_layers={num_vision_layers} exceeds "
+                f"vision depth={total_blocks} for {self.config['model']['image_model_name']}."
+            )
+
         if num_vision_layers > 0:
             # Calculate which blocks to unfreeze (from the end)
-            # Dynamically get total blocks from the model
-            total_blocks = len(self.clip.vision_model.encoder.layers)
             unfreeze_vision_blocks = list(range(total_blocks - num_vision_layers, total_blocks))
             logger.info(f"Unfreezing Vision Blocks: {unfreeze_vision_blocks} (strategy: {unfreeze_strategy})")
             
@@ -314,9 +400,9 @@ class DualEncoder(nn.Module):
         """
         Extract image features and standardize embeddings to float32.
 
-        `seg_ids` carries either per-patch integer IDs (LongTensor [B, 576],
+        `seg_ids` carries either per-patch integer IDs (LongTensor [B, P],
         seg_mode in {spatial, semantic}) or per-patch continuous features
-        (FloatTensor [B, 576, F], seg_mode='continuous').
+        (FloatTensor [B, P, F], seg_mode='continuous').
         `sam_features` carries B5d dense SAM encoder features
         (FloatTensor [B, 256, H, W], seg_mode='multistream').
 
@@ -354,14 +440,14 @@ class DualEncoder(nn.Module):
                 raise ValueError(
                     f"sam_features batch size {sam_features.size(0)} does not match images batch {images.size(0)}."
                 )
-            vision_out = self.clip.vision_model(pixel_values=images)
-            pooled = vision_out.pooler_output.float()          # [B, 1024]
-            fused = self.fusion_module(pooled, sam_features)   # [B, 1024]
+            vision_out = self._run_vision_model(images)
+            pooled = vision_out.pooler_output.float()          # [B, vision_hidden]
+            fused = self.fusion_module(pooled, sam_features)   # [B, vision_hidden]
             image_features = self.clip.visual_projection(fused)
             return image_features.float()
 
         if seg_ids is None:
-            image_embeds = self.clip.get_image_features(pixel_values=images)
+            image_embeds = self._get_clip_image_features(images)
             return image_embeds.float()
 
         if self.seg_mode is None:
@@ -403,13 +489,13 @@ class DualEncoder(nn.Module):
 
         vm = self.clip.vision_model
         # Stage 1: patch + position embeddings.
-        hidden_states = vm.embeddings(images)  # [B, 1+576, 1024]
+        hidden_states = self._run_vision_embeddings(images)
 
-        # Stage 2: compute per-patch segment contribution for the 576 patch tokens.
+        # Stage 2: compute per-patch segment contribution for the patch tokens.
         if self.seg_mode in ("spatial", "semantic"):
-            seg_patches = self.seg_embedding(seg_ids)                          # [B, 576, 1024]
+            seg_patches = self.seg_embedding(seg_ids)                          # [B, P, vision_hidden]
         else:
-            seg_patches = self.seg_projection(seg_ids.to(hidden_states.dtype))  # [B, 576, 1024]
+            seg_patches = self.seg_projection(seg_ids.to(hidden_states.dtype))  # [B, P, vision_hidden]
 
         # Stage 3: prepend a zero vector for the CLS token so CLS receives no
         # segment signal (spec: "CLS should NOT get a segment embedding"), then
@@ -418,7 +504,7 @@ class DualEncoder(nn.Module):
             B, 1, seg_patches.size(-1),
             device=seg_patches.device, dtype=seg_patches.dtype,
         )
-        full_seg = torch.cat([cls_zeros, seg_patches], dim=1)  # [B, 577, 1024]
+        full_seg = torch.cat([cls_zeros, seg_patches], dim=1)  # [B, 1+P, vision_hidden]
         if full_seg.size(1) != hidden_states.size(1):
             raise RuntimeError(
                 f"Sequence length mismatch: hidden_states={hidden_states.size(1)}, "
@@ -432,8 +518,8 @@ class DualEncoder(nn.Module):
         hidden_states = vm.pre_layrnorm(hidden_states)
         encoder_outputs = vm.encoder(inputs_embeds=hidden_states)
         last_hidden_state = encoder_outputs[0]
-        pooled_output = last_hidden_state[:, 0, :]                   # [B, 1024]  CLS
-        pooled_output = vm.post_layernorm(pooled_output)             # [B, 1024]
+        pooled_output = last_hidden_state[:, 0, :]                   # [B, vision_hidden] CLS
+        pooled_output = vm.post_layernorm(pooled_output)             # [B, vision_hidden]
         image_features = self.clip.visual_projection(pooled_output)  # [B, embed_dim]
         return image_features.float()
 
@@ -466,11 +552,11 @@ class DualEncoder(nn.Module):
         Forward pass returning L2-normalized embeddings.
 
         Args:
-            images: [Batch, 3, 336, 336] - Pixel values (336px for CLIP ViT-L/14-336)
+            images: [Batch, 3, H, W] - Pixel values at config data.image_size
             input_ids: [Batch, SeqLen] - Tokenized text
             attention_mask: [Batch, SeqLen] - Attention mask
-            seg_ids: [Batch, 576] LongTensor (spatial/semantic) or
-                     [Batch, 576, F] FloatTensor (continuous) — REQUIRED iff
+            seg_ids: [Batch, P] LongTensor (spatial/semantic) or
+                     [Batch, P, F] FloatTensor (continuous) — REQUIRED iff
                      config.model.seg_mode is spatial/semantic/continuous.
             sam_features: [Batch, 256, H, W] FloatTensor for
                      config.model.seg_mode='multistream'.
@@ -499,7 +585,7 @@ class DualEncoder(nn.Module):
         (e.g. hard negatives, intra-modal augmented views).
 
         Args:
-            images:  [B, 3, 336, 336]
+            images:  [B, 3, H, W]
             seg_ids: optional per-patch tensor for spatial/semantic/continuous.
             sam_features: optional dense SAM encoder features for multistream.
         """
@@ -520,7 +606,7 @@ class DualEncoder(nn.Module):
         tokens receive the same post-layernorm + visual projection as the CLS
         pooler output before any optional project head is applied.
         """
-        vision_out = self.clip.vision_model(pixel_values=images)
+        vision_out = self._run_vision_model(images)
         patch_tokens = vision_out.last_hidden_state[:, 1:, :].float()
         patch_tokens = self.clip.vision_model.post_layernorm(patch_tokens)
         B, P, H = patch_tokens.shape
@@ -554,9 +640,9 @@ class DualEncoder(nn.Module):
                 "encode_image_with_cls() does not support B5 segment-aware mode. "
                 "B4 (cls_head) and B5 (seg_mode) cannot be combined currently."
             )
-        vision_out = self.clip.vision_model(pixel_values=images)
-        pooled = vision_out.pooler_output.float()          # [B, 1024]
-        projected = self.clip.visual_projection(pooled)    # [B, 768]
+        vision_out = self._run_vision_model(images)
+        pooled = vision_out.pooler_output.float()          # [B, vision_hidden]
+        projected = self.clip.visual_projection(pooled)    # [B, projection_dim]
         if self.image_proj is not None:
             projected = self.image_proj(projected)          # [B, embed_dim]
         contrastive = F.normalize(projected, p=2, dim=1)   # [B, embed_dim]

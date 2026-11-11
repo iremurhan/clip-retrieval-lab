@@ -16,6 +16,7 @@ Usage:
 """
 
 import gc
+import json
 import math
 import torch
 import logging
@@ -50,6 +51,10 @@ class Trainer:
         
         # Best score tracking for checkpointing
         self.best_r1 = 0.0
+        self.checkpoint_selection_metric = config.get(
+            'logging', {}
+        ).get('checkpoint_selection_metric', 'val/r1_t2i')
+        self.selected_checkpoint_epoch = None
         
         # Initialize Mixed Precision Training (AMP)
         self.use_amp = self.device.type == 'cuda'
@@ -261,12 +266,122 @@ class Trainer:
             self.wandb_run = wandb.run
             for metric in [
                 "val/r1_i2t", "val/r1_t2i",
+                "val/bidirectional_r1_mean", "val_bidirectional_r1_mean",
                 "val/r5_i2t", "val/r5_t2i",
                 "val/r10_i2t", "val/r10_t2i",
                 "val/mapr_i2t", "val/mapr_t2i",
                 "val/rprecision_i2t", "val/rprecision_t2i",
             ]:
                 wandb.define_metric(metric, summary="max")
+            self._log_model_metadata_to_wandb()
+        summary = self._trainable_parameter_summary()
+        logger.info(
+            "Trainable parameters: %s/%s (%.4f%%)",
+            f"{summary['trainable_parameter_count']:,}",
+            f"{summary['total_parameter_count']:,}",
+            summary["trainable_parameter_percentage"],
+        )
+        logger.info("Trainable module names: %s", ", ".join(summary["trainable_module_names"]))
+        self._write_paper_metadata(summary)
+
+    def _trainable_parameter_summary(self):
+        total = sum(p.numel() for p in self.model.parameters())
+        trainable = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
+        trainable_count = sum(p.numel() for _, p in trainable)
+        module_names = [n for n, _ in trainable]
+        return {
+            "trainable_parameter_count": int(trainable_count),
+            "total_parameter_count": int(total),
+            "trainable_parameter_percentage": float(100.0 * trainable_count / total) if total else 0.0,
+            "trainable_module_names": module_names,
+        }
+
+    def _log_model_metadata_to_wandb(self):
+        if not self.use_wandb or wandb.run is None:
+            return
+        model_cfg = self.config.get("model", {})
+        vision_cfg = getattr(getattr(self.model, "clip", None), "config", None)
+        vision_subcfg = getattr(vision_cfg, "vision_config", None)
+        metadata = self._trainable_parameter_summary()
+        metadata.update({
+            "vision_depth": len(getattr(self.model.clip.vision_model.encoder, "layers", [])),
+            "unfrozen_vision_blocks": model_cfg.get("unfreeze_vision_layers", 0),
+            "patch_size": getattr(vision_subcfg, "patch_size", None),
+            "patch_grid_height": getattr(self.model, "patch_grid_height", None),
+            "patch_grid_width": getattr(self.model, "patch_grid_width", None),
+            "vision_hidden_size": getattr(vision_subcfg, "hidden_size", None),
+            "native_projection_dimension": getattr(vision_cfg, "projection_dim", None),
+            "checkpoint_selection_metric": self.checkpoint_selection_metric,
+            "selected_checkpoint_epoch": None,
+        })
+        wandb.config.update(metadata, allow_val_change=True)
+        for key, value in metadata.items():
+            if key == "trainable_module_names":
+                continue
+            wandb.run.summary[key] = value
+
+    def _write_paper_metadata(self, trainable_summary):
+        model_cfg = self.config.get("model", {})
+        logging_cfg = self.config.get("logging", {})
+        if logging_cfg.get("experiment_family") != "baseline_calibration":
+            return
+        metadata = {
+            "registry_file": logging_cfg.get("registry_file"),
+            "registry_id": logging_cfg.get("registry_id", logging_cfg.get("run_id")),
+            "display_name": logging_cfg.get("display_name"),
+            "experiment_family": logging_cfg.get("experiment_family"),
+            "resolution_role": logging_cfg.get("resolution_role"),
+            "backbone_model_id": model_cfg.get("image_model_name"),
+            "dataset": self.config.get("data", {}).get("dataset"),
+            "seed": self.config.get("training", {}).get("seed"),
+            "image_resolution": self.config.get("data", {}).get("image_size"),
+            "native_image_resolution": getattr(self.model, "native_image_resolution", None),
+            "positional_interpolation": getattr(self.model, "positional_interpolation", False),
+            "unfrozen_vision_blocks": model_cfg.get("unfreeze_vision_layers", 0),
+            "vision_depth": getattr(self.model, "vision_depth", None),
+            "patch_size": getattr(self.model, "patch_size", None),
+            "patch_grid": f"{getattr(self.model, 'patch_grid_height', None)}x{getattr(self.model, 'patch_grid_width', None)}",
+            "patch_grid_height": getattr(self.model, "patch_grid_height", None),
+            "patch_grid_width": getattr(self.model, "patch_grid_width", None),
+            "vision_hidden_size": getattr(self.model, "vision_hidden_size", None),
+            "text_hidden_size": getattr(self.model, "text_hidden_size", None),
+            "native_projection_dimension": getattr(self.model, "clip_embed_dim", None),
+            "checkpoint_selection_metric": self.checkpoint_selection_metric,
+            **trainable_summary,
+        }
+        path = os.path.join(self.checkpoint_dir, "paper_metadata.json")
+        try:
+            with open(path, "w") as f:
+                json.dump(metadata, f, indent=2, sort_keys=True)
+        except OSError as e:
+            logger.warning("Failed to write paper metadata to %s: %s", path, e)
+
+    def _validate_checkpoint_compatibility(self, checkpoint, checkpoint_path):
+        ckpt_config = checkpoint.get("config")
+        if not isinstance(ckpt_config, dict):
+            raise ValueError(
+                f"Checkpoint {checkpoint_path} does not contain a saved config; "
+                "cannot verify backbone/registry/resolution compatibility."
+            )
+        checks = [
+            ("backbone model ID", ckpt_config.get("model", {}).get("image_model_name"),
+             self.config.get("model", {}).get("image_model_name")),
+            ("registry entry", ckpt_config.get("logging", {}).get("registry_id", ckpt_config.get("logging", {}).get("run_id")),
+             self.config.get("logging", {}).get("registry_id", self.config.get("logging", {}).get("run_id"))),
+            ("image resolution", ckpt_config.get("data", {}).get("image_size"),
+             self.config.get("data", {}).get("image_size")),
+            ("projection dimension", ckpt_config.get("model", {}).get("embed_dim"),
+             self.config.get("model", {}).get("embed_dim")),
+        ]
+        mismatches = [
+            f"{label}: checkpoint={old!r}, current={new!r}"
+            for label, old, new in checks
+            if old != new
+        ]
+        if mismatches:
+            raise ValueError(
+                f"Incompatible checkpoint {checkpoint_path}: " + "; ".join(mismatches)
+            )
 
     def _filter_train_dataset_for_paraphrases(self):
         dataset = getattr(self.train_loader, "dataset", None)
@@ -298,6 +413,7 @@ class Trainer:
         """
         logger.info(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self._validate_checkpoint_compatibility(checkpoint, checkpoint_path)
         
         # Load Weights
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -354,6 +470,8 @@ class Trainer:
             'optimizer_state_dict': cpu_optim_sd,
             'scheduler_state_dict': cpu_sched_sd,
             'best_r1': self.best_r1,
+            'checkpoint_selection_metric': self.checkpoint_selection_metric,
+            'selected_checkpoint_epoch': self.selected_checkpoint_epoch,
             'config': self.config
         }
         if self.use_amp:
@@ -446,19 +564,9 @@ class Trainer:
             # ============================================================
             if self.use_grad_cache:
                 # GRADIENT CACHING MODE
-                # GradCache currently only supports inter-modal contrast.
-                # Anything that adds extra forward terms (intra-modal aug pairs,
-                # hard-negative captions, the B4 cls head) needs threading
-                # through the cache phases — not implemented. Fail loud rather
-                # than silently degrade to an inter-modal-only run.
-                if intra_img_weight > 0 or intra_txt_weight > 0:
-                    raise RuntimeError(
-                        "GradCache is incompatible with intra-modal contrast "
-                        "(intra_img_weight>0 or intra_txt_weight>0). GradCache does not "
-                        "yet thread image_aug_a/image_aug_b or paraphrase pairs through "
-                        "its cache phases. Either disable training.use_grad_cache or "
-                        "extend src/grad_cache.py."
-                    )
+                # GradCache supports B0/B0+/BLIP-style inter-modal plus paired
+                # image/text intra-modal losses. Hard negatives and B4 cls are
+                # still guarded because their side paths are not cached.
                 if self.use_hard_negatives:
                     raise RuntimeError(
                         "loss.hard_negatives=true (B2) is incompatible with "
@@ -477,12 +585,33 @@ class Trainer:
                 # Zero gradients before GradCache forward (which accumulates gradients)
                 self.optimizer.zero_grad()
 
-                # GradCache performs forward and backward internally (inter-modal only)
+                image_aug_a = None
+                image_aug_b = None
+                if intra_img_weight > 0:
+                    image_aug_a = batch['image_aug_a'].to(self.device, non_blocking=True)
+                    image_aug_b = batch['image_aug_b'].to(self.device, non_blocking=True)
+
+                para_input_ids_a = None
+                para_attention_mask_a = None
+                para_input_ids_b = None
+                para_attention_mask_b = None
+                if intra_txt_weight > 0 and self.paraphraser is not None:
+                    (
+                        para_input_ids_a,
+                        para_attention_mask_a,
+                        para_input_ids_b,
+                        para_attention_mask_b,
+                    ) = self.paraphraser.sample_pair(batch['sentid'].tolist())
+
+                # GradCache performs forward and backward internally.
                 loss_dict = self.grad_cache.forward(
                     images, input_ids, attention_mask,
-                    para_input_ids=None,
-                    para_attention_mask=None,
-                    image_aug=None,
+                    para_input_ids_a=para_input_ids_a,
+                    para_attention_mask_a=para_attention_mask_a,
+                    para_input_ids_b=para_input_ids_b,
+                    para_attention_mask_b=para_attention_mask_b,
+                    image_aug_a=image_aug_a,
+                    image_aug_b=image_aug_b,
                 )
                 loss = loss_dict["loss_total"]
                 
@@ -530,12 +659,6 @@ class Trainer:
                         # Encode augmented views with gradients so L_img_img
                         # contributes to optimization.
                         if intra_img_weight > 0:
-                            img_aug_a_embeds = self.model.encode_image(
-                                batch['image_aug_a'].to(self.device, non_blocking=True),
-                                sam_features=sam_features)
-                            img_aug_b_embeds = self.model.encode_image(
-                                batch['image_aug_b'].to(self.device, non_blocking=True),
-                                sam_features=sam_features)
                             img_aug_a_embeds = self.model.encode_image(
                                 batch['image_aug_a'].to(self.device, non_blocking=True),
                                 sam_features=sam_features)
@@ -696,12 +819,6 @@ class Trainer:
                     # Encode augmented views with gradients so L_img_img
                     # contributes to optimization.
                     if intra_img_weight > 0:
-                        img_aug_a_embeds = self.model.encode_image(
-                            batch['image_aug_a'].to(self.device, non_blocking=True),
-                            sam_features=sam_features)
-                        img_aug_b_embeds = self.model.encode_image(
-                            batch['image_aug_b'].to(self.device, non_blocking=True),
-                            sam_features=sam_features)
                         img_aug_a_embeds = self.model.encode_image(
                             batch['image_aug_a'].to(self.device, non_blocking=True),
                             sam_features=sam_features)
@@ -981,18 +1098,23 @@ class Trainer:
 
         mapr_rprec = compute_mapr_rprecision(i2t_ranked, t2i_ranked, gt_i2t, gt_t2i)
 
-        return {
+        bidirectional_r1_mean = 0.5 * (r_i2t[1] + r_t2i[1])
+        metrics = {
             f"{prefix}/r1_i2t":         r_i2t[1],
             f"{prefix}/r5_i2t":         r_i2t[5],
             f"{prefix}/r10_i2t":        r_i2t[10],
             f"{prefix}/r1_t2i":         r_t2i[1],
             f"{prefix}/r5_t2i":         r_t2i[5],
             f"{prefix}/r10_t2i":        r_t2i[10],
+            f"{prefix}/bidirectional_r1_mean": bidirectional_r1_mean,
             f"{prefix}/mapr_i2t":       mapr_rprec['mapr_i2t'],
             f"{prefix}/mapr_t2i":       mapr_rprec['mapr_t2i'],
             f"{prefix}/rprecision_i2t": mapr_rprec['rprecision_i2t'],
             f"{prefix}/rprecision_t2i": mapr_rprec['rprecision_t2i'],
         }
+        if prefix == "val":
+            metrics["val_bidirectional_r1_mean"] = bidirectional_r1_mean
+        return metrics
 
     @torch.no_grad()
     def evaluate(self, epoch):
@@ -1039,13 +1161,25 @@ class Trainer:
                 except Exception as e:
                     logger.warning(f"Qualitative table logging failed: {e}")
 
+        metrics_path = os.path.join(self.checkpoint_dir, "validation_metrics.jsonl")
+        try:
+            with open(metrics_path, "a") as f:
+                f.write(json.dumps({"epoch": epoch, "metrics": metrics}, sort_keys=True) + "\n")
+        except OSError as e:
+            logger.warning("Failed to append validation metrics to %s: %s", metrics_path, e)
+
         # Explicitly free evaluation artifacts before checkpoint save
         del img_embeds_unique, txt_embeds, sims, image_ids, unique_image_ids
         gc.collect()
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
 
-        return metrics['val/r1_t2i']
+        if self.checkpoint_selection_metric not in metrics:
+            raise KeyError(
+                f"Checkpoint selection metric {self.checkpoint_selection_metric!r} "
+                f"not found in evaluation metrics: {sorted(metrics)}"
+            )
+        return metrics[self.checkpoint_selection_metric]
 
     def _log_qualitative_table(self, epoch, txt_embeds, img_embeds_unique, first_occurrence_indices):
         """
@@ -1111,7 +1245,11 @@ class Trainer:
             score = self.evaluate(epoch=-1)
             if score > self.best_r1:
                 self.best_r1 = score
-            logger.info(f"Initial state saved. Starting training loop from Epoch {start_epoch}.")
+                self.selected_checkpoint_epoch = 0
+            logger.info(
+                f"Initial {self.checkpoint_selection_metric}: {score:.2f}. "
+                f"Starting training loop from Epoch {start_epoch}."
+            )
 
         # --- MAIN TRAINING LOOP ---
         for epoch in range(start_epoch, self.config['training']['epochs']):
@@ -1127,8 +1265,14 @@ class Trainer:
                 score = self.evaluate(epoch)
                 if score > self.best_r1:
                     self.best_r1 = score
+                    self.selected_checkpoint_epoch = epoch + 1
                     improved_since_last_save = True
-                    logger.info(f"New Best R@1: {score:.2f} found at Epoch {epoch+1}!")
+                    logger.info(
+                        f"New best {self.checkpoint_selection_metric}: {score:.2f} "
+                        f"found at Epoch {epoch+1}!"
+                    )
+                    if self.use_wandb and wandb.run is not None:
+                        wandb.run.summary["selected_checkpoint_epoch"] = self.selected_checkpoint_epoch
 
             # Save only when save_freq is hit AND there has been improvement since last save
             is_save_time = (epoch + 1) % save_freq == 0 or (epoch + 1) == self.config['training']['epochs']
@@ -1184,6 +1328,7 @@ class Trainer:
         logger.info(f"Loading best checkpoint from {best_path} for test evaluation...")
 
         checkpoint = torch.load(best_path, map_location=self.device)
+        self._validate_checkpoint_compatibility(checkpoint, best_path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         del checkpoint
         gc.collect()
@@ -1307,6 +1452,7 @@ class Trainer:
         from .data import build_eval_transform
 
         checkpoint = torch.load(best_path, map_location=self.device)
+        self._validate_checkpoint_compatibility(checkpoint, best_path)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         del checkpoint
         gc.collect()
@@ -1370,6 +1516,7 @@ class Trainer:
         from .data import create_image_text_dataloader
 
         checkpoint = torch.load(best_path, map_location=self.device)
+        self._validate_checkpoint_compatibility(checkpoint, best_path)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         del checkpoint
         gc.collect()
@@ -1422,6 +1569,7 @@ class Trainer:
         from .eval.mmvp_vlm import evaluate_mmvp_vlm
 
         checkpoint = torch.load(best_path, map_location=self.device)
+        self._validate_checkpoint_compatibility(checkpoint, best_path)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         del checkpoint
         gc.collect()

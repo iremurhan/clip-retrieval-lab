@@ -1,0 +1,390 @@
+runs:
+  zero_shot_336:
+    description: >-
+      Non-native-resolution control evaluation of the original pretrained CLIP
+      backbone. The image tensor is 336 by 336 and positional embeddings are
+      interpolated at forward time; the pretrained weights are not altered or
+      saved.
+    family: baseline_calibration
+    resolution_role: zero_shot_resolution_control
+    overrides:
+      model.image_model_name: "openai/clip-vit-base-patch16"
+      model.native_image_resolution: 224
+      model.positional_interpolation: true
+      model.unfreeze_vision_layers: 0
+      data.image_size: 336
+      eval.zero_shot: true
+      logging.display_name: "zero_shot_336"
+      logging.experiment_family: "baseline_calibration"
+      logging.resolution_role: "zero_shot_resolution_control"
+      logging.wandb_project: "cross-modal-retrieval-paper"
+      logging.wandb_group: "baseline-calibration"
+      logging.wandb_tags: []
+      logging.run_name_suffix: "zero-shot-r336_coco_s42"
+      training.seed: 42
+      training.num_seeds: 1
+
+  minimal_base:
+    description: >-
+      Paper-local copy of the minimal fine-tuning baseline: vanilla InfoNCE,
+      no intra-image contrast, no intra-text contrast, no photometric
+      augmentation, and the repository's existing minimal trainable-parameter
+      policy for CLIP projection layers, logit scale, and configured upper
+      vision blocks.
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.image_model_name: "openai/clip-vit-base-patch16"
+      model.native_image_resolution: 224
+      model.positional_interpolation: true
+      model.unfreeze_vision_layers: 4
+      data.image_size: 336
+      loss.type: infonce
+      loss.intra_img_weight: 0
+      loss.intra_txt_weight: 0
+      loss.hard_negatives: false
+      loss.cls_weight: 0.0
+      loss.cls_num_classes: 0
+      augment.k_photometric_augs: 0
+      logging.eval_epoch_zero: true
+      logging.display_name: "minimal_base"
+      logging.experiment_family: "baseline_calibration"
+      logging.resolution_role: "trained_non_native_336"
+      logging.wandb_project: "cross-modal-retrieval-paper"
+      logging.wandb_group: "baseline-calibration"
+      logging.wandb_tags: []
+      logging.output_root: "/output/results/paper/baseline-calibration"
+      logging.checkpoint_selection_metric: "val/bidirectional_r1_mean"
+      training.seed: 42
+      training.num_seeds: 1
+
+  minimal_projonly:
+    description: >-
+      Minimal baseline with the vision transformer blocks kept frozen; trains
+      the same projection and temperature parameters as the existing minimal
+      policy.
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 0
+      logging.display_name: "minimal_projonly"
+      logging.run_name_suffix: "minimal-projonly-r336_coco_s42"
+
+  minimal_uf1:
+    description: "Minimal baseline with the last 1 vision transformer block unfrozen."
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 1
+      logging.display_name: "minimal_uf1"
+      logging.run_name_suffix: "minimal-uf1-r336_coco_s42"
+
+  minimal_uf2:
+    description: "Minimal baseline with the last 2 vision transformer blocks unfrozen."
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 2
+      logging.display_name: "minimal_uf2"
+      logging.run_name_suffix: "minimal-uf2-r336_coco_s42"
+
+  minimal_uf3:
+    description: "Minimal baseline with the last 3 vision transformer blocks unfrozen."
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 3
+      logging.display_name: "minimal_uf3"
+      logging.run_name_suffix: "minimal-uf3-r336_coco_s42"
+
+  minimal_uf4:
+    description: "Minimal baseline with the last 4 vision transformer blocks unfrozen."
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 4
+      logging.display_name: "minimal_uf4"
+      logging.run_name_suffix: "minimal-uf4-r336_coco_s42"
+
+  minimal_uf5:
+    description: "Minimal baseline with the last 5 vision transformer blocks unfrozen."
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 5
+      logging.display_name: "minimal_uf5"
+      logging.run_name_suffix: "minimal-uf5-r336_coco_s42"
+
+  minimal_uf6:
+    description: "Minimal baseline with the last 6 vision transformer blocks unfrozen."
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 6
+      logging.display_name: "minimal_uf6"
+      logging.run_name_suffix: "minimal-uf6-r336_coco_s42"
+
+  minimal_uf7:
+    description: "Minimal baseline with the last 7 vision transformer blocks unfrozen."
+    parent: minimal_base
+    family: baseline_calibration
+    thesis_source: B0_uf4
+    overrides:
+      model.unfreeze_vision_layers: 7
+      logging.display_name: "minimal_uf7"
+      logging.run_name_suffix: "minimal-uf7-r336_coco_s42"
+
+  paper_intervention_minimal_uf1:
+    description: >-
+      Paper-local minimal intervention parent selected from the CLIP-B baseline
+      calibration. Uses the same minimal InfoNCE/no-augmentation policy as the
+      calibration baseline with the last one vision transformer block unfrozen.
+      This entry is a parent only; use the named intervention entries below for
+      paper runs.
+    family: paper_intervention
+    thesis_source: B0_uf1
+    selected_from: baseline_calibration
+    overrides:
+      model.image_model_name: "openai/clip-vit-base-patch16"
+      model.native_image_resolution: 224
+      model.positional_interpolation: true
+      model.unfreeze_vision_layers: 1
+      data.image_size: 336
+      loss.type: infonce
+      loss.intra_img_weight: 0
+      loss.intra_txt_weight: 0
+      loss.hard_negatives: false
+      loss.cls_weight: 0.0
+      loss.cls_num_classes: 0
+      augment.k_photometric_augs: 0
+      logging.eval_epoch_zero: true
+      logging.experiment_family: "paper_intervention"
+      logging.resolution_role: "trained_non_native_336"
+      logging.wandb_project: "cross-modal-retrieval-paper"
+      logging.wandb_group: "paper-interventions"
+      logging.wandb_tags: []
+      logging.output_root: "/output/results/paper/interventions"
+      logging.checkpoint_selection_metric: "val/bidirectional_r1_mean"
+      training.seed: 42
+      training.num_seeds: 1
+
+  paper_intervention_full_uf1:
+    description: >-
+      Paper-local full-featured intervention parent selected from the CLIP-B
+      baseline calibration. It keeps the repository's current full-featured
+      defaults for crop augmentation, paraphrased text views, and symmetric
+      intra-modal contrast, while using the selected one-block vision unfreezing
+      depth.
+    family: paper_intervention
+    thesis_source: B0plus_fixed
+    selected_from: baseline_calibration
+    overrides:
+      model.image_model_name: "openai/clip-vit-base-patch16"
+      model.native_image_resolution: 224
+      model.positional_interpolation: true
+      model.unfreeze_vision_layers: 1
+      data.image_size: 336
+      loss.type: infonce
+      loss.hard_negatives: false
+      loss.cls_weight: 0.0
+      loss.cls_num_classes: 0
+      logging.eval_epoch_zero: false
+      logging.experiment_family: "paper_intervention"
+      logging.resolution_role: "trained_non_native_336"
+      logging.wandb_project: "cross-modal-retrieval-paper"
+      logging.wandb_group: "paper-interventions"
+      logging.wandb_tags: []
+      logging.output_root: "/output/results/paper/interventions"
+      logging.checkpoint_selection_metric: "val/bidirectional_r1_mean"
+      training.seed: 42
+      training.num_seeds: 1
+
+  B1:
+    description: >-
+      Paper CLIP-B loss-function intervention: SigLIP instead of InfoNCE under
+      the selected minimal UF1 baseline. Tests whether pairwise sigmoid
+      contrast improves retrieval relative to the calibrated minimal baseline.
+    parent: paper_intervention_minimal_uf1
+    family: paper_intervention
+    thesis_source: B1
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      loss.type: siglip
+      logging.display_name: "B1"
+      logging.run_name_suffix: "B1-siglip-r336_coco_s42"
+
+  B2:
+    description: >-
+      Paper CLIP-B hard-negative intervention under the selected minimal UF1
+      baseline. Uses the repository's existing syntactic perturbation path for
+      negative captions while leaving the rest of the minimal policy unchanged.
+    parent: paper_intervention_minimal_uf1
+    family: paper_intervention
+    thesis_source: B2
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      loss.hard_negatives: true
+      logging.display_name: "B2"
+      logging.run_name_suffix: "B2-hardneg-r336_coco_s42"
+
+  B4:
+    description: >-
+      Paper CLIP-B auxiliary object-classification intervention under the
+      selected minimal UF1 baseline. Adds the existing COCO multi-label BCE
+      head while keeping the calibrated retrieval backbone policy.
+    parent: paper_intervention_minimal_uf1
+    family: paper_intervention
+    thesis_source: B4
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      loss.cls_weight: 1.0
+      loss.cls_num_classes: 80
+      logging.display_name: "B4"
+      logging.run_name_suffix: "B4-aux-objcls-r336_coco_s42"
+
+  B5a_seg_spatial:
+    description: >-
+      Paper CLIP-B segment-aware spatial intervention under the selected
+      full-featured UF1 parent. Each patch receives a learned embedding for the
+      dominant segment's coarse spatial layout and relative size.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: B5a_seg_spatial
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      data.seg_map_dir: "datasets/coco/sam_masks_clipb16_r336"
+      model.seg_mode: spatial
+      model.seg_vocab_size: 28
+      logging.display_name: "B5a_seg_spatial"
+      logging.run_name_suffix: "B5a-seg-spatial-r336_coco_s42"
+
+  B5b_seg_semantic:
+    description: >-
+      Paper CLIP-B segment-aware semantic intervention under the selected
+      full-featured UF1 parent. Each patch receives a learned embedding for the
+      dominant segment's COCO-category identity or background label.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: B5b_seg_semantic
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      data.seg_map_dir: "datasets/coco/sam_masks_clipb16_r336"
+      model.seg_mode: semantic
+      model.seg_vocab_size: 81
+      logging.display_name: "B5b_seg_semantic"
+      logging.run_name_suffix: "B5b-seg-semantic-r336_coco_s42"
+
+  B5c_seg_continuous:
+    description: >-
+      Paper CLIP-B segment-aware continuous-feature intervention under the
+      selected full-featured UF1 parent. Each patch receives projected segment
+      geometry features instead of a discrete segment token.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: B5c_seg_continuous
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      data.seg_map_dir: "datasets/coco/sam_masks_clipb16_r336"
+      model.seg_mode: continuous
+      model.seg_feature_dim: 5
+      model.seg_proj_hidden: 128
+      logging.display_name: "B5c_seg_continuous"
+      logging.run_name_suffix: "B5c-seg-continuous-r336_coco_s42"
+
+  B5d_multistream_gate:
+    description: >-
+      Paper CLIP-B multi-stream SAM-fusion intervention under the selected
+      full-featured UF1 parent. Frozen SAM encoder features are fused with the
+      CLIP visual representation by a learned gate.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: B5d_multistream_gate
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: gate
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      training.fusion_lr: 0.001
+      logging.display_name: "B5d_multistream_gate"
+      logging.run_name_suffix: "B5d-gate-r336_coco_s42"
+
+  B5d_multistream_crossattn:
+    description: >-
+      Paper CLIP-B multi-stream SAM-fusion intervention under the selected
+      full-featured UF1 parent. CLIP's visual representation attends to frozen
+      SAM spatial tokens through a cross-attention fusion module.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: B5d_multistream_crossattn
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: cross_attn
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      model.fusion_num_heads: 8
+      training.fusion_lr: 0.001
+      logging.display_name: "B5d_multistream_crossattn"
+      logging.run_name_suffix: "B5d-crossattn-r336_coco_s42"
+
+  B5d_multistream_concat:
+    description: >-
+      Paper CLIP-B multi-stream SAM-fusion intervention under the selected
+      full-featured UF1 parent. Frozen SAM encoder features are fused through
+      concatenation followed by a learned projection module.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: B5d_multistream_concat
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: concat_proj
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      training.fusion_lr: 0.001
+      logging.display_name: "B5d_multistream_concat"
+      logging.run_name_suffix: "B5d-concat-r336_coco_s42"
+
+  B5e_sam_skip:
+    description: >-
+      Paper CLIP-B SAM residual-skip intervention under the selected
+      full-featured UF1 parent. The CLIP visual representation receives a gated
+      residual update from frozen SAM spatial features.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: B5e_sam_skip
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      model.seg_mode: multistream
+      model.fusion_type: sam_skip
+      model.sam_feature_pool_size: 8
+      model.sam_feature_dim: 256
+      model.fusion_num_heads: 8
+      model.sam_skip_gate_init_bias: -4.0
+      training.fusion_lr: 0.001
+      logging.display_name: "B5e_sam_skip"
+      logging.run_name_suffix: "B5e-sam-skip-r336_coco_s42"
+
+  BLIP_TEXT:
+    description: >-
+      Paper CLIP-B text-encoder diagnostic under the selected full-featured UF1
+      parent. Replaces CLIP's text transformer with the repository's existing
+      frozen BLIP text-encoder path while keeping the CLIP-B image backbone.
+    parent: paper_intervention_full_uf1
+    family: paper_intervention
+    thesis_source: BLIP_TEXT
+    selected_unfreeze_source: minimal_uf1
+    overrides:
+      model.text_encoder: blip
+      model.text_model_name: "Salesforce/blip-itm-base-coco"
+      data.max_length: 512
+      logging.display_name: "BLIP_TEXT"
+      logging.run_name_suffix: "BLIP-TEXT-r336_coco_s42"

@@ -16,6 +16,23 @@ import wandb
 logger = logging.getLogger(__name__)
 
 
+def backbone_slug(model_id):
+    """Return a compact slug for known CLIP backbones."""
+    if not model_id:
+        return None
+    name = model_id.split("/")[-1].lower()
+    if name == "clip-vit-base-patch16":
+        return "clipb16"
+    if name == "clip-vit-large-patch14-336":
+        return "clipl14-336"
+    if name.startswith("clip-vit-"):
+        parts = name.replace("clip-vit-", "").replace("-patch", "").split("-")
+        if len(parts) >= 2:
+            size = {"base": "b", "large": "l"}.get(parts[0], parts[0])
+            return f"clip{size}{parts[1]}"
+    return name.replace("/", "-").replace("_", "-")
+
+
 def setup_seed(seed=42):
     """Fix random seeds for reproducibility."""
     torch.manual_seed(seed)
@@ -140,9 +157,21 @@ def make_wandb_config(config):
     aug = config.get('augment', {})
     payload = {
         "run_id":                config['logging']['run_id'],
+        "registry_file":         config.get('logging', {}).get('registry_file'),
+        "registry_id":           config.get('logging', {}).get('registry_id', config['logging']['run_id']),
+        "display_name":          config.get('logging', {}).get('display_name'),
+        "experiment_family":     config.get('logging', {}).get('experiment_family'),
+        "resolution_role":       config.get('logging', {}).get('resolution_role'),
         "dataset":               config['data']['dataset'],
         "seed":                  config['training']['seed'],
+        "num_seeds":             config.get('training', {}).get('num_seeds'),
         "model":                 config.get('model', {}).get('image_model_name'),
+        "backbone_model_id":     config.get('model', {}).get('image_model_name'),
+        "backbone_slug":         backbone_slug(config.get('model', {}).get('image_model_name')),
+        "zero_shot":             config.get('eval', {}).get('zero_shot', False),
+        "image_resolution":      config.get('data', {}).get('image_size'),
+        "native_image_resolution": config.get('model', {}).get('native_image_resolution'),
+        "positional_interpolation": config.get('model', {}).get('positional_interpolation', False),
         "loss_type":             config.get('loss', {}).get('type', 'infonce'),
         "hard_negatives":        config.get('loss', {}).get('hard_negatives', False),
         "unfreeze_layers":       config.get('model', {}).get('unfreeze_vision_layers', 0),
@@ -155,6 +184,8 @@ def make_wandb_config(config):
         "batch_size":            config.get('training', {}).get('batch_size'),
         "epochs":                config.get('training', {}).get('epochs'),
         "use_grad_cache":        config.get('training', {}).get('use_grad_cache', False),
+        "checkpoint_selection_metric": config.get('logging', {}).get('checkpoint_selection_metric'),
+        "git_commit":            config.get('logging', {}).get('git_commit'),
     }
 
     lineage = config.get('logging', {}).get('lineage')
@@ -194,21 +225,25 @@ def setup_tracker(config):
     seed = config['training']['seed']
     dataset_name = config['data']['dataset']
 
-    run_name = format_run_name(run_id, dataset_name, seed=seed)
-    group = run_id
+    run_name = config.get("logging", {}).get("wandb_run_name") or format_run_name(run_id, dataset_name, seed=seed)
+    group = config.get("logging", {}).get("wandb_group", run_id)
 
-    tags = [
-        f"run_id:{run_id}",
-        f"dataset:{dataset_name}",
-        f"seed:{seed}",
-        "intra_modal_grad:with_grad",
-        "with_grad",
-    ]
+    explicit_tags = "wandb_tags" in config.get("logging", {})
+    if explicit_tags:
+        tags = list(config.get("logging", {}).get("wandb_tags") or [])
+    else:
+        tags = [
+            f"run_id:{run_id}",
+            f"dataset:{dataset_name}",
+            f"seed:{seed}",
+            "intra_modal_grad:with_grad",
+            "with_grad",
+        ]
     # Forward each logging.lineage entry as a filterable WandB tag so that
     # default-bumps (e.g. augmentation magnitudes v1 → v2) split cleanly in
     # the runs page without needing a config-key query.
     lineage = config.get("logging", {}).get("lineage")
-    if isinstance(lineage, dict):
+    if isinstance(lineage, dict) and not explicit_tags:
         for k, v in lineage.items():
             tags.append(f"lineage.{k}:{v}")
 

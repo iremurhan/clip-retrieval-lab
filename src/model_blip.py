@@ -219,7 +219,7 @@ class DualEncoderBLIPText(nn.Module):
     #  Public API (matches DualEncoder interface)
     # ------------------------------------------------------------------ #
 
-    def forward(self, images, input_ids, attention_mask, seg_ids=None):
+    def forward(self, images, input_ids, attention_mask, seg_ids=None, sam_features=None):
         """
         Forward pass returning L2-normalized embeddings.
 
@@ -228,6 +228,7 @@ class DualEncoderBLIPText(nn.Module):
             input_ids: [B, SeqLen] BERT WordPiece token IDs
             attention_mask: [B, SeqLen] attention mask
             seg_ids: ignored (B5 not supported in this ablation)
+            sam_features: ignored unless unexpectedly provided
 
         Returns:
             img_embeds: [B, 768] L2-normalized
@@ -238,16 +239,23 @@ class DualEncoderBLIPText(nn.Module):
                 "DualEncoderBLIPText does not support seg_ids (B5 variants). "
                 "This is a diagnostic text-encoder ablation only."
             )
+        if sam_features is not None:
+            raise ValueError(
+                "DualEncoderBLIPText does not support sam_features (B5d variants). "
+                "This is a diagnostic text-encoder ablation only."
+            )
         image_embeds = self._get_image_features(images)
         text_embeds = self._get_text_features(input_ids, attention_mask)
         image_embeds = F.normalize(image_embeds, p=2, dim=1)
         text_embeds = F.normalize(text_embeds, p=2, dim=1)
         return image_embeds, text_embeds
 
-    def encode_image(self, images, seg_ids=None):
+    def encode_image(self, images, seg_ids=None, sam_features=None):
         """Encode images only (L2-normalized)."""
         if seg_ids is not None:
             raise ValueError("DualEncoderBLIPText does not support seg_ids.")
+        if sam_features is not None:
+            raise ValueError("DualEncoderBLIPText does not support sam_features.")
         image_embeds = self._get_image_features(images)
         return F.normalize(image_embeds, p=2, dim=1)
 

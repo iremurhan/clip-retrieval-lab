@@ -8,7 +8,7 @@
 # reused. Stage 2 only reads them.
 #
 # Usage:
-#   sbatch scripts/preprocess/precompute_sam_stage2.slurm <dataset> <seg_mode>
+#   sbatch scripts/preprocess/precompute_sam_stage2.slurm <dataset> <seg_mode> [image_size] [patch_size] [output_dir]
 #
 # Examples:
 #   sbatch scripts/preprocess/precompute_sam_stage2.slurm coco      spatial
@@ -40,18 +40,23 @@
 
 set -euo pipefail
 
-DATASET="${1:?Usage: sbatch scripts/precompute_sam_stage2.slurm <coco|flickr30k> <spatial|semantic|continuous>}"
-SEG_MODE="${2:?Usage: sbatch scripts/precompute_sam_stage2.slurm <coco|flickr30k> <spatial|semantic|continuous>}"
+DATASET="${1:?Usage: sbatch scripts/precompute_sam_stage2.slurm <coco|flickr30k> <spatial|semantic|continuous> [image_size] [patch_size] [output_dir]}"
+SEG_MODE="${2:?Usage: sbatch scripts/precompute_sam_stage2.slurm <coco|flickr30k> <spatial|semantic|continuous> [image_size] [patch_size] [output_dir]}"
+IMAGE_SIZE="${3:-336}"
+PATCH_SIZE="${4:-14}"
+CUSTOM_OUTPUT_DIR="${5:-}"
 
 case "$DATASET" in
     coco)
         IMAGE_DIR="/workspace/datasets/coco"
-        OUTPUT_DIR="/workspace/datasets/coco/sam_masks"
+        INPUT_DIR="/workspace/datasets/coco/sam_masks"
+        OUTPUT_DIR="${CUSTOM_OUTPUT_DIR:-$INPUT_DIR}"
         COCO_ANN="/workspace/datasets/coco/annotations"
         ;;
     flickr30k)
         IMAGE_DIR="/workspace/datasets/flickr30k/flickr30k_images"
-        OUTPUT_DIR="/workspace/datasets/flickr30k/sam_masks"
+        INPUT_DIR="/workspace/datasets/flickr30k/sam_masks"
+        OUTPUT_DIR="${CUSTOM_OUTPUT_DIR:-$INPUT_DIR}"
         COCO_ANN=""
         ;;
     *)
@@ -65,15 +70,15 @@ case "$SEG_MODE" in
     *) echo "Unknown seg_mode: $SEG_MODE (expected spatial|semantic|continuous)"; exit 1 ;;
 esac
 
-if [ ! -d "$OUTPUT_DIR" ]; then
-    echo "FATAL: expected stage-1 .npz masks under $OUTPUT_DIR."
+if [ ! -d "$INPUT_DIR" ]; then
+    echo "FATAL: expected stage-1 .npz masks under $INPUT_DIR."
     echo "Run: sbatch --array=0-7%4 scripts/preprocess/precompute_sam.slurm $DATASET"
     exit 1
 fi
 
-N_NPZ="$(find "$OUTPUT_DIR" -maxdepth 1 -name '*.npz' | wc -l)"
+N_NPZ="$(find "$INPUT_DIR" -maxdepth 1 -name '*.npz' | wc -l)"
 if [ "$N_NPZ" -eq 0 ]; then
-    echo "FATAL: no .npz files under $OUTPUT_DIR. Run stage 1 first."
+    echo "FATAL: no .npz files under $INPUT_DIR. Run stage 1 first."
     exit 1
 fi
 
@@ -81,7 +86,10 @@ echo "=========================================="
 echo "Dataset:    ${DATASET}"
 echo "seg_mode:   ${SEG_MODE}"
 echo "Image dir:  ${IMAGE_DIR}"
+echo "Input dir:  ${INPUT_DIR}"
 echo "Output dir: ${OUTPUT_DIR}"
+echo "image_size: ${IMAGE_SIZE}"
+echo "patch_size: ${PATCH_SIZE}"
 echo "# .npz in:  ${N_NPZ}"
 [ -n "$COCO_ANN" ] && echo "COCO ann:   ${COCO_ANN}"
 echo "=========================================="
@@ -119,5 +127,8 @@ fi
 
 python3 -u scripts/preprocess/precompute_sam.py \
     --seg_mode "$SEG_MODE" \
+    --stage2_input_dir "$INPUT_DIR" \
     --output_dir "$OUTPUT_DIR" \
+    --image_size "$IMAGE_SIZE" \
+    --patch_size "$PATCH_SIZE" \
     "${EXTRA_ARGS[@]}"
