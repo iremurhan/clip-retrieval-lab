@@ -1,8 +1,43 @@
-# CLIP-based Cross-Modal Retrieval Enhancement
+# CLIP-based Cross-Modal Retrieval
 
-CLIP-based image–text retrieval. Supports **Flickr30k** and **MS-COCO**. Optional pairwise similarity mining (caption, visual, consensus).
+> **Archived (November 2026).** This repository holds the code for my MSc thesis
+> *Cross-Modal Retrieval: Interventions, Diagnostics, and Representational Limits* (defended June 2026).
+> It is no longer maintained. `main` is the final state used for the thesis.
+
+Image–text retrieval with CLIP (ViT-B/16 and ViT-L/14-336) on **MS-COCO** and **Flickr30k**: fine-tuning
+interventions (augmentation, LLM caption rewrites, hard negatives, multi-label auxiliary loss, partial unfreezing,
+SAM-based segment features), plus diagnostics (SugarCrepe, MMVP-VLM, missing positives, alignment/uniformity,
+cross-dataset transfer).
+
+## Where things are
+
+| Path | Contents |
+|---|---|
+| `src/`, `run.py` | Model, data, losses, training and evaluation |
+| `configs/` | Base and dataset configs; `registry*.yaml` list the thesis experiment variants |
+| `scripts/` | SLURM and shell scripts (`train/`, `eval/`, `preprocess/`, `paper/` for the CLIP-B runs, `setup/` for Docker) |
+| `tools/` | Mining, zero-shot evaluation, caption-rewrite utilities |
+| `figs/`, `results/` | Thesis figure scripts and the generated figures, tables and data |
+| `docs/methodology_reproducibility_addendum.md` | Reproducibility notes |
+| `archive/`, `legacy/` | Superseded code kept for reference |
+
+Not included: datasets, checkpoints, and the LLM caption rewrites (`caption_rewrites_*`).
+
+## Tags
+
+| Tag | What it marks |
+|---|---|
+| `thesis-final` | Final thesis code (`main` differs only by this README) |
+| `archive/consolidate-v1` | Last thesis table and qualitative-example scripts |
+| `archive/b2-hard-negatives` | B2: hard-negative mining |
+| `archive/b4-multilabel` | B4: multi-label classification auxiliary loss |
+| `archive/b5-segment-aware`, `archive/b5-segment-only` | B5: SAM segment-map variants |
+| `v1.0-baseline`, `finalized/*`, `archived/*`, `archive/i*` | Earlier experiment lines |
 
 ---
+
+The original usage notes follow.
+
 
 ## Requirements
 
@@ -106,7 +141,7 @@ Logs: `~/experiments/results/{coco|flickr30k}/{job_id}/mining_log.out` (moved th
 ## Project layout
 
 ```
-tez_v2_clean/
+clip-retrieval-lab/
 ├── configs/          # YAML configs
 ├── src/              # Source (data, model, loss, train)
 ├── tools/            # Utilities (mining, analysis)
