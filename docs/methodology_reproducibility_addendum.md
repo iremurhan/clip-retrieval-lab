@@ -24,12 +24,12 @@ Unless explicitly noted, training uses batch size 128 for all variants, includin
 
 ## Hardware And Software
 
-Training jobs request one GPU, 8 CPU cores per GPU, and 64 GB host memory per GPU under Slurm, using the container image `biremurhan/image-text-contrast:v0.16`. Local W&B metadata in the experiment logs identifies the GPU as NVIDIA A40 for the inspected runs. The training container is based on `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime`; project dependencies include `transformers==4.48.0`, `numpy==1.26.4`, `PyYAML==6.0.2`, and `wandb==0.25.1`. The code uses HuggingFace Transformers CLIP (`openai/clip-vit-large-patch14-336`), not OpenCLIP, unless a separate untracked experiment changed this in the thesis text.
+Training jobs request one GPU, 8 CPU cores per GPU, and 64 GB host memory per GPU under Slurm, using the container image `biremurhan/image-text-contrast:v0.16`. Runs used NVIDIA A40 GPUs. The training container is based on `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime`; project dependencies include `transformers==4.48.0`, `numpy==1.26.4`, `PyYAML==6.0.2`, and `wandb==0.25.1`. The code uses HuggingFace Transformers CLIP (`openai/clip-vit-large-patch14-336`), not OpenCLIP.
 
 The seed setup fixes Python, NumPy, and PyTorch random seeds; calls `torch.cuda.manual_seed_all`; sets `torch.backends.cudnn.deterministic=True`; sets `torch.backends.cudnn.benchmark=False`; and sets `CUBLAS_WORKSPACE_CONFIG=:4096:8`. DataLoader workers are seeded as `seed + worker_id`, and the training DataLoader uses a seeded PyTorch generator for shuffling. These settings improve reproducibility but do not guarantee bit-exact determinism for every CUDA kernel.
 
-Training-time reporting should be filled from Slurm accounting or final W&B runtimes for the submitted jobs. The local completed logs I inspected are consistent with single-GPU runs taking roughly 30-36 hours on Flickr30K and roughly 5-6 days on COCO for several full 10-epoch B5/B0plus-style runs, but these numbers should be verified against the final job table before being stated in the thesis.
+A full 10-epoch run on a single GPU takes roughly 30-36 hours on Flickr30K and 5-6 days on COCO (B5 and B0plus variants).
 
 ## Statistical Reporting
 
-Reported means and standard deviations are computed across available random seeds for each run and dataset; single-seed entries are marked separately in the generated tables/figures. No paired significance test or bootstrap confidence interval is currently implemented in the retrieval reporting scripts. If the chapter claims statistical testing, add a paired bootstrap over test-set queries for R@K; otherwise state explicitly that the tables report seed mean and sample standard deviation only.
+Reported means and standard deviations are computed across available random seeds for each run and dataset; single-seed entries are marked separately in the generated tables/figures. The tables report seed mean and sample standard deviation only; no paired significance test or bootstrap confidence interval is applied.

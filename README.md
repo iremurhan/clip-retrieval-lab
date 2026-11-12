@@ -27,7 +27,7 @@ Not included: datasets, checkpoints, and the LLM caption rewrites (`caption_rewr
 
 | Tag | What it marks |
 |---|---|
-| `thesis-final` | Final thesis code (`main` differs only by this README) |
+| `thesis-final` | Final thesis code (`main` differs only in documentation) |
 | `archive/consolidate-v1` | Last thesis table and qualitative-example scripts |
 | `archive/b2-hard-negatives` | B2: hard-negative mining |
 | `archive/b4-multilabel` | B4: multi-label classification auxiliary loss |
